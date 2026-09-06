@@ -44,12 +44,13 @@ internal static class ObservationChecks
             var answer = await NetworkWorkflow.Run((name, args) =>
             {
                 calls.Add(name);
+                if (name == "probe_network_interfaces") return Task.FromResult(JsonSerializer.SerializeToElement(new { success = true, data = new { Interfaces = Array.Empty<object>() } }));
                 if (name == "get_network") return Task.FromResult(JsonSerializer.SerializeToElement(new { success = true, data = NetworkAssessment.Enrich(ContinuousChecks.Inventory("Disabled", "182.0.0.2", ["182.0.0.1"])) }));
                 if (name != "test_connection") throw new Exception("Alteração injustificada: " + name);
                 var host = JsonSerializer.SerializeToElement(args).GetProperty("host").GetString();
                 return Task.FromResult(JsonSerializer.SerializeToElement(new { success = true, data = new { host, dnsResolved = false, tcpConnected = !observeOnly && host == "8.8.8.8" } }));
             }, _ => { }, CancellationToken.None, allowChanges: !observeOnly);
-            assert(calls.Count == 3 && (observeOnly ? answer.Contains("sem alterar configurações") : answer.Contains("conectividade parcial") && answer.Contains("Nenhuma alteração")), observeOnly ? "Pedido de observação não configura DHCP mesmo com testes falhos" : "Fluxo do último log encerra com evidência parcial, sem DHCP nem consultas repetidas");
+            assert(calls.Count == 5 && (observeOnly ? answer.Contains("sem alterar configurações") : answer.Contains("conectividade parcial") && answer.Contains("Nenhuma alteração")), observeOnly ? "Pedido de observação não configura DHCP mesmo com testes falhos" : "Fluxo do último log encerra com evidência parcial, sem DHCP nem consultas repetidas");
         }
     }
 }

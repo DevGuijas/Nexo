@@ -21,6 +21,7 @@ $rows = @($adapters | ForEach-Object {
         Disabled = $disabled; CanEnable = $disabled; Virtual = [bool]$adapter.Virtual; Hardware = [bool]$adapter.HardwareInterface
         IpStackAvailable = $null -ne $ip; Dhcp = $(if($ip){[string]$ip.Dhcp}else{$null})
         InterfaceMetric = $(if($ip){$ip.InterfaceMetric}else{$null})
+        DefaultRouteMetric = ($routes | Where-Object {$_.InterfaceIndex -eq $index -and $_.DestinationPrefix -eq '0.0.0.0/0'} | Measure-Object -Property RouteMetric -Minimum).Minimum
         Addresses = @($addresses | Where-Object {$_.InterfaceIndex -eq $index} | Select-Object IPAddress,PrefixLength,@{N='PrefixOrigin';E={[string]$_.PrefixOrigin}},@{N='AddressState';E={[string]$_.AddressState}})
         HasSplitDefaultRoute = @($routes | Where-Object {$_.InterfaceIndex -eq $index -and $_.DestinationPrefix -in '0.0.0.0/1','128.0.0.0/1'}).Count -gt 0
         Gateways = @($routes | Where-Object {$_.InterfaceIndex -eq $index -and $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -ne '0.0.0.0'} | Select-Object -ExpandProperty NextHop -Unique)

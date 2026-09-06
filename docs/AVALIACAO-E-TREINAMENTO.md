@@ -6,6 +6,8 @@ Na versão 1.5.0, a avaliação também revelou escolha de ferramentas irrelevan
 
 **Não é necessário deixar o PC treinando agora.** A próxima etapa de treinamento exige um conjunto revisado de exemplos e uma avaliação separada. Antes de investir horas de GPU, devemos medir vários incidentes e comparar o modelo atual com candidatos usando as mesmas ferramentas. Os testes existentes são uma base de regressão, não dados suficientes para treinar um especialista geral.
 
+Os incidentes da versão 1.5.0 também revelaram ausência de teste por interface e espera insuficiente pela recuperação/DHCP. A correção 1.5.1 está no controlador e no executor. Treinar o modelo não adicionaria essas capacidades ao Windows. `MultiInterfaceChecks.cs` mede seleção entre dois gateways, recuperação atrasada, sucesso intermitente, identidade alterada e cancelamento. A consulta `--interface-probe-live` valida sockets vinculados às interfaces no Windows real, somente em leitura; alterações continuam sendo simuladas.
+
 ## Processo proposto
 
 1. **Montar um laboratório de falhas reproduzíveis.** Em VMs/computadores de teste, reproduzir interface desativada, cabo desconectado, DHCP indisponível, DNS incorreto, câmera bloqueada, serviço de áudio parado, Bluetooth desabilitado e fila de impressão travada. Registrar o estado inicial e a forma de restaurá-lo.

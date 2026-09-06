@@ -11,7 +11,7 @@ public interface IAgentTools
     Task<string> Execute(string name, JsonElement args, CancellationToken token);
 }
 
-public sealed class AgentService(Store store, IAgentTools tools, HttpClient? client = null)
+public sealed class AgentService(Store store, IAgentTools tools, HttpClient? client = null, Func<int, CancellationToken, Task>? workflowDelay = null)
 {
     private static readonly HttpClient shared = new() { Timeout = TimeSpan.FromMinutes(3) };
     public const string DefaultModel = "qwen3:8b";
@@ -35,7 +35,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         Ao investigar falta de conexão, procure Disabled=true no inventário, mesmo se IpStackAvailable=false.
         Não confunda Disconnected com Disabled. Se houver uma única interface Disabled candidata ao problema,
         ofereça sua ativação chamando enable_network_adapter, sem inventar IP, DNS ou gateway.
-        Se houver várias candidatas e o usuário não identificou qual, pergunte qual ele pretende usar.
+        Se houver várias candidatas, use probe_network_interfaces e compare o inventário. Não pergunte nomes ou índices de interfaces ao usuário.
         IMPORTANTE: enable_network_adapter PRIMEIRO exibe a confirmação nativa do aplicativo.
         Chamar essa ferramenta significa propor a ação ao usuário, não pular o consentimento.
         Portanto, NÃO encerre com 'Posso ativar?' ou 'Deseja que eu ative?' quando já há uma única
@@ -58,7 +58,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         limpar DNS não corrige o endereçamento. Se Assessment indicar DhcpCandidate, explique a
         evidência e proponha Obter um endereço IP automaticamente chamando set_ipv4(mode=dhcp)
         para a única interface candidata permitida: o usuário aceita ou recusa na confirmação nativa.
-        Se várias interfaces forem candidatas, pergunte qual usa para internet. Nunca altere todas.
+        Se várias interfaces forem candidatas, teste cada saída com probe_network_interfaces. Não altere interfaces que respondem nem todas por tentativa.
         Se IP fixo parece coerente mas há falha de conexão, verifique conectividade antes de atribuir
         a falha ao DNS. Se não sabe se a rede usa DHCP, pergunte se antes obtinha IP automaticamente.
         Não afirme que há servidor DHCP disponível sem evidência. DHCP mantém o DNS configurado.
@@ -157,7 +157,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 history.Add(new AgentMessage { role = "tool", tool_name = name, content = output });
                 record(ToolCatalog.Label(name), output); store.Log(actor, "Diagnóstico guiado: " + name + " · " + output[..Math.Min(output.Length, 1600)]); store.Save();
                 return JsonSerializer.Deserialize<JsonElement>(output);
-            }, progress.Report, token, allowChanges: !observationOnly);
+            }, progress.Report, token, allowChanges: !observationOnly, delay: workflowDelay);
             return Finish(answer);
         }
         var allowFlushDns = SupportService.Topic(userRequest) != "network" || System.Text.RegularExpressions.Regex.IsMatch(userRequest, @"(?i)(limp\w*.*(cache|dns)|flush_dns)");
@@ -197,6 +197,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             history.Add(new AgentMessage { role = "assistant", content = content, tool_calls = calls });
             var repeatedFailure = false;
             var deniedByUser = false;
+            var networkRecoveryNeeded = false;
             string? networkFailure = null;
             foreach (var call in calls.Value.EnumerateArray())
             {
@@ -218,6 +219,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 try
                 {
                     if (deniedByUser) throw new InvalidOperationException("Etapa cancelada após recusa do usuário; nenhuma ação adicional executada.");
+                    if (networkRecoveryNeeded && ToolCatalog.IsMutation(name)) throw new InvalidOperationException("É necessário aguardar e verificar a mudança de rede anterior antes de outra alteração.");
                     if (networkFailure != null) throw new InvalidOperationException("Etapa interrompida após falha de alteração da rede. Verifique o resultado e a restauração antes de novas ações.");
                     if (readOnly && !ToolCatalog.IsReadOnly(name)) throw new InvalidOperationException("Este pedido permite somente leitura. Não proponha mudanças; conclua com as consultas solicitadas.");
                     if (observationOnly && ToolCatalog.IsMutation(name)) throw new InvalidOperationException("O pedido atual é acompanhar uma reconexão. Consulte o alvo e observe a mudança de estado; não reinicie serviços nem altere configurações nesta etapa.");
@@ -240,6 +242,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 using (var outcome = JsonDocument.Parse(result))
                 {
                     var root = outcome.RootElement;
+                    if (name is "enable_network_adapter" or "set_ipv4" or "set_dns" && root.TryGetProperty("success", out var completed) && completed.ValueKind == JsonValueKind.True && !InvestigationEvidence.ExplicitlyUnchanged(root)) networkRecoveryNeeded = true;
                     if (name is "get_network" or "diagnose_device" && root.TryGetProperty("success", out var observed) && observed.ValueKind == JsonValueKind.True) allowWatch = true;
                     if (name == "test_connection" && arguments.TryGetProperty("host", out var host) && System.Net.IPAddress.TryParse(host.GetString(), out _) && root.TryGetProperty("data", out var data) && data.TryGetProperty("tcpConnected", out var connected) && connected.ValueKind == JsonValueKind.True) allowFlushDns = true;
                     if (name is "set_ipv4" or "set_dns" && root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False && root.TryGetProperty("backup", out _))
@@ -276,6 +279,24 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             store.Save();
             if (networkFailure != null) return Finish(networkFailure);
             if (deniedByUser) return Finish("Você recusou a alteração proposta. Essa alteração não foi executada e parei esta etapa. Os resultados já obtidos estão registrados acima; a resolução do problema ainda não foi confirmada.");
+            if (networkRecoveryNeeded)
+            {
+                // Verification is mandatory even when the model chose the mutation outside
+                // the common incident runbook. It cannot finish on 'adapter enabled' alone.
+                return Finish(await NetworkWorkflow.Run(async (name, args) =>
+                {
+                    token.ThrowIfCancellationRequested(); progress.Report(ToolCatalog.Label(name));
+                    var parameters = JsonSerializer.SerializeToElement(args);
+                    history.Add(new AgentMessage { role = "assistant", tool_calls = JsonSerializer.SerializeToElement(new[] { new { function = new { name, arguments = parameters } } }) });
+                    string output;
+                    try { output = await tools.Execute(name, parameters, token); }
+                    catch (Exception ex) { output = JsonSerializer.Serialize(new { success = false, error = ex.Message }); }
+                    history.Add(new AgentMessage { role = "tool", tool_name = name, content = output });
+                    record(ToolCatalog.Label(name), output); store.Log(actor, "Verificação após mudança: " + name + " · " + output[..Math.Min(output.Length, 1600)]); store.Save();
+                    token.ThrowIfCancellationRequested();
+                    return JsonSerializer.Deserialize<JsonElement>(output);
+                }, progress.Report, token, allowChanges: false, delay: workflowDelay, afterChange: true));
+            }
             if (repeatedFailure)
             {
                 var stopped = evidence.Summary("Parei os testes repetidos sem nova evidência. Me diga qual aplicativo ou atividade ainda apresenta o problema, para direcionarmos a próxima verificação.");
@@ -318,7 +339,7 @@ public static class LocalModel
 public static class ToolCatalog
 {
     public static bool IsMutation(string name) => !IsReadOnly(name) && name is not ("wait_for_reconnect" or "prepare_restart");
-    public static bool IsReadOnly(string name) => name is "finish_support" or "ask_user" or "get_network" or "test_connection" or "diagnose_device" or "get_printers" or "get_services" or "get_recent_errors" or "get_processes" or "scan_driver_updates" or "get_boot_status";
+    public static bool IsReadOnly(string name) => name is "finish_support" or "ask_user" or "get_network" or "test_connection" or "diagnose_device" or "get_printers" or "get_services" or "get_recent_errors" or "get_processes" or "scan_driver_updates" or "get_boot_status" or "probe_network_interfaces";
     public static object[] ForScope(bool readOnly, bool allowFlushDns = true, bool allowWatch = true, bool allowMutations = true) => Definitions.Where(d => { var name = JsonSerializer.SerializeToElement(d).GetProperty("function").GetProperty("name").GetString()!; return (!readOnly || IsReadOnly(name)) && (allowFlushDns || name != "flush_dns") && (allowWatch || name != "wait_for_reconnect") && (allowMutations || !IsMutation(name)); }).ToArray();
     private static object Str(string description) => new { type = "string", description };
     private static object Int(string description) => new { type = "integer", description };
@@ -331,6 +352,7 @@ public static class ToolCatalog
         Tool("ask_user", "Pausa apenas para informação indispensável, escolha entre alvos ambíguos ou teste manual pelo usuário. Não pede Ok para continuar nem permissão para ferramentas; correções têm confirmação no executor.", new() { ["message"] = Str("Pergunta objetiva ao usuário"), ["reason"] = new { type = "string", @enum = new[] { "missing_information", "ambiguous_target", "manual_test" } } }, ["message", "reason"]),
         Tool("get_network", "Consulta adaptadores, índice, IPv4, prefixo, gateway, DHCP, DNS e perfil de rede deste PC."),
         Tool("enable_network_adapter", "Habilita uma interface de rede administrativamente desativada (Disabled=true), inclusive vEthernet/Hyper-V, sem reconfigurar IP/DNS. Exige get_network prévio e confirmação do usuário. Depois consulte a rede novamente.", new() { ["interface_index"] = Int("Índice exato da interface Disabled obtido em get_network") }, ["interface_index"]),
+        Tool("probe_network_interfaces", "Consulta e testa TCP IPv4 por cada interface, com origem vinculada. Não pergunte nomes de interfaces ao usuário; use esta comparação antes de escolher uma correção.", new(), []),
         Tool("test_connection", "Testa resolução DNS e uma conexão TCP ao destino informado. Não altera configurações.", new() { ["host"] = Str("Hostname ou IPv4 que o usuário está tentando acessar"), ["port"] = Int("Porta TCP, por exemplo 443 para HTTPS") }, ["host", "port"]),
         Tool("diagnose_device", "Consulta estado e IDs exatos de câmera, áudio, Bluetooth, impressora ou sistema.", new() { ["topic"] = new { type = "string", @enum = new[] { "camera", "audio", "bluetooth", "printer", "system" } } }, ["topic"]),
         Tool("get_printers", "Consulta impressoras instaladas, drivers, portas e estado das filas sem ler os documentos."),
@@ -349,5 +371,5 @@ public static class ToolCatalog
         Tool("scan_driver_updates", "Busca drivers não instalados oferecidos pelo Windows Update. Pode demorar alguns minutos. Não instala."),
         Tool("install_driver_update", "Baixa e instala um driver específico do Windows Update previamente consultado, com autorização. Não reinicia o PC.", new() { ["update_id"] = Str("Id exato de scan_driver_updates, relacionado ao dispositivo com problema") }, ["update_id"])
     ];
-    public static string Label(string name) => name switch { "wait_for_reconnect" => "Acompanhando a reconexão do dispositivo…", "prepare_restart" => "Preparando a retomada após reiniciar…", "get_boot_status" => "Verificando a inicialização do Windows…", "get_network" => "Verificando IP, DNS, gateway e adaptadores…", "enable_network_adapter" => "Ativando e verificando a interface de rede…", "test_connection" => "Testando resolução DNS e conexão…", "diagnose_device" => "Verificando dispositivos e sistema…", "get_printers" => "Verificando impressoras e filas…", "get_services" => "Consultando serviços do Windows…", "get_recent_errors" => "Consultando erros recentes do sistema…", "get_processes" => "Verificando consumo de memória dos aplicativos…", "set_dns" => "Configurando os servidores DNS…", "set_ipv4" => "Configurando o endereço IPv4…", "flush_dns" => "Limpando cache DNS…", "enable_camera" or "enable_device" => "Habilitando e verificando o dispositivo…", "restart_device" => "Reiniciando e verificando o dispositivo…", "allow_camera" => "Ajustando a permissão da câmera…", "restart_service" => "Reiniciando e verificando o serviço…", "clear_print_queue" => "Limpando a fila da impressora…", "scan_driver_updates" => "Buscando drivers no Windows Update…", "install_driver_update" => "Baixando e instalando o driver selecionado…", _ => "Validando ferramenta…" };
+    public static string Label(string name) => name switch { "probe_network_interfaces" => "Testando as interfaces de rede individualmente…", "wait_for_reconnect" => "Acompanhando a reconexão do dispositivo…", "prepare_restart" => "Preparando a retomada após reiniciar…", "get_boot_status" => "Verificando a inicialização do Windows…", "get_network" => "Verificando IP, DNS, gateway e adaptadores…", "enable_network_adapter" => "Ativando e verificando a interface de rede…", "test_connection" => "Testando resolução DNS e conexão…", "diagnose_device" => "Verificando dispositivos e sistema…", "get_printers" => "Verificando impressoras e filas…", "get_services" => "Consultando serviços do Windows…", "get_recent_errors" => "Consultando erros recentes do sistema…", "get_processes" => "Verificando consumo de memória dos aplicativos…", "set_dns" => "Configurando os servidores DNS…", "set_ipv4" => "Configurando o endereço IPv4…", "flush_dns" => "Limpando cache DNS…", "enable_camera" or "enable_device" => "Habilitando e verificando o dispositivo…", "restart_device" => "Reiniciando e verificando o dispositivo…", "allow_camera" => "Ajustando a permissão da câmera…", "restart_service" => "Reiniciando e verificando o serviço…", "clear_print_queue" => "Limpando a fila da impressora…", "scan_driver_updates" => "Buscando drivers no Windows Update…", "install_driver_update" => "Baixando e instalando o driver selecionado…", _ => "Validando ferramenta…" };
 }

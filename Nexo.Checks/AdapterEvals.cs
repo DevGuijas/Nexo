@@ -14,12 +14,13 @@ internal static class AdapterEvals
         })
         {
             var conversation = new Conversation { UserId = actor.Id, Entries = [new Entry { Role = "user", Text = scenario.Prompt }] };
-            var agent = new AgentService(store, scenario);
+            var agent = new AgentService(store, scenario, workflowDelay: (_, _) => Task.CompletedTask);
             var answer = await agent.Run(actor, conversation, new Progress<string>(), (name, _) => Console.WriteLine("  " + name), CancellationToken.None);
             Console.WriteLine("  Resposta: " + answer);
             var controller = NetworkWorkflow.Matches(scenario.Prompt) ? "Fluxo de rede" : "Modelo real";
             assert(scenario.EnableCalls == 1 && scenario.NetworkCalls >= (scenario.Deny ? 1 : 2) && !scenario.UnexpectedAction, controller + ": " + scenario.Id + " · observar, selecionar, agir e verificar");
             assert(!answer.Contains("não conseguiu selecionar") && !answer.Contains("limite de etapas"), controller + " conclui o atendimento: " + scenario.Id);
+            if (!scenario.Deny) assert(scenario.Tests >= 2, "Ativação exige verificação estável também fora do fluxo comum: " + scenario.Id);
         }
     }
     private sealed class Scenario(string id, int index, string adapterName, string prompt, bool deny) : IAgentTools
@@ -27,7 +28,7 @@ internal static class AdapterEvals
         public string Id => id;
         public string Prompt => prompt;
         public bool Deny => deny;
-        public int EnableCalls; public int NetworkCalls; public bool UnexpectedAction;
+        public int EnableCalls; public int NetworkCalls; public int Tests; public bool UnexpectedAction;
         private bool enabled;
         public Task<string> Execute(string name, JsonElement args, CancellationToken token)
         {
@@ -50,7 +51,7 @@ internal static class AdapterEvals
 
                 string awaitResult() => Execute("get_network", JsonSerializer.SerializeToElement(new { }), token).GetAwaiter().GetResult();
             }
-            if (name == "test_connection") return Task.FromResult(WindowsTools.Ok(new { dnsResolved = enabled, tcpConnected = enabled }));
+            if (name == "test_connection") { Tests++; return Task.FromResult(WindowsTools.Ok(new { dnsResolved = enabled, tcpConnected = enabled })); }
             UnexpectedAction = true; throw new InvalidOperationException("Ferramenta não esperada neste cenário: " + name);
         }
     }

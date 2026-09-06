@@ -11,7 +11,7 @@ internal static class InteractionEvals
         {
             var fake = new InteractionTools(device);
             var conversation = new Conversation { UserId = actor.Id, Entries = [new Entry { Role = "user", Text = device ? "Meu fone USB para quando mexo no cabo. Pode acompanhar eu desconectar e conectar o fone?" : "Minha Ethernet está com cabo desconectado. Quero conectar o cabo e que você detecte quando fiz isso e teste a conexão." }] };
-            var answer = await new AgentService(store, fake).Run(actor, conversation, new Progress<string>(), (label, _) => Console.WriteLine(label), CancellationToken.None);
+            var answer = await new AgentService(store, fake, workflowDelay: (_, _) => Task.CompletedTask).Run(actor, conversation, new Progress<string>(), (label, _) => Console.WriteLine(label), CancellationToken.None);
             Console.WriteLine(answer);
             assert(fake.Watched && (device ? answer.Contains("test", StringComparison.OrdinalIgnoreCase) || answer.Contains("funcion", StringComparison.OrdinalIgnoreCase) : fake.ReadsAfter > 0) && !fake.Unexpected, "Reconexão e verificação funcional: " + (device ? "USB com Qwen" : "cabo com fluxo guiado"));
         }
@@ -48,7 +48,7 @@ internal static class InteractionEvals
                 if (Watched || (device ? args.GetProperty("device_id").GetString() != "USB\\HEADSET_TEST" : args.GetProperty("interface_index").GetInt32() != 17)) { Unexpected = true; throw new Exception("Alvo incorreto"); }
                 Watched = true; return Task.FromResult(WindowsTools.Ok(new PhysicalResult(true, true, false, "Windows detectou desconexão e retorno do mesmo alvo; ainda precisa de teste funcional.")));
             }
-            if (name == "test_connection") return Task.FromResult(WindowsTools.Ok(new { host = args.GetProperty("host").GetString(), dnsResolved = true, tcpConnected = true }));
+            if (name == "test_connection") return Task.FromResult(WindowsTools.Ok(new { host = args.GetProperty("host").GetString(), dnsResolved = Watched, tcpConnected = Watched }));
             Unexpected = true; throw new Exception("Alteração indevida: " + name);
         }
     }

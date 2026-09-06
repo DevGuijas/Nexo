@@ -11,7 +11,7 @@ internal static class NetworkEvals
         {
             var conversation = ContinuousChecks.Conversation(actor);
             conversation.Entries[0].Text = "Estou sem internet.";
-            var answer = await new AgentService(store, scenario).Run(actor, conversation, new Progress<string>(), (name, _) => Console.WriteLine("  " + name), CancellationToken.None);
+            var answer = await new AgentService(store, scenario, workflowDelay: (_, _) => Task.CompletedTask).Run(actor, conversation, new Progress<string>(), (name, _) => Console.WriteLine("  " + name), CancellationToken.None);
             Console.WriteLine("  " + scenario.Id + ": " + answer);
             if (answer.Contains("não conseguiu")) foreach (var entry in conversation.AgentHistory.TakeLast(5)) Console.WriteLine("    TRACE " + entry.role + ": " + entry.content + " " + entry.tool_calls);
             assert(scenario.Reads > 0 && scenario.Changes == (scenario.Valid ? 0 : 1) && !scenario.Unexpected,
@@ -30,6 +30,11 @@ internal static class NetworkEvals
         private bool changed;
         public Task<string> Execute(string name, JsonElement args, CancellationToken token)
         {
+            if (name == "probe_network_interfaces")
+            {
+                using var snapshot = JsonDocument.Parse(Execute("get_network", args, token).GetAwaiter().GetResult());
+                return Task.FromResult(WindowsTools.Ok(new { Interfaces = snapshot.RootElement.GetProperty("data").GetProperty("Adapters").EnumerateArray().Select(a => new { Index = a.GetProperty("Index").GetInt32(), Guid = a.GetProperty("Guid").GetString(), Name = a.GetProperty("Name").GetString(), ProbeCompleted = a.GetProperty("Gateways").GetArrayLength() > 0, TcpConnected = changed || valid }).ToArray() }));
+            }
             if (name == "get_network")
             {
                 Reads++; if (changed) ReadsAfterChange++;

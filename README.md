@@ -4,7 +4,19 @@ Aplicativo C# / WPF com IA local que escolhe ferramentas do Windows, executa aç
 
 ## Abrir
 
-Execute `artifacts/Nexo-1.5.0/Nexo.exe`. A barra da janela deve mostrar **Nexo 1.5.0**. Feche a versão anterior antes de abrir. Requer **.NET Desktop Runtime 8 para Windows x64**. Para distribuir, extraia todos os arquivos de `artifacts/Nexo-1.5.0-Windows.zip` na mesma pasta.
+Execute `artifacts/Nexo-1.5.1/Nexo.exe`. A barra da janela deve mostrar **Nexo 1.5.1**. Feche a versão anterior antes de abrir. Requer **.NET Desktop Runtime 8 para Windows x64**. Para distribuir, extraia todos os arquivos de `artifacts/Nexo-1.5.1-Windows.zip` na mesma pasta.
+
+### Correção 1.5.1 — múltiplas interfaces e recuperação demorada
+
+- O diagnóstico de falta de internet compara as interfaces automaticamente, sem perguntar nomes/índices ao usuário. O protocolo de conversa também rejeita essa pergunta técnica do modelo. Perguntas sobre sintomas observáveis continuam disponíveis.
+- Nova consulta `probe_network_interfaces`: inventaria todas as interfaces e testa as saídas IPv4 utilizáveis com endereço de origem e índice de saída vinculados ao socket (`IP_UNICAST_IF`). Testa dois destinos TCP; não confunde resposta de uma interface com a de outra. Interfaces sem gateway/endereço ou sem link recebem indicação de teste externo indisponível. DNS global continua separado. Isso não testa todas as funções de VPN, IPv6, proxy ou redes internas.
+- A seleção considera resultados individuais, identidade e métricas das rotas. Uma interface que respondeu não é candidata a DHCP; interfaces gerenciadas continuam protegidas. Havendo candidatas com falha e IP fixo, apresenta uma proposta por vez, com autorização e restauração. Falhar em destinos externos não prova que uma rede isolada esteja mal configurada.
+- Após ativação, reconexão ou alteração IPv4, atualiza o inventário e acompanha a recuperação em uma janela limitada, com intervalos de cinco segundos. Exige duas verificações DNS/TCP positivas consecutivas para concluir recuperação estável. Um êxito isolado ou o estado “habilitada” não bastam. Cancelamento continua disponível.
+- DHCP agora solicita renovação explicitamente para o GUID/índice correto e aguarda até 60 segundos por concessão utilizável. Registra o retorno da renovação; a confirmação depende do endereço realmente observado. Sem concessão, restaura e explica a falha. Isso não cria um servidor DHCP nem garante obter endereço em toda rede.
+
+O registro dos prints mostrou ativação terminando em `Disconnected`, seguida de investigação cedo demais; na tentativa IPv4, houve mudança e reversão após expirar a espera anterior de 20 segundos. A versão nova trata esses dois caminhos. Foram adicionadas regressões para dois gateways, ativação demorada, sucesso intermitente, identidade alterada e cancelamento; a sondagem por interface também foi executada em leitura no PC real. Aplicação DHCP e falhas de recuperação continuam validadas em simulação, sem reconfigurar a rede real neste desenvolvimento.
+
+Referências técnicas: [Microsoft — IP_UNICAST_IF](https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-ip-socket-options) e [Microsoft — RenewDHCPLease](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/renewdhcplease-method-in-class-win32-networkadapterconfiguration).
 
 ### Novidade 1.5.0 — observação, verificação e retomada
 
@@ -114,7 +126,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File Nexo.Checks/NetworkAdapterCh
 dotnet run --project Nexo.Checks -- --adapter-evals
 dotnet run --project Nexo.Checks -- --network-evals
 dotnet run --project Nexo.Checks -- --interaction-evals
-dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -o artifacts/Nexo-1.5.0
+dotnet run --project Nexo.Checks -- --interface-probe-live
+dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -o artifacts/Nexo-1.5.1
 ```
 
 `--diagnostics` consulta o Windows real. `--agent-live` usa o modelo instalado e verifica chamadas reais e recusa de correções, sem autorizar alterações. A suíte PowerShell substitui comandos de rede por simuladores e testa aplicação, falha, cancelamento e timeout com restauração.

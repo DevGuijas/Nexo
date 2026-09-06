@@ -43,6 +43,15 @@ try
     await AgentChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);
+    await MultiInterfaceChecks.Run(Assert);
+    if (args.Contains("--interface-probe-live"))
+    {
+        var probeTools = new WindowsTools(store, admin, _ => throw new Exception("Uma leitura solicitou alteração"), new Progress<string>());
+        using var result = System.Text.Json.JsonDocument.Parse(await probeTools.Execute("probe_network_interfaces", System.Text.Json.JsonSerializer.SerializeToElement(new { }), CancellationToken.None));
+        var reports = result.RootElement.GetProperty("data").GetProperty("Interfaces").EnumerateArray().ToArray();
+        Console.WriteLine(result.RootElement.GetRawText());
+        Assert(reports.Length > 0 && reports.Any(r => r.GetProperty("ProbeCompleted").GetBoolean()), "Sondagem real somente leitura vincula a saída à interface");
+    }
     if (args.Contains("--diagnostics"))
     {
         foreach (var topic in new[] { "camera", "audio", "network", "system" })

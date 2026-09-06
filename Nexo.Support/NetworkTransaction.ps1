@@ -3,6 +3,7 @@ $request = $requestJson | ConvertFrom-Json
 $interfaceIndex = [int]$request.Index
 $before = $null
 $changed = $false
+$renewal = $null
 function Save-Result($filename, $value) {
     $destination = Join-Path $operationDir $filename
     $temporary = $destination + '.tmp'
@@ -97,6 +98,13 @@ try {
         Clear-ManualIP
         if ($request.Mode -eq 'dhcp') {
             Set-NetIPInterface -InterfaceIndex $interfaceIndex -AddressFamily IPv4 -Dhcp Enabled
+            # Enabling DHCP does not guarantee immediate lease acquisition. Renew only
+            # the observed adapter, never all adapters (VPN/Hyper-V may coexist).
+            try {
+                $config = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$interfaceIndex" -ErrorAction Stop | Where-Object {[guid]$_.SettingID -eq [guid]$before.Guid})
+                if ($config.Count -ne 1) { throw 'Não foi encontrada configuração DHCP com a mesma identidade.' }
+                $renewal = Invoke-CimMethod -InputObject $config[0] -MethodName RenewDHCPLease -OperationTimeoutSec 10 -ErrorAction Stop
+            } catch { $renewal = @{error=$_.Exception.Message} }
         } else {
             Set-NetIPInterface -InterfaceIndex $interfaceIndex -AddressFamily IPv4 -Dhcp Disabled
             # A previous lease can remain briefly when disabling DHCP.
@@ -110,9 +118,10 @@ try {
     Start-Sleep -Seconds 3
     $after = Snapshot
     if ($request.Action -eq 'set_ipv4' -and $request.Mode -eq 'dhcp') {
-        $leaseDeadline = (Get-Date).AddSeconds(20)
+        $leaseDeadline = (Get-Date).AddSeconds(60)
         while (-not @($after.Addresses | Where-Object { [string]$_.PrefixOrigin -in 'Dhcp','3' -and [string]$_.AddressState -in 'Preferred','4' -and $_.IPAddress -notlike '169.254.*' }).Count) {
-            if ((Get-Date) -ge $leaseDeadline) { throw 'DHCP foi habilitado, mas não forneceu um IPv4 utilizável no prazo. Restaurando a configuração anterior; isso não confirma conexão.' }
+            if ((Test-Path -LiteralPath (Join-Path $operationDir 'decision.txt')) -and (Get-Content -LiteralPath (Join-Path $operationDir 'decision.txt') -Raw).Trim() -eq 'rollback') { throw 'Aquisição DHCP cancelada. Restaurando a configuração anterior.' }
+            if ((Get-Date) -ge $leaseDeadline) { throw 'DHCP foi habilitado e a renovação foi solicitada, mas não houve IPv4 utilizável após a espera de até 60 segundos. Restaurando a configuração anterior; o servidor DHCP, link ou porta podem estar indisponíveis.' }
             Start-Sleep -Milliseconds 500
             $after = Snapshot
         }
@@ -130,7 +139,7 @@ try {
     while (-not (Test-Path -LiteralPath $decisionPath) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
     $keep = (Get-Date) -lt $deadline -and (Test-Path -LiteralPath $decisionPath) -and (Get-Content -LiteralPath $decisionPath -Raw).Trim() -eq 'keep'
     if ($keep) {
-        Save-Result 'result.json' @{success=$true;message='Configuração aplicada, estado consultado e permanência confirmada pelo usuário.';before=$before;after=(Snapshot)}
+        Save-Result 'result.json' @{success=$true;message='Configuração aplicada, estado consultado e permanência confirmada pelo usuário.';before=$before;after=(Snapshot);renewal=$renewal}
     } else {
         Restore-Network
         Save-Result 'result.json' @{success=$false;reverted=$true;message='Configuração anterior restaurada por cancelamento ou ausência de confirmação.';after=(Snapshot)}
@@ -140,5 +149,5 @@ try {
     $reverted = $false
     $rollbackError = $null
     if ($changed -and $before) { try { Restore-Network; $reverted=$true } catch { $rollbackError=$_.Exception.Message } }
-    Save-Result 'result.json' @{success=$false;error=$failure;changed=$changed;reverted=$reverted;rollbackError=$rollbackError;backup=(Join-Path $operationDir 'before.json')}
+    Save-Result 'result.json' @{success=$false;error=$failure;changed=$changed;reverted=$reverted;rollbackError=$rollbackError;renewal=$renewal;backup=(Join-Path $operationDir 'before.json')}
 }

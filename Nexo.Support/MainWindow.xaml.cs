@@ -22,7 +22,7 @@ public partial class MainWindow : Window
     private WrapPanel? quickReplyPanel;
     public MainWindow(Store store)
     {
-        InitializeComponent(); Title = "Nexo 1.5.0 • Suporte inteligente"; this.store = store; support = new SupportService(store);
+        InitializeComponent(); Title = "Nexo 1.5.1 • Suporte inteligente"; this.store = store; support = new SupportService(store);
         SizeChanged += (_, _) => ControlHint.Visibility = ActualHeight < 820 ? Visibility.Collapsed : Visibility.Visible;
         Closing += (_, e) => { if (busy) { e.Cancel = true; MessageBox.Show(this, "Aguarde a operação terminar ou cancele a verificação antes de fechar.", "Atendimento em andamento"); } };
     }

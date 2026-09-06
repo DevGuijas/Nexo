@@ -82,6 +82,9 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 }
             case "test_connection":
                 return await TestConnection(Value(args, "host"), Number(args, "port"), token);
+            case "probe_network_interfaces":
+                using (var current = JsonDocument.Parse(await Execute("get_network", JsonSerializer.SerializeToElement(new { }), token)))
+                    return Ok(await InterfaceProbe.Run(current.RootElement.GetProperty("data"), token));
             case "get_boot_status":
             case "prepare_restart":
                 var boot = await SupportService.Powershell("[pscustomobject]@{BootId=(Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime().ToString('o')} | ConvertTo-Json -Compress", token);

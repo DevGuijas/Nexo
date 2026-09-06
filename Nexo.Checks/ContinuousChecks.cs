@@ -24,8 +24,9 @@ internal static class ContinuousChecks
         assert((await RunModel(textControl, fake, Conversation(actor))) == "Resultado confirmado.", "Controle explícito em JSON aceito quando Qwen não emite tool_calls");
         assert(AgentProtocol.ParseControl("set_ipv4 {\"mode\":\"dhcp\"}") == null && AgentProtocol.ParseControl("finish_support {oops}") == null, "Parser de controle não converte texto em ação do Windows nem aceita JSON inválido");
 
-        using var question = new ScriptedModel([Call("ask_user", new { reason = "ambiguous_target", message = "Qual interface você usa para internet: Ethernet ou Wi-Fi?" })]);
-        assert((await RunModel(question, fake, Conversation(actor))).Contains("Qual interface") && question.Calls == 1, "Ambiguidade real pausa para informação do usuário");
+        using var question = new ScriptedModel([Call("ask_user", new { reason = "missing_information", message = "O problema acontece em todos os sites ou apenas no aplicativo?" })]);
+        assert((await RunModel(question, fake, Conversation(actor))).Contains("todos os sites") && question.Calls == 1, "Informação que depende do usuário pode pausar a investigação");
+        assert(AgentProtocol.Validate("ask_user", JsonSerializer.SerializeToElement(new { reason = "ambiguous_target" }), "Qual interface você usa para internet: Ethernet ou Wi-Fi?") != null, "Modelo não pode transferir escolha técnica da interface ao usuário");
         using var approval = new ScriptedModel([
             Call("ask_user", new { reason = "missing_information", message = "Deseja que eu consulte o DNS?" }),
             Call("get_network", new { }),
