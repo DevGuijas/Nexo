@@ -1,0 +1,102 @@
+{
+  "Adapters": [
+    {
+      "Index": 12,
+      "Guid": "00000000-0000-0000-0000-000000000012",
+      "Name": "vEthernet (Default Switch)",
+      "Description": "Hyper-V Virtual Ethernet Adapter",
+      "Status": "Up",
+      "AdminStatus": "Up",
+      "MediaState": "Connected",
+      "Disabled": false,
+      "CanEnable": false,
+      "Virtual": true,
+      "Hardware": false,
+      "IpStackAvailable": true,
+      "Dhcp": "Disabled",
+      "InterfaceMetric": 5000,
+      "Addresses": [
+        {
+          "IPAddress": "192.168.160.1",
+          "PrefixLength": 20,
+          "PrefixOrigin": "Manual",
+          "AddressState": "Preferred"
+        }
+      ],
+      "HasSplitDefaultRoute": false,
+      "Gateways": [],
+      "Dns": [],
+      "Profile": []
+    },
+    {
+      "Index": 4,
+      "Guid": "00000000-0000-0000-0000-000000000004",
+      "Name": "Ethernet",
+      "Description": "Realtek Gaming 2.5GbE Family Controller",
+      "Status": "Up",
+      "AdminStatus": "Up",
+      "MediaState": "Connected",
+      "Disabled": false,
+      "CanEnable": false,
+      "Virtual": false,
+      "Hardware": true,
+      "IpStackAvailable": true,
+      "Dhcp": "Disabled",
+      "InterfaceMetric": 25,
+      "Addresses": [
+        {
+          "IPAddress": "199.168.0.1",
+          "PrefixLength": 24,
+          "PrefixOrigin": "Manual",
+          "AddressState": "Preferred"
+        }
+      ],
+      "HasSplitDefaultRoute": false,
+      "Gateways": [],
+      "Dns": [
+        "8.8.8.8",
+        "1.1.1.1"
+      ],
+      "Profile": [
+        "Public"
+      ]
+    },
+    {
+      "Index": 3,
+      "Guid": "00000000-0000-0000-0000-000000000003",
+      "Name": "vEthernet (Ponte_Mikrotik_GLPI)",
+      "Description": "Hyper-V Virtual Ethernet Adapter #2",
+      "Status": "Up",
+      "AdminStatus": "Up",
+      "MediaState": "Connected",
+      "Disabled": false,
+      "CanEnable": false,
+      "Virtual": true,
+      "Hardware": false,
+      "IpStackAvailable": true,
+      "Dhcp": "Disabled",
+      "InterfaceMetric": 25,
+      "Addresses": [
+        {
+          "IPAddress": "182.0.0.3",
+          "PrefixLength": 16,
+          "PrefixOrigin": "Manual",
+          "AddressState": "Preferred"
+        }
+      ],
+      "HasSplitDefaultRoute": false,
+      "Gateways": [
+        "182.0.0.1"
+      ],
+      "Dns": [
+        "8.8.8.8",
+        "1.1.1.1"
+      ],
+      "Profile": [
+        "Public"
+      ]
+    }
+  ],
+  "Partial": false,
+  "Warnings": []
+}

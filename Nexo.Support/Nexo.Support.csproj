@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Nexo</AssemblyName>
+    <Version>1.5.0</Version>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup><EmbeddedResource Include="NetworkTransaction.ps1" LogicalName="Nexo.NetworkTransaction.ps1" /></ItemGroup>
+  <ItemGroup><EmbeddedResource Include="NetworkInventory.ps1" LogicalName="Nexo.NetworkInventory.ps1" /><EmbeddedResource Include="EnableNetworkAdapter.ps1" LogicalName="Nexo.EnableNetworkAdapter.ps1" /></ItemGroup>
+</Project>

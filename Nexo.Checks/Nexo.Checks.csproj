@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+ <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0-windows</TargetFramework><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings></PropertyGroup>
+ <ItemGroup><Compile Include="../Nexo.Support/Core.cs" Link="Core.cs"/><Compile Include="../Nexo.Support/SupportService.cs" Link="SupportService.cs"/><Compile Include="../Nexo.Support/AgentService.cs" Link="AgentService.cs"/><Compile Include="../Nexo.Support/WindowsTools.cs" Link="WindowsTools.cs"/><Compile Include="../Nexo.Support/NetworkChange.cs" Link="NetworkChange.cs"/><EmbeddedResource Include="../Nexo.Support/NetworkTransaction.ps1" LogicalName="Nexo.NetworkTransaction.ps1"/></ItemGroup>
+ <ItemGroup><Compile Include="../Nexo.Support/NetworkAdapterScripts.cs" Link="NetworkAdapterScripts.cs"/><EmbeddedResource Include="../Nexo.Support/NetworkInventory.ps1" LogicalName="Nexo.NetworkInventory.ps1"/><EmbeddedResource Include="../Nexo.Support/EnableNetworkAdapter.ps1" LogicalName="Nexo.EnableNetworkAdapter.ps1"/></ItemGroup>
+ <ItemGroup><Compile Include="../Nexo.Support/AgentProtocol.cs" Link="AgentProtocol.cs"/><Compile Include="../Nexo.Support/NetworkAssessment.cs" Link="NetworkAssessment.cs"/></ItemGroup>
+ <ItemGroup><None Update="Fixtures/*.json" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
+ <ItemGroup><Compile Include="../Nexo.Support/InvestigationEvidence.cs" Link="InvestigationEvidence.cs"/><Compile Include="../Nexo.Support/PhysicalObservation.cs" Link="PhysicalObservation.cs"/></ItemGroup>
+ <ItemGroup><Compile Include="../Nexo.Support/NetworkWorkflow.cs" Link="NetworkWorkflow.cs"/></ItemGroup>
+</Project>

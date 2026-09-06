@@ -1,0 +1,360 @@
+{
+  "success": true,
+  "data": {
+    "host": "google.com",
+    "dnsResolved": false,
+    "tcpConnected": false,
+    "error": "The operation was canceled."
+  }
+}
+
+{
+  "success": false,
+  "error": "The given key was not present in the dictionary."
+}
+
+{
+  "success": true,
+  "data": {
+    "Adapters": [
+      {
+        "Index": 12,
+        "Guid": "{FD779539-E839-431E-9135-8401B5761BC9}",
+        "Name": "vEthernet (Default Switch)",
+        "Description": "Hyper-V Virtual Ethernet Adapter",
+        "Status": "Up",
+        "AdminStatus": "Up",
+        "MediaState": "Connected",
+        "Disabled": false,
+        "CanEnable": false,
+        "Virtual": true,
+        "Hardware": false,
+        "IpStackAvailable": true,
+        "Dhcp": "Disabled",
+        "InterfaceMetric": 15,
+        "Addresses": [
+          {
+            "IPAddress": "192.168.160.1",
+            "PrefixLength": 20,
+            "PrefixOrigin": "Manual",
+            "AddressState": "Preferred"
+          }
+        ],
+        "HasSplitDefaultRoute": false,
+        "Gateways": [],
+        "Dns": [],
+        "Profile": []
+      },
+      {
+        "Index": 4,
+        "Guid": "{27316A6A-FA2F-41A7-BE7D-8D1E924C9345}",
+        "Name": "Ethernet",
+        "Description": "Realtek Gaming 2.5GbE Family Controller",
+        "Status": "Up",
+        "AdminStatus": "Up",
+        "MediaState": "Connected",
+        "Disabled": false,
+        "CanEnable": false,
+        "Virtual": false,
+        "Hardware": true,
+        "IpStackAvailable": true,
+        "Dhcp": "Enabled",
+        "InterfaceMetric": 25,
+        "Addresses": [
+          {
+            "IPAddress": "169.254.103.154",
+            "PrefixLength": 16,
+            "PrefixOrigin": "WellKnown",
+            "AddressState": "Preferred"
+          }
+        ],
+        "HasSplitDefaultRoute": false,
+        "Gateways": [],
+        "Dns": [
+          "8.8.8.8",
+          "1.1.1.1"
+        ],
+        "Profile": [
+          "Public"
+        ]
+      },
+      {
+        "Index": 3,
+        "Guid": "{19902BBC-43FB-44C2-90B7-06C4BB3BCBD9}",
+        "Name": "vEthernet (Ponte_Mikrotik_GLPI)",
+        "Description": "Hyper-V Virtual Ethernet Adapter #2",
+        "Status": "Up",
+        "AdminStatus": "Up",
+        "MediaState": "Connected",
+        "Disabled": false,
+        "CanEnable": false,
+        "Virtual": true,
+        "Hardware": false,
+        "IpStackAvailable": true,
+        "Dhcp": "Disabled",
+        "InterfaceMetric": 25,
+        "Addresses": [
+          {
+            "IPAddress": "182.0.0.2",
+            "PrefixLength": 16,
+            "PrefixOrigin": "Manual",
+            "AddressState": "Preferred"
+          }
+        ],
+        "HasSplitDefaultRoute": false,
+        "Gateways": [
+          "182.0.0.1"
+        ],
+        "Dns": [
+          "8.8.8.8",
+          "1.1.1.1"
+        ],
+        "Profile": [
+          "Public"
+        ]
+      }
+    ],
+    "Warnings": [],
+    "Partial": false,
+    "Note": "Disabled significa desativado administrativamente: use enable_network_adapter para uma interface identificada, inclusive vEthernet. Disconnected não significa desativado. Ausência de IP em interface desativada não impede sua ativação. Habilitar não comprova acesso à internet.",
+    "InternetInterfaceCandidates": [
+      {
+        "Index": 3,
+        "Name": "vEthernet (Ponte_Mikrotik_GLPI)"
+      }
+    ],
+    "Assessment": [
+      {
+        "Index": 12,
+        "Name": "vEthernet (Default Switch)",
+        "AddressMode": "static",
+        "Findings": [
+          "IPv4 fixo detectado. Ter um endereço IP não comprova que ele pertence à rede atual. IP fixo sozinho não é defeito.",
+          "Sem gateway padrão IPv4. Isso pode impedir acesso externo por esta interface; redes locais isoladas e rotas específicas podem funcionar sem gateway padrão.",
+          "Outra interface tem gateway padrão. Não selecionar esta interface como causa da falta de internet apenas por não ter gateway: ela pode ser auxiliar ou sustentar um switch Hyper-V."
+        ],
+        "DhcpCandidate": false,
+        "CanConfigureIpDns": false,
+        "HasDefaultGateway": false,
+        "NextStep": "Se houver falha de conexão, avalie rota e testes; pergunte se a rede usava IP automático quando não houver evidência suficiente para propor uma alteração. Não substitua IP fixo válido só por ser fixo."
+      },
+      {
+        "Index": 4,
+        "Name": "Ethernet",
+        "AddressMode": "dhcp",
+        "Findings": [
+          "Sem gateway padrão IPv4. Isso pode impedir acesso externo por esta interface; redes locais isoladas e rotas específicas podem funcionar sem gateway padrão.",
+          "Endereço local 169.254/16 (APIPA): não comprova obtenção de uma concessão DHCP utilizável para internet.",
+          "Outra interface tem gateway padrão. Não selecionar esta interface como causa da falta de internet apenas por não ter gateway: ela pode ser auxiliar ou sustentar um switch Hyper-V."
+        ],
+        "DhcpCandidate": false,
+        "CanConfigureIpDns": true,
+        "HasDefaultGateway": false,
+        "NextStep": "Investigue os achados e teste a conectividade conforme o problema."
+      },
+      {
+        "Index": 3,
+        "Name": "vEthernet (Ponte_Mikrotik_GLPI)",
+        "AddressMode": "static",
+        "Findings": [
+          "IPv4 fixo detectado. Ter um endereço IP não comprova que ele pertence à rede atual. IP fixo sozinho não é defeito."
+        ],
+        "DhcpCandidate": false,
+        "CanConfigureIpDns": true,
+        "HasDefaultGateway": true,
+        "NextStep": "Interface com gateway padrão e IP fixo. Priorize-a na investigação da falta de internet, mesmo sendo vEthernet. Se os testes falharem, DHCP é uma alternativa a apresentar com confirmação e restauração. IP e gateway na mesma sub-rede não provam que são os valores corretos da rede."
+      }
+    ],
+    "ConnectivityScope": "Inventário não comprova internet. test_connection usa a rota escolhida pelo Windows, não uma interface específica."
+  }
+}
+
+{
+  "success": true,
+  "data": {
+    "host": "google.com",
+    "dnsResolved": false,
+    "tcpConnected": false,
+    "error": "Este host não é conhecido."
+  }
+}
+
+{
+  "success": true,
+  "data": {
+    "Adapters": [
+      {
+        "Index": 12,
+        "Guid": "{FD779539-E839-431E-9135-8401B5761BC9}",
+        "Name": "vEthernet (Default Switch)",
+        "Description": "Hyper-V Virtual Ethernet Adapter",
+        "Status": "Up",
+        "AdminStatus": "Up",
+        "MediaState": "Connected",
+        "Disabled": false,
+        "CanEnable": false,
+        "Virtual": true,
+        "Hardware": false,
+        "IpStackAvailable": true,
+        "Dhcp": "Disabled",
+        "InterfaceMetric": 15,
+        "Addresses": [
+          {
+            "IPAddress": "192.168.160.1",
+            "PrefixLength": 20,
+            "PrefixOrigin": "Manual",
+            "AddressState": "Preferred"
+          }
+        ],
+        "HasSplitDefaultRoute": false,
+        "Gateways": [],
+        "Dns": [],
+        "Profile": []
+      },
+      {
+        "Index": 4,
+        "Guid": "{27316A6A-FA2F-41A7-BE7D-8D1E924C9345}",
+        "Name": "Ethernet",
+        "Description": "Realtek Gaming 2.5GbE Family Controller",
+        "Status": "Up",
+        "AdminStatus": "Up",
+        "MediaState": "Connected",
+        "Disabled": false,
+        "CanEnable": false,
+        "Virtual": false,
+        "Hardware": true,
+        "IpStackAvailable": true,
+        "Dhcp": "Enabled",
+        "InterfaceMetric": 25,
+        "Addresses": [
+          {
+            "IPAddress": "169.254.103.154",
+            "PrefixLength": 16,
+            "PrefixOrigin": "WellKnown",
+            "AddressState": "Preferred"
+          }
+        ],
+        "HasSplitDefaultRoute": false,
+        "Gateways": [],
+        "Dns": [
+          "8.8.8.8",
+          "1.1.1.1"
+        ],
+        "Profile": [
+          "Public"
+        ]
+      },
+      {
+        "Index": 3,
+        "Guid": "{19902BBC-43FB-44C2-90B7-06C4BB3BCBD9}",
+        "Name": "vEthernet (Ponte_Mikrotik_GLPI)",
+        "Description": "Hyper-V Virtual Ethernet Adapter #2",
+        "Status": "Up",
+        "AdminStatus": "Up",
+        "MediaState": "Connected",
+        "Disabled": false,
+        "CanEnable": false,
+        "Virtual": true,
+        "Hardware": false,
+        "IpStackAvailable": true,
+        "Dhcp": "Disabled",
+        "InterfaceMetric": 25,
+        "Addresses": [
+          {
+            "IPAddress": "182.0.0.2",
+            "PrefixLength": 16,
+            "PrefixOrigin": "Manual",
+            "AddressState": "Preferred"
+          }
+        ],
+        "HasSplitDefaultRoute": false,
+        "Gateways": [
+          "182.0.0.1"
+        ],
+        "Dns": [
+          "8.8.8.8",
+          "1.1.1.1"
+        ],
+        "Profile": [
+          "Public"
+        ]
+      }
+    ],
+    "Warnings": [],
+    "Partial": false,
+    "Note": "Disabled significa desativado administrativamente: use enable_network_adapter para uma interface identificada, inclusive vEthernet. Disconnected não significa desativado. Ausência de IP em interface desativada não impede sua ativação. Habilitar não comprova acesso à internet.",
+    "InternetInterfaceCandidates": [
+      {
+        "Index": 3,
+        "Name": "vEthernet (Ponte_Mikrotik_GLPI)"
+      }
+    ],
+    "Assessment": [
+      {
+        "Index": 12,
+        "Name": "vEthernet (Default Switch)",
+        "AddressMode": "static",
+        "Findings": [
+          "IPv4 fixo detectado. Ter um endereço IP não comprova que ele pertence à rede atual. IP fixo sozinho não é defeito.",
+          "Sem gateway padrão IPv4. Isso pode impedir acesso externo por esta interface; redes locais isoladas e rotas específicas podem funcionar sem gateway padrão.",
+          "Outra interface tem gateway padrão. Não selecionar esta interface como causa da falta de internet apenas por não ter gateway: ela pode ser auxiliar ou sustentar um switch Hyper-V."
+        ],
+        "DhcpCandidate": false,
+        "CanConfigureIpDns": false,
+        "HasDefaultGateway": false,
+        "NextStep": "Se houver falha de conexão, avalie rota e testes; pergunte se a rede usava IP automático quando não houver evidência suficiente para propor uma alteração. Não substitua IP fixo válido só por ser fixo."
+      },
+      {
+        "Index": 4,
+        "Name": "Ethernet",
+        "AddressMode": "dhcp",
+        "Findings": [
+          "Sem gateway padrão IPv4. Isso pode impedir acesso externo por esta interface; redes locais isoladas e rotas específicas podem funcionar sem gateway padrão.",
+          "Endereço local 169.254/16 (APIPA): não comprova obtenção de uma concessão DHCP utilizável para internet.",
+          "Outra interface tem gateway padrão. Não selecionar esta interface como causa da falta de internet apenas por não ter gateway: ela pode ser auxiliar ou sustentar um switch Hyper-V."
+        ],
+        "DhcpCandidate": false,
+        "CanConfigureIpDns": true,
+        "HasDefaultGateway": false,
+        "NextStep": "Investigue os achados e teste a conectividade conforme o problema."
+      },
+      {
+        "Index": 3,
+        "Name": "vEthernet (Ponte_Mikrotik_GLPI)",
+        "AddressMode": "static",
+        "Findings": [
+          "IPv4 fixo detectado. Ter um endereço IP não comprova que ele pertence à rede atual. IP fixo sozinho não é defeito."
+        ],
+        "DhcpCandidate": false,
+        "CanConfigureIpDns": true,
+        "HasDefaultGateway": true,
+        "NextStep": "Interface com gateway padrão e IP fixo. Priorize-a na investigação da falta de internet, mesmo sendo vEthernet. Se os testes falharem, DHCP é uma alternativa a apresentar com confirmação e restauração. IP e gateway na mesma sub-rede não provam que são os valores corretos da rede."
+      }
+    ],
+    "ConnectivityScope": "Inventário não comprova internet. test_connection usa a rota escolhida pelo Windows, não uma interface específica."
+  }
+}
+
+{
+  "success": true,
+  "data": {
+    "host": "8.8.8.8",
+    "port": 53,
+    "addresses": [
+      "8.8.8.8"
+    ],
+    "dnsResolved": true,
+    "tcpConnected": true,
+    "elapsedMs": 37
+  }
+}
+
+{
+  "success": true,
+  "data": {
+    "host": "google.com",
+    "dnsResolved": false,
+    "tcpConnected": false,
+    "error": "The operation was canceled."
+  }
+}
