@@ -38,6 +38,7 @@ public static class NetworkChange
         using var source = typeof(NetworkChange).Assembly.GetManifestResourceStream("Nexo.NetworkTransaction.ps1") ?? throw new IOException("Executor de rede ausente.");
         using var reader = new StreamReader(source);
         var script = "$requestJson=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + parameters + "')); $operationDir=" + WindowsTools.Quote(dir) + ";\n" + await reader.ReadToEndAsync(token);
+        token.ThrowIfCancellationRequested();
         using var process = WindowsTools.StartElevated(script);
         var ready = Path.Combine(dir, "applied.json"); var final = Path.Combine(dir, "result.json"); var decision = Path.Combine(dir, "decision.txt");
         while (!process.HasExited && !File.Exists(final))
@@ -47,7 +48,9 @@ public static class NetworkChange
             {
                 progress.Report("Configuração aplicada temporariamente. Conferindo o estado e aguardando sua confirmação…");
                 var state = await File.ReadAllTextAsync(ready, CancellationToken.None);
-                var keep = await confirm(new ChangeRequest("Manter a configuração de rede?", request.Description + "\n\nEstado obtido após a mudança:\n" + state + "\n\nTeste a conexão. Se não confirmar em até 45 segundos, a configuração anterior será restaurada.", true));
+                var keep = false;
+                try { if (!token.IsCancellationRequested) keep = await confirm(new ChangeRequest("Manter a configuração de rede?", request.Description + "\n\nEstado obtido após a mudança:\n" + state + "\n\nTeste a conexão. Se não confirmar em até 45 segundos, a configuração anterior será restaurada.", true)); }
+                catch (Exception ex) { progress.Report("Confirmação indisponível; restaurando a configuração anterior. " + ex.Message); }
                 await File.WriteAllTextAsync(decision, keep && !token.IsCancellationRequested ? "keep" : "rollback", CancellationToken.None);
             }
             await Task.Delay(250, CancellationToken.None);

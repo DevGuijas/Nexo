@@ -5,6 +5,8 @@ internal static class MultiInterfaceChecks
 {
     internal static async Task Run(Action<bool, string> assert)
     {
+        await AmbiguousDisabledAdapters(assert);
+        await UnchangedActivation(assert);
         foreach (var scenario in new[] { "delayed-activation", "two-gateways", "rollback", "stale-identity", "transient-success", "cancel-wait" })
         {
             var changed = false; var testsAfter = 0; var waits = 0; var probes = 0; var alterations = new List<int>();
@@ -58,5 +60,85 @@ internal static class MultiInterfaceChecks
             }
             catch (OperationCanceledException) when (scenario == "cancel-wait") { assert(waits == 1 && alterations.Count == 1, "Espera de estabilização respeita cancelamento"); }
         }
+    }
+
+    private static async Task AmbiguousDisabledAdapters(Action<bool, string> assert)
+    {
+        var activations = new List<int>();
+        var reads = 0;
+        var probes = 0;
+        Task<JsonElement> Execute(string name, object args)
+        {
+            object result;
+            switch (name)
+            {
+                case "get_network":
+                    reads++;
+                    result = new { success = true, data = new { Adapters = new[] {
+                        new { Index = 4, Guid = "physical-4", Name = "Ethernet", Hardware = true, Virtual = false, InterfaceType = 6, Disabled = true, Status = "Disabled", Dhcp = "Enabled", Gateways = Array.Empty<string>() },
+                        new { Index = 6, Guid = "physical-6", Name = "Wi-Fi", Hardware = true, Virtual = false, InterfaceType = 71, Disabled = true, Status = "Disabled", Dhcp = "Enabled", Gateways = Array.Empty<string>() }
+                    }, Partial = false } };
+                    break;
+                case "test_connection":
+                    result = new { success = true, data = new { dnsResolved = false, tcpConnected = false } };
+                    break;
+                case "probe_network_interfaces":
+                    probes++;
+                    result = new { success = true, data = new { Interfaces = new[] {
+                        new { Index = 4, Guid = "physical-4", Name = "Ethernet", ProbeCompleted = false, TcpConnected = false },
+                        new { Index = 6, Guid = "physical-6", Name = "Wi-Fi", ProbeCompleted = false, TcpConnected = false }
+                    } } };
+                    break;
+                case "enable_network_adapter":
+                    activations.Add(JsonSerializer.SerializeToElement(args).GetProperty("interface_index").GetInt32());
+                    result = new { success = true, data = new { changed = true } };
+                    break;
+                default:
+                    throw new Exception("Ferramenta inesperada no caso ambíguo: " + name);
+            }
+            return Task.FromResult(JsonSerializer.SerializeToElement(result));
+        }
+
+        var answer = await NetworkWorkflow.Run(Execute, _ => { }, CancellationToken.None, delay: (_, _) => Task.CompletedTask);
+        Console.WriteLine("  Múltiplas interfaces desativadas: leituras=" + reads + ", sondagens=" + probes + ", ativações=" + string.Join(",", activations) + "; resposta=" + answer);
+        assert(reads > 0 && activations.Count == 0 && answer.Contains("cabo") && answer.Contains("Wi-Fi") && !answer.Contains("responderam"),
+            "Múltiplas interfaces Disabled sem evidência discriminante: nenhuma ativação por tentativa e pergunta sobre o tipo de conexão");
+    }
+
+    private static async Task UnchangedActivation(Action<bool, string> assert)
+    {
+        var enableCalls = 0;
+        var networkReads = 0;
+        var waits = 0;
+        Task<JsonElement> Execute(string name, object args)
+        {
+            object result;
+            switch (name)
+            {
+                case "get_network":
+                    networkReads++;
+                    result = new { success = true, data = new { Adapters = new[] {
+                        new { Index = 17, Guid = "physical-17", Name = "Ethernet de teste", Hardware = true, Virtual = false, InterfaceType = 6,
+                            Disabled = enableCalls == 0, Status = enableCalls == 0 ? "Disabled" : "Up", Dhcp = "Enabled", Gateways = Array.Empty<string>() }
+                    }, Partial = false } };
+                    break;
+                case "test_connection":
+                    result = new { success = true, data = new { dnsResolved = false, tcpConnected = false } };
+                    break;
+                case "enable_network_adapter":
+                    if (JsonSerializer.SerializeToElement(args).GetProperty("interface_index").GetInt32() != 17) throw new Exception("Índice diferente do observado.");
+                    enableCalls++;
+                    result = new { success = true, data = new { changed = false, note = "A interface já estava habilitada no momento da operação." } };
+                    break;
+                default:
+                    throw new Exception("Ação extra indevida após ativação sem mudança: " + name);
+            }
+            return Task.FromResult(JsonSerializer.SerializeToElement(result));
+        }
+        var answer = await NetworkWorkflow.Run(Execute, _ => { }, CancellationToken.None,
+            delay: (_, _) => { waits++; return Task.CompletedTask; });
+        Console.WriteLine($"  Ativação obsoleta: leituras={networkReads}, tentativas={enableCalls}, esperas={waits}; resposta={answer}");
+        assert(enableCalls == 1 && networkReads > 1 && answer.Contains("já não estava desativada") && !answer.Contains("foi ativada") && !answer.Contains("responderam"),
+            "Ativação sem mudança: interface obsoleta não recebe crédito por correção nem dispara outra alteração");
     }
 }

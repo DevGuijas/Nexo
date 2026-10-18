@@ -55,16 +55,24 @@ public static class NetworkWorkflow
         var state = afterChange ? await Stabilize() : await Test();
         if (state.Named) return Success();
 
-        // Compare the whole inventory; no adapter names or indices are requested from users.
-        foreach (var candidate in adapters.Where(a => Flag(a, "Disabled")).OrderByDescending(a => Flag(a, "Hardware")).ThenBy(a => Number(a, "Index")).ToArray())
+        // A disconnected link does not identify which of several disabled adapters the user uses.
+        // Never activate them in sequence as a trial-and-error repair.
+        var disabledCandidates = adapters.Where(a => Flag(a, "Disabled")).ToArray();
+        if (allowChanges && disabledCandidates.Length > 1)
+            return "Encontrei mais de uma interface desativada e os testes ainda não identificam qual delas atende esta conexão. Não ativei nenhuma por tentativa. Você usa cabo, Wi-Fi ou uma VPN para acessar esta rede?";
+        if (allowChanges && disabledCandidates.Length == 1)
         {
-            if (!allowChanges) break;
+            var candidate = disabledCandidates[0];
             inform("Encontrei uma interface desativada: " + Text(candidate, "Name") + ". Vou apresentar a proposta de ativação e verificar o resultado antes de tentar outro ajuste.");
             var enabled = await execute("enable_network_adapter", new { interface_index = Number(candidate, "Index") });
             if (!Flag(enabled, "success")) return "A ativação não foi concluída. " + Failure(enabled);
-            changed |= !InvestigationEvidence.ExplicitlyUnchanged(enabled);
+            var activated = !InvestigationEvidence.ExplicitlyUnchanged(enabled);
+            changed |= activated;
             state = await Stabilize(); if (state.Named) return Success();
+            if (state.Numeric) return Partial();
+            return (activated ? "A interface foi ativada" : "A interface já não estava desativada quando a ação foi verificada") + ", mas os testes após a espera não confirmaram acesso. Não considerei o problema resolvido nem tentei outra correção. O Windows mostra um cabo ou Wi-Fi conectado?";
         }
+        // Compare the whole inventory; no adapter names or indices are requested from users.
         var physicalDown = adapters.Where(a => Flag(a, "Hardware") && !Flag(a, "Virtual") && Number(a, "InterfaceType") == 6 && Text(a, "Status") == "Disconnected").ToArray();
         if (physicalDown.Length == 1 && !adapters.Any(a => Text(a, "Status") == "Up" && a.TryGetProperty("Gateways", out var g) && g.GetArrayLength() > 0))
         {
@@ -88,7 +96,7 @@ public static class NetworkWorkflow
             var selected = targets[0];
             inform("Os testes pela interface " + Text(selected, "Name") + " falharam e ela usa IP fixo. Vou apresentar a opção de obter IP automaticamente, preservando o DNS e guardando a configuração anterior. A rede precisa fornecer DHCP.");
             var applied = await execute("set_ipv4", new { interface_index = Number(selected, "Index"), mode = "dhcp", address = "", prefix = 0, gateway = "" });
-            if (!Flag(applied, "success")) return "A alteração não foi concluída. " + Failure(applied) + (Flag(applied, "reverted") ? "\nA configuração anterior foi restaurada. Não vou repetir a mesma alteração. Pode ser necessário verificar o cabo, a porta ou o serviço DHCP da rede." : Flag(applied, "denied") ? "\nVocê recusou a proposta; ela não foi executada." : "\nConfira o resultado e o estado da restauração antes de outra alteração.");
+            if (!Flag(applied, "success")) return "A alteração não foi concluída. " + Failure(applied) + (Flag(applied, "reverted") ? "\nA configuração anterior foi restaurada. O resultado da operação e o estado observado estão registrados no cartão acima; não vou atribuir a falha ao cabo ou ao roteador sem evidência." : Flag(applied, "denied") ? "\nVocê recusou a proposta; ela não foi executada." : "\nConfira o resultado e o estado da restauração antes de outra alteração.");
             changed = true; state = await Stabilize();
             if (state.Named) return Success();
             if (state.Numeric) return Partial();

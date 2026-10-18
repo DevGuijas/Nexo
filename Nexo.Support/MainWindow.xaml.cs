@@ -22,9 +22,17 @@ public partial class MainWindow : Window
     private WrapPanel? quickReplyPanel;
     public MainWindow(Store store)
     {
-        InitializeComponent(); Title = "Nexo 1.5.1 • Suporte inteligente"; this.store = store; support = new SupportService(store);
+        InitializeComponent(); Title = "Nexo 1.6.0 • Suporte inteligente"; this.store = store; support = new SupportService(store);
         SizeChanged += (_, _) => ControlHint.Visibility = ActualHeight < 820 ? Visibility.Collapsed : Visibility.Visible;
-        Closing += (_, e) => { if (busy) { e.Cancel = true; MessageBox.Show(this, "Aguarde a operação terminar ou cancele a verificação antes de fechar.", "Atendimento em andamento"); } };
+        Closing += (_, e) =>
+        {
+            if (!busy) return;
+            e.Cancel = true;
+            var message = operation?.IsCancellationRequested == true
+                ? "O cancelamento foi solicitado. Aguarde o resultado das ações já iniciadas antes de fechar."
+                : "Aguarde o resultado da operação antes de fechar. Se o botão Cancelar estiver disponível, você pode solicitar a interrupção das próximas etapas.";
+            MessageBox.Show(this, message, "Atendimento em andamento");
+        };
     }
     private static TextBlock Text(string text, double size = 14, string color = "#E9EDF5") => new() { Text = text, FontSize = size, Foreground = Brush(color), TextWrapping = TextWrapping.Wrap };
     private static SolidColorBrush Brush(string hex) => new((Color)ColorConverter.ConvertFromString(hex));
@@ -36,6 +44,15 @@ public partial class MainWindow : Window
     }
     private Border Card(UIElement content) => new() { Style = (Style)FindResource("Card"), Child = content, Margin = new Thickness(0, 0, 0, 14) };
     private void Guard(Action action) { try { action(); } catch (Exception ex) { MessageBox.Show(this, ex.Message, "Nexo", MessageBoxButton.OK, MessageBoxImage.Information); } }
+    private async Task GuardAsync(Func<Task> action)
+    {
+        try { await action(); }
+        catch (Exception ex)
+        {
+            try { store.Log(user, "Falha de interface: " + ex.GetType().Name); } catch { /* The original failure is more useful to the user. */ }
+            MessageBox.Show(this, "Não foi possível concluir esta etapa. " + ex.Message + "\n\nConfira o histórico antes de tentar novamente.", "Nexo", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
     private void LoginKeyDown(object sender, KeyEventArgs e) { if (e.Key == Key.Enter) LoginClick(sender, e); }
     private void LoginClick(object sender, RoutedEventArgs e)
     {
@@ -80,13 +97,14 @@ public partial class MainWindow : Window
         {
             var content = new StackPanel(); content.Children.Add(Text(title, 14)); var sub = Text(subtitle, 11, "#939CAA"); sub.Margin = new Thickness(0, 9, 0, 0); content.Children.Add(sub);
             var button = new Button { Content = content, Background = Brush("#141920"), Padding = new Thickness(18), Margin = new Thickness(0, 0, 10, 10), HorizontalContentAlignment = HorizontalAlignment.Left };
-            button.Click += async (_, _) => await Send(prompt); tiles.Children.Add(button);
+            button.Click += async (_, _) => await GuardAsync(() => Send(prompt)); tiles.Children.Add(button);
         }
         welcome.Children.Add(tiles); welcome.Children.Add(Text("COMECE POR UM ATALHO OU ESCREVA ABAIXO", 10, "#68758A")); Messages.Children.Add(welcome);
     }
     private void ShowPage(string target)
     {
         if (busy) return;
+        if (user.MustChangePassword) target = "profile";
         if (target is "users" or "settings" or "audit") store.Require(user, a => a.Admin);
         page = target;
         ChatView.Visibility = target == "chat" ? Visibility.Visible : Visibility.Collapsed;
@@ -164,8 +182,8 @@ public partial class MainWindow : Window
             store.SaveAccount(user, edited, password.Password); RefreshIdentity(); ShowPage("users");
         }), true)); actions.Children.Add(Action("Cancelar", (_, _) => ShowPage("users"))); form.Children.Add(actions); PageContent.Children.Add(Card(form));
     }
-    private async void SendClick(object sender, RoutedEventArgs e) => await Send(Composer.Text);
-    private async void ComposerKeyDown(object sender, KeyEventArgs e) => await HandleComposerKey(e, Keyboard.Modifiers);
+    private async void SendClick(object sender, RoutedEventArgs e) => await GuardAsync(() => Send(Composer.Text));
+    private async void ComposerKeyDown(object sender, KeyEventArgs e) => await GuardAsync(() => HandleComposerKey(e, Keyboard.Modifiers));
     private async Task HandleComposerKey(KeyEventArgs e, ModifierKeys modifiers)
     {
         if (e.Key == Key.Enter && modifiers == ModifierKeys.Shift) { e.Handled = true; if (!e.IsRepeat) await Send(Composer.Text); }
@@ -173,7 +191,10 @@ public partial class MainWindow : Window
     private void AddEntry(string role, string text)
     {
         if (conversation == null) return;
-        var entry = new Entry { Role = role, Text = text }; conversation.Entries.Add(entry); store.Save(); RenderEntry(entry);
+        var entry = new Entry { Role = role, Text = text }; conversation.Entries.Add(entry);
+        try { store.Save(); }
+        catch { conversation.Entries.Remove(entry); throw; }
+        RenderEntry(entry);
     }
     private void RenderEntry(Entry entry)
     {
@@ -204,7 +225,7 @@ public partial class MainWindow : Window
                 quickReplyPanel = new WrapPanel { Margin = new Thickness(0, 18, 0, 0), IsEnabled = !busy };
                 foreach (var reply in replies)
                 {
-                    var button = Action(reply, async (_, _) => await SubmitQuickReply(ownerId, entry, reply), reply == replies[0]);
+                    var button = Action(reply, async (_, _) => await GuardAsync(() => SubmitQuickReply(ownerId, entry, reply)), reply == replies[0]);
                     button.Padding = new Thickness(15, 8, 15, 8);
                     button.ToolTip = "Enviar: " + reply;
                     AutomationProperties.SetName(button, "Responder: " + reply);
@@ -267,16 +288,23 @@ public partial class MainWindow : Window
     private async Task Execute(Func<CancellationToken, Task> action, bool cancellable = true)
     {
         if (busy) return;
-        busy = true; operation = new CancellationTokenSource(); BusyBar.Visibility = Visibility.Visible; CancelButton.Visibility = cancellable ? Visibility.Visible : Visibility.Collapsed;
+        busy = true; operation = new CancellationTokenSource(); BusyBar.Visibility = Visibility.Visible; CancelButton.Visibility = cancellable ? Visibility.Visible : Visibility.Collapsed; CancelButton.IsEnabled = cancellable;
         if (quickReplyPanel != null) quickReplyPanel.IsEnabled = false;
         SendButton.IsEnabled = false; Navigation.IsEnabled = false; ProfileNav.IsEnabled = false; ResolvedButton.IsEnabled = false; TicketButton.IsEnabled = false; Composer.IsEnabled = false;
         ProgressText.Text = "ACOMPANHAMENTO";
         try { await action(operation.Token); UpdateProgress("Resultado disponível no chat."); }
-        catch (OperationCanceledException) { AddEntry("assistant", "Atendimento interrompido. As ações já concluídas permanecem registradas acima; cancelar não desfaz uma correção concluída."); UpdateProgress("Atendimento interrompido."); }
+        catch (OperationCanceledException) when (operation.IsCancellationRequested) { AddEntry("assistant", "Atendimento interrompido. As ações já concluídas permanecem registradas acima; cancelar não desfaz uma correção concluída."); UpdateProgress("Atendimento interrompido."); }
+        catch (OperationCanceledException) { AddEntry("assistant", "A etapa expirou ou foi interrompida antes de confirmar o resultado. Confira os resultados registrados acima antes de tentar novamente ou encaminhar à TI."); UpdateProgress("Etapa não concluída: resultado não confirmado."); store.Log(user, "Operação interrompida sem cancelamento do usuário"); }
         catch (Exception ex) { AddEntry("assistant", "Não consegui concluir esta etapa. " + ex.Message + "\n\nVocê pode tentar novamente ou gerar um encaminhamento para a TI."); UpdateProgress("Etapa não concluída."); store.Log(user, "Operação não concluída: " + ex.GetType().Name); }
-        finally { busy = false; operation.Dispose(); operation = null; BusyBar.Visibility = Visibility.Collapsed; CancelButton.Visibility = Visibility.Collapsed; SendButton.IsEnabled = Navigation.IsEnabled = ProfileNav.IsEnabled = ResolvedButton.IsEnabled = Composer.IsEnabled = true; TicketButton.IsEnabled = user.Tickets; if (quickReplyPanel != null) quickReplyPanel.IsEnabled = true; ChatScroll.ScrollToEnd(); }
+        finally { busy = false; operation.Dispose(); operation = null; BusyBar.Visibility = Visibility.Collapsed; CancelButton.Visibility = Visibility.Collapsed; CancelButton.IsEnabled = true; SendButton.IsEnabled = Navigation.IsEnabled = ProfileNav.IsEnabled = ResolvedButton.IsEnabled = Composer.IsEnabled = true; TicketButton.IsEnabled = user.Tickets; if (quickReplyPanel != null) quickReplyPanel.IsEnabled = true; ChatScroll.ScrollToEnd(); }
     }
-    private void CancelClick(object sender, RoutedEventArgs e) { operation?.Cancel(); UpdateProgress("Cancelamento solicitado. Uma alteração do Windows já iniciada aguardará seu resultado; mudanças de rede pendentes serão revertidas."); }
+    private void CancelClick(object sender, RoutedEventArgs e)
+    {
+        if (operation == null || operation.IsCancellationRequested) return;
+        CancelButton.IsEnabled = false;
+        operation.Cancel();
+        UpdateProgress("Cancelamento solicitado. Etapas ainda não iniciadas serão interrompidas. Se uma alteração do Windows já começou, aguarde o resultado registrado no chat para confirmar seu estado.");
+    }
     private Task<bool> ConfirmChange(ChangeRequest request)
     {
         var dialog = new Window { Owner = this, Title = request.Title, Width = 660, Height = 500, WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize, Style = (Style)FindResource(typeof(Window)) };
@@ -301,9 +329,9 @@ public partial class MainWindow : Window
         if (diagnostic.Topic == "camera")
         {
             actions.Children.Add(Action("Buscar drivers no Windows Update", (_, _) => Guard(() => { if (busy) return; SupportService.OpenSettings("updates"); AddEntry("assistant", "Abri o Windows Update. Clique em Verificar atualizações e confira também as atualizações opcionais de drivers. Ainda não confirmei nenhuma instalação."); })));
-            foreach (var device in diagnostic.Devices.Where(d => d.Code == 22)) actions.Children.Add(Action("Habilitar " + device.Name, async (_, _) => await Repair("enable-camera", device.Id, "Habilitar a câmera “" + device.Name + "”? O Windows solicitará autorização de administrador. Nenhum driver será instalado.")));
+            foreach (var device in diagnostic.Devices.Where(d => d.Code == 22)) actions.Children.Add(Action("Habilitar " + device.Name, async (_, _) => await GuardAsync(() => Repair("enable-camera", device.Id, "Habilitar a câmera “" + device.Name + "”? O Windows solicitará autorização de administrador. Nenhum driver será instalado."))));
         }
-        if (diagnostic.Topic == "network") actions.Children.Add(Action("Limpar cache DNS", async (_, _) => await Repair("dns", null, "Limpar o cache DNS deste computador? O Windows consultará novamente os endereços ao acessar sites.")));
+        if (diagnostic.Topic == "network") actions.Children.Add(Action("Limpar cache DNS", async (_, _) => await GuardAsync(() => Repair("dns", null, "Limpar o cache DNS deste computador? O Windows consultará novamente os endereços ao acessar sites."))));
         Messages.Children.Add(actions);
     }
     private async Task Repair(string action, string? id, string explanation)
@@ -311,12 +339,17 @@ public partial class MainWindow : Window
         if (busy) return;
         try { store.Require(user, a => a.Repair); } catch (Exception ex) { MessageBox.Show(this, ex.Message); return; }
         if (MessageBox.Show(this, explanation, "Autorizar correção", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
-        await Execute(async token => { UpdateProgress(action == "dns" ? "Limpando cache DNS…" : "Solicitando ativação da câmera ao Windows…"); AddEntry("assistant", await support.Repair(user, action, id, token)); }, false);
+        await Execute(async token => { UpdateProgress(action == "dns" ? "Limpando cache DNS…" : "Solicitando ativação da câmera ao Windows…"); AddEntry("assistant", await support.Repair(user, action, id, token)); }, action == "dns");
     }
     private void ResolvedClick(object sender, RoutedEventArgs e) => Guard(() =>
     {
         if (busy || conversation == null || conversation.Entries.Count == 0) return;
-        conversation.Status = "Resolvido"; AddEntry("assistant", "Que bom que funcionou! Marquei este atendimento como resolvido por você. Quando precisar, é só começar uma nova conversa."); store.Log(user, "Resolução confirmada pelo usuário: " + conversation.Id);
+        var current = conversation; var previousStatus = current.Status;
+        var entry = new Entry { Role = "assistant", Text = "Que bom que funcionou! Marquei este atendimento como resolvido por você. Quando precisar, é só começar uma nova conversa." };
+        store.Commit(user, "Resolução confirmada pelo usuário: " + current.Id,
+            () => { current.Status = "Resolvido"; current.Entries.Add(entry); },
+            () => { current.Status = previousStatus; current.Entries.Remove(entry); });
+        RenderEntry(entry);
     });
     private void EscalateClick(object sender, RoutedEventArgs e) => Guard(() =>
     {
@@ -324,8 +357,12 @@ public partial class MainWindow : Window
         if (busy || conversation == null || conversation.Entries.Count == 0) { MessageBox.Show(this, "Descreva o problema no chat para preparar o relatório."); return; }
         if (store.Data.Tickets.Any(t => t.ConversationId == conversation.Id)) { ShowPage("tickets"); return; }
         var report = "NEXO • RELATÓRIO DE ATENDIMENTO\nUsuário: " + user.Name + " (" + user.Login + ")\nData: " + DateTime.Now.ToString("g") + "\nAssunto: " + conversation.Title + "\n\n" + string.Join("\n\n", conversation.Entries.Select(m => $"[{m.Time:g}] {(m.Role == "user" ? "Usuário" : "Nexo")}: {m.Text}"));
-        var ticket = new Ticket { UserId = user.Id, ConversationId = conversation.Id, Title = conversation.Title, Report = report };
-        store.Data.Tickets.Add(ticket); conversation.Status = "Encaminhamento preparado"; store.Log(user, "Relatório preparado: " + ticket.Id); ShowPage("tickets");
+        var current = conversation; var previousStatus = current.Status;
+        var ticket = new Ticket { UserId = user.Id, ConversationId = current.Id, Title = current.Title, Report = report };
+        store.Commit(user, "Relatório preparado: " + ticket.Id,
+            () => { store.Data.Tickets.Add(ticket); current.Status = "Encaminhamento preparado"; },
+            () => { store.Data.Tickets.Remove(ticket); current.Status = previousStatus; });
+        ShowPage("tickets");
     });
     private void History()
     {
@@ -377,6 +414,11 @@ public partial class MainWindow : Window
     private void Audits()
     {
         Heading("Registro de ações", "Logins, permissões, diagnósticos e correções registrados localmente.");
+        var metrics = SupportMetrics.Calculate(store.Data);
+        var summary = metrics.Closed == 0
+            ? "Nenhum atendimento encerrado ainda. As taxas aparecem após o usuário confirmar resolução ou preparar um encaminhamento."
+            : $"Encerrados: {metrics.Closed}  ·  resolvidos pelo usuário: {metrics.Resolved} ({metrics.ResolutionRate:P0})  ·  encaminhados: {metrics.Escalated} ({metrics.EscalationRate:P0})\nTempo médio até o encerramento: {metrics.AverageClosureMinutes:F1} min  ·  em andamento: {metrics.Open}";
+        PageContent.Children.Add(Card(new StackPanel { Children = { Text("Métricas dos atendimentos locais", 17), Text(summary, 13, "#A3AEC1") } }));
         foreach (var audit in store.Data.Audit.OrderByDescending(a => a.Time).Take(200))
         {
             var panel = new StackPanel(); panel.Children.Add(Text(audit.Action)); panel.Children.Add(Text(audit.Time.ToString("g") + "  ·  " + audit.Actor, 11, "#939CAA")); PageContent.Children.Add(Card(panel));

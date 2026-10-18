@@ -9,6 +9,26 @@ internal static class ContinuousChecks
     {
         store.Data.AiEnabled = true;
         var fake = new FakeTools();
+        foreach (var reply in new[] { "Bom dia! Como posso ajudar você hoje?", "Que bom que funcionou! Estou por aqui se precisar.", "Isso acontece em todos os aplicativos ou só em um?" })
+        {
+            using var social = new ScriptedModel([Text(reply)]);
+            var socialConversation = Conversation(actor); socialConversation.Entries[0].Text = "Bom dia, Nexo!";
+            var before = fake.Calls.Count;
+            assert(await RunModel(social, fake, socialConversation) == reply && social.Calls == 1 && fake.Calls.Count == before, "Texto de conversa aceito sem exigir ferramentas: " + reply);
+        }
+        using (var unsupportedClaim = new ScriptedModel([Text("Corrigi sua câmera."), Call("diagnose_device", new { topic = "camera" }), Text("A consulta terminou. Teste a câmera no aplicativo.")]))
+        {
+            var before = fake.Calls.Count;
+            await RunModel(unsupportedClaim, fake, Conversation(actor));
+            assert(unsupportedClaim.Calls == 3 && fake.Calls.Count == before + 1, "Conversa livre não aceita alegação de correção sem consulta");
+        }
+        fake.Calls.Clear();
+        assert(SupportIntake.InitialTopic("Você ajuda com impressoras?") == null && SupportIntake.InitialTopic("Bom dia, Nexo!") == null, "Conversa sobre capacidades não inicia diagnóstico");
+        assert(SupportIntake.InitialTopic("Bom dia! Minha câmera não aparece no Teams") == "camera", "Saudação com sintoma inicia observação pertinente");
+        assert(!ToolCatalog.IsObservationTool("scan_driver_updates") && ToolCatalog.IsObservationTool("wait_for_reconnect"), "Acompanhamento de reconexão mantém ferramentas pertinentes");
+        assert(AgentProtocol.Validate("ask_user", JsonSerializer.SerializeToElement(new { reason = "missing_information" }), "Posso habilitá-lo para você. Deseja que eu faça isso?") != null, "Autorização de periférico usa o executor, não uma pergunta intermediária");
+        assert(AgentProtocol.Validate("ask_user", JsonSerializer.SerializeToElement(new { reason = "missing_information" }), "O serviço de áudio está parado. Vamos reiniciá-lo. Posso confirmar se você está confortável com essa ação?") != null,
+            "Consentimento indireto para reiniciar serviço não substitui a confirmação do aplicativo");
         using var handler = new ScriptedModel([
             Text("Vamos consultar as configurações da interface Ethernet."),
             Call("get_network", new { }),

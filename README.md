@@ -4,7 +4,28 @@ Aplicativo C# / WPF com IA local que escolhe ferramentas do Windows, executa aç
 
 ## Abrir
 
-Execute `artifacts/Nexo-1.5.1/Nexo.exe`. A barra da janela deve mostrar **Nexo 1.5.1**. Feche a versão anterior antes de abrir. Requer **.NET Desktop Runtime 8 para Windows x64**. Para distribuir, extraia todos os arquivos de `artifacts/Nexo-1.5.1-Windows.zip` na mesma pasta.
+Execute `artifacts/Nexo-1.6.0/Nexo.exe`. A barra da janela deve mostrar **Nexo 1.6.0**. Feche a versão anterior antes de abrir. Requer **.NET Desktop Runtime 8 para Windows x64**. Para distribuir, extraia todos os arquivos de `artifacts/Nexo-1.6.0-Windows.zip` na mesma pasta.
+
+### Novidade 1.6.0 — conversa e investigação de componentes
+
+- Saudações, agradecimentos e dúvidas podem receber resposta natural do modelo, sem exigir chamada de ferramenta nem gerar o relatório de falha de investigação. Perguntas como “Como posso ajudar?” são aceitas; prometer uma consulta ainda exige executá-la. Uma saudação acompanhada de sintoma inicia a investigação.
+- Sintomas reconhecidos de câmera, áudio, Bluetooth e impressão começam por uma consulta pertinente do Windows. Essa triagem seleciona apenas a primeira observação: o modelo recebe os dispositivos/serviços reais e escolhe a próxima etapa dentro do catálogo permitido. Dispositivo ausente leva a esclarecimento sobre periférico integrado/externo, sem inventar um alvo para habilitar.
+- Após habilitar/reiniciar um dispositivo, ajustar a permissão da câmera, reiniciar serviços de áudio/Bluetooth/impressão ou limpar uma fila, o executor confere o estado. O controlador pede um teste funcional ao usuário antes de novas correções. “Serviço em execução” não comprova som, nem “dispositivo habilitado” comprova imagem.
+- Pedidos de acompanhar reconexão mantêm o foco em identificar o alvo, observar sua desconexão/retorno e verificar a função. Não expandem a investigação para busca de drivers nessa etapa. O histórico é mantido para receber o resultado do teste e continuar a conversa.
+- O fluxo de rede da 1.5.2 foi preservado. As confirmações específicas e permissões existentes continuam no executor.
+
+Validação: `dotnet run --project Nexo.Checks -- --component-evals` usa o Qwen local com Windows simulado para saudações, agradecimento após reparo, câmera desabilitada, serviço de áudio parado, Bluetooth desabilitado, fila de impressão, câmera ausente e recusa. As avaliações de reconexão/retomada e regressões de rede ficam disponíveis pelas opções `--interaction-evals --adapter-evals --network-evals`. Isso não comprova reparos físicos nem cobertura de qualquer falha desses componentes. Não houve treinamento de pesos. O plano de expansão e seus limites estão em [docs/AVALIACAO-E-TREINAMENTO.md](docs/AVALIACAO-E-TREINAMENTO.md).
+
+### Correção 1.5.2 — transição de IP fixo para automático
+
+O registro real da falha de 1.5.1 trouxe `RenewDHCPLease.ReturnValue=84`: IP não habilitado no adaptador. O executor removia o último endereço manual, ativava DHCP e tentava renovar por WMI; o erro do método era registrado, mas o resumo o tratava como simples falta de concessão.
+
+- A transição agora usa `netsh interface ipv4 set address name=<índice observado> source=dhcp store=persistent`, após conferir o GUID. Essa operação do Windows habilita DHCP e remove endereços estáticos e gateways anteriores; o executor não esvazia o endereço antes de chamá-la. DNS continua preservado.
+- O código de saída é conferido imediatamente, seguido de leitura do modo DHCP e espera pela concessão utilizável. Comando aceito não equivale a endereço recebido nem a internet confirmada.
+- Falhas guardam `dhcpTransition` (método, código e saída) e `failureState` (estado antes da restauração). O resumo não atribui automaticamente a falha ao cabo/roteador. A confirmação e a restauração continuam obrigatórias.
+- A suíte simulada inclui o cenário em que remover o último IP antes da transição é rejeitado, comando nativo recusado, comando aceito sem mudança de modo, concessão ausente e restauração. `Nexo.Checks/DhcpLiveCheck.ps1` é um teste **opcional e explicitamente autorizado** no PC real; exige administrador, usa o endereço DHCP atual como estático temporário, depois retorna a DHCP com o executor de produção. Guarda backup e inicia recuperação independente para o mesmo GUID. Não é executado pela suíte comum.
+
+Referências: [Microsoft — código 84](https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/enabledhcp-method-in-class-win32-networkadapterconfiguration) e [Microsoft — netsh interface](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/netsh-interface).
 
 ### Correção 1.5.1 — múltiplas interfaces e recuperação demorada
 
@@ -70,7 +91,7 @@ Validação na interface WPF: envio pelos dois botões, rascunho preservado, blo
 
 Validação original: consultas reais somente de leitura, testes simulados do executor e avaliação do Qwen3 instalado com uma interface virtual sem IP, índice diferente e ação recusada. A versão 1.4.0 também exige que esses cenários avancem sem confirmação intermediária no chat. Não há garantia de resolução geral baseada nesses poucos cenários.
 
-As contas existentes continuam válidas. Em instalação nova: **Guisbz / 1234**, administrador. O primeiro acesso solicita troca de senha antes do chat. A atualização ativa `qwen3:8b` uma única vez, preservando perfis, senhas e históricos.
+As contas existentes continuam válidas. Em instalação nova: **Guisbz / 1234**, administrador. O primeiro acesso exige a troca de senha antes de liberar as funções do aplicativo. A atualização ativa `qwen3:8b` uma única vez, preservando perfis, senhas e históricos.
 
 ## IA instalada
 
@@ -117,6 +138,12 @@ Drivers dependem da disponibilidade e políticas do Windows Update. Não há pro
 
 ## Desenvolvimento e testes
 
+Tutorial completo: [compilação, execução, publicação e evolução da IA](docs/COMPILACAO-E-IA.md).
+
+Perguntas detalhadas sobre tecnologias, abertura do código, compilação, execução, segurança e limites: [perguntas e respostas sobre o Nexo](docs/PERGUNTAS-E-RESPOSTAS.md).
+
+Visão do código, fronteiras de autorização e limitações: [arquitetura e limites](docs/ARQUITETURA-E-LIMITES.md). Resultado da revisão de 16/10/2026: [relatório técnico de validação](docs/RELATORIO-TECNICO-VALIDACAO-2026-10-16.md).
+
 ```powershell
 dotnet build Nexo.Support/Nexo.Support.csproj -c Release
 dotnet run --project Nexo.Checks
@@ -127,7 +154,7 @@ dotnet run --project Nexo.Checks -- --adapter-evals
 dotnet run --project Nexo.Checks -- --network-evals
 dotnet run --project Nexo.Checks -- --interaction-evals
 dotnet run --project Nexo.Checks -- --interface-probe-live
-dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -o artifacts/Nexo-1.5.1
+dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -o artifacts/Nexo-1.6.0
 ```
 
 `--diagnostics` consulta o Windows real. `--agent-live` usa o modelo instalado e verifica chamadas reais e recusa de correções, sem autorizar alterações. A suíte PowerShell substitui comandos de rede por simuladores e testa aplicação, falha, cancelamento e timeout com restauração.

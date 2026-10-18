@@ -7,7 +7,11 @@ using System.Text.Json;
 
 namespace Nexo.Support;
 
-public sealed record Device(string Name, string Id, int Code, string Status);
+public sealed record Device(string Name, string Id, int Code, string Status)
+{
+    public string[] HardwareIds { get; init; } = [];
+    public string[] CompatibleIds { get; init; } = [];
+}
 public sealed record Diagnostic(string Topic, string Summary, List<Device> Devices);
 public sealed class SupportService(Store store)
 {
@@ -59,19 +63,21 @@ public sealed class SupportService(Store store)
     public async Task<string> Repair(Account actor, string action, string? deviceId, CancellationToken token)
     {
         store.Require(actor, a => a.Repair);
-        store.Log(actor, "Correção autorizada: " + action);
+        token.ThrowIfCancellationRequested();
+        if (action is not ("dns" or "enable-camera") || action == "enable-camera" && string.IsNullOrWhiteSpace(deviceId)) throw new InvalidOperationException("Ação não permitida.");
+        store.Log(actor, "Correção iniciada: " + action);
         if (action == "dns")
         {
             var result = await Run(Path.Combine(Environment.SystemDirectory, "ipconfig.exe"), ["/flushdns"], token);
             store.Log(actor, "Limpeza de DNS concluída");
             return "Cache DNS limpo. Tente acessar novamente o endereço que apresentou problema.\n\n" + result.Trim();
         }
-        if (action != "enable-camera" || string.IsNullOrWhiteSpace(deviceId)) throw new InvalidOperationException("Ação não permitida.");
         // Re-read hardware immediately before changing it. Never accept an arbitrary model-generated command.
         var check = await Diagnose(actor, "camera", new Progress<string>(), token);
         if (!check.Devices.Any(d => d.Id == deviceId && d.Code == 22)) throw new InvalidOperationException("Esta câmera não está mais disponível como dispositivo desabilitado. Faça um novo diagnóstico.");
         var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "pnputil.exe")) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
-        start.ArgumentList.Add("/enable-device"); start.ArgumentList.Add(deviceId);
+        start.ArgumentList.Add("/enable-device"); start.ArgumentList.Add(deviceId!);
+        token.ThrowIfCancellationRequested();
         using var process = Process.Start(start) ?? throw new IOException("Não foi possível iniciar a correção.");
         // Once an elevated operation starts, await completion rather than claiming cancellation rolled it back.
         await process.WaitForExitAsync();
@@ -110,6 +116,7 @@ public sealed class SupportService(Store store)
     {
         var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        token.ThrowIfCancellationRequested();
         using var process = Process.Start(start) ?? throw new IOException("Não foi possível iniciar o diagnóstico.");
         var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);

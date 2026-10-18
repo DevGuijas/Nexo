@@ -3,7 +3,17 @@ $ErrorActionPreference='Stop'
 function Get-NetAdapter { param($InterfaceIndex) [pscustomobject]@{Name=$script:adapterName;InterfaceDescription=$script:adapterDescription;InterfaceGuid='{00000000-0000-0000-0000-000000000001}';Virtual=$script:virtual;HardwareInterface=(-not $script:virtual)} }
 function Get-NetIPInterface { param($InterfaceIndex,$AddressFamily) [pscustomobject]@{Dhcp=$script:state.Dhcp} }
 function Get-CimInstance { param($ClassName,$Filter,$ErrorAction) if($ClassName -ne 'Win32_NetworkAdapterConfiguration' -or $Filter -ne 'InterfaceIndex=10'){throw 'Wrong DHCP target'}; [pscustomobject]@{SettingID='{00000000-0000-0000-0000-000000000001}'} }
-function Invoke-CimMethod { param($InputObject,$MethodName,$OperationTimeoutSec,$ErrorAction) if($MethodName -ne 'RenewDHCPLease'){throw 'Wrong method'}; $script:renewed=$true; if($script:renewOnly){$script:state.Addresses=@([pscustomobject]@{IPAddress='10.0.0.25';PrefixLength=24;PrefixOrigin=3;AddressState=4})}; [pscustomobject]@{ReturnValue=0} }
+function Invoke-CimMethod { throw 'Legacy renewal must not run after removing the last IP (Windows error 84)' }
+function Invoke-TestNetsh {
+    if (($args -join ' ') -ne 'interface ipv4 set address name=10 source=dhcp store=persistent') { throw 'Unexpected native arguments' }
+    if ($script:transition84 -and $script:state.Addresses.Count -eq 0) { throw 'Last IP was removed before DHCP transition' }
+    $script:transitionCalled=$true
+    if($script:nativeError){$global:LASTEXITCODE=5; 'Access denied';return}
+    $global:LASTEXITCODE=0
+    if($script:modeUnchanged){return}
+    $script:state.Dhcp='Enabled'; $script:state.Routes=@()
+    $script:state.Addresses=$(if($script:noLease -or $script:leaseDelay -gt 0){@()}else{@([pscustomobject]@{IPAddress='10.0.0.25';PrefixLength=24;PrefixOrigin=3;AddressState=4})})
+}
 function Get-NetIPAddress {
     param($InterfaceIndex,$AddressFamily,$ErrorAction)
     if($script:state.Dhcp -eq 'Enabled' -and $script:leaseDelay -gt 0){$script:leaseDelay--; if($script:leaseDelay -eq 0){$script:state.Addresses=@([pscustomobject]@{IPAddress='10.0.0.25';PrefixLength=24;PrefixOrigin='Dhcp';AddressState='Preferred'})}}
@@ -34,19 +44,21 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
     $script:state=@{Dhcp='Disabled';StaticDns='10.0.0.2';Dns=@('10.0.0.2');Addresses=@([pscustomobject]@{IPAddress='10.0.0.10';PrefixLength=24;PrefixOrigin=1;AddressState=4});Routes=@([pscustomobject]@{DestinationPrefix='0.0.0.0/0';NextHop='10.0.0.1';RouteMetric=256})}
     $script:failOnce=$failure
     $script:noLease=$variant -eq 'no-lease'; $script:leaseDelay=$(if($variant -eq 'delayed-lease'){3}else{0})
-    $script:renewOnly=$variant -eq 'renew-required'; $script:renewed=$false
+    $script:renewOnly=$false; $script:transition84=$variant -eq 'error-84'; $script:transitionCalled=$false
+    $script:nativeError=$variant -eq 'native-error'; $script:modeUnchanged=$variant -eq 'mode-unchanged'
     $script:virtual=$variant -in 'hyperv','default-switch','vpn'
     $script:adapterName=$(if($variant -eq 'default-switch'){'vEthernet (Default Switch)'}else{'Adapter-Test'})
     $script:adapterDescription=$(if($variant -in 'hyperv','default-switch'){'Hyper-V Virtual Ethernet Adapter #2'}elseif($variant -eq 'vpn'){'VPN Adapter'}else{'Realtek Ethernet'})
     $operationDir=Join-Path $testRoot $name; New-Item -ItemType Directory -Path $operationDir | Out-Null
     if($decision -ne 'timeout'){Set-Content -LiteralPath (Join-Path $operationDir 'decision.txt') -Value $decision}
     $requestJson=@{Action=$action;Index=10;ExpectedGuid=$(if($variant -eq 'identity-changed'){'00000000-0000-0000-0000-000000000099'}else{'00000000-0000-0000-0000-000000000001'});Mode=$mode;Servers=@('1.1.1.1');Address='10.0.0.20';Prefix=24;Gateway='10.0.0.1'} | ConvertTo-Json
-    $testSource=$source.Replace('.AddSeconds(60)', '.AddMilliseconds(500)').Replace('Start-Sleep -Milliseconds 500','Start-Sleep -Milliseconds 10').Replace('Start-Sleep -Seconds 3','Start-Sleep -Milliseconds 1')
+    $testSource=$source.Replace('"$env:WINDIR\System32\netsh.exe"','Invoke-TestNetsh').Replace('.AddSeconds(60)', '.AddMilliseconds(500)').Replace('Start-Sleep -Milliseconds 500','Start-Sleep -Milliseconds 10').Replace('Start-Sleep -Seconds 3','Start-Sleep -Milliseconds 1')
+    if($testSource.Contains('netsh.exe')){throw 'Native command was not isolated by the simulator'}
     & ([scriptblock]::Create($testSource))
     $result=Get-Content -LiteralPath (Join-Path $operationDir 'result.json') -Raw | ConvertFrom-Json
     if($variant -in 'default-switch','vpn','identity-changed') {
         if($result.success -or (Test-Path (Join-Path $operationDir 'before.json')) -or $script:state.Addresses[0].IPAddress -ne '10.0.0.10'){throw 'Disallowed target was changed'}
-    } elseif($decision -eq 'keep' -and -not $failure -and -not $script:noLease) {
+    } elseif($decision -eq 'keep' -and -not $failure -and -not $script:noLease -and -not $script:nativeError -and -not $script:modeUnchanged) {
         if(-not $result.success){throw ($name+': '+($result | ConvertTo-Json -Depth 5))}
         if($action -eq 'set_dns' -and $script:state.Dns[0] -ne '1.1.1.1'){throw 'DNS was not applied'}
         if($action -eq 'set_ipv4' -and $mode -eq 'static' -and $script:state.Addresses[0].IPAddress -ne '10.0.0.20'){throw 'Static IP was not applied'}
@@ -56,7 +68,9 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
         if($script:state.Dns[0] -ne '10.0.0.2' -or $script:state.Addresses[0].IPAddress -ne '10.0.0.10'){throw ($name+': prior state not restored')}
     }
     Write-Output ('PASS: simulated network transaction '+$name)
-    if($variant -eq 'renew-required' -and -not $script:renewed){throw 'DHCP renewal was not requested'}
+    if($variant -eq 'error-84' -and -not $script:transitionCalled){throw 'Static-to-DHCP transition was not requested'}
+    if($variant -in 'native-error','mode-unchanged','no-lease' -and -not $result.failureState){throw 'Pre-rollback evidence was lost'}
+    if($variant -eq 'native-error' -and $result.dhcpTransition.exitCode -ne 5){throw 'Native error code was lost'}
 }
 try {
     Check 'dns-keep' 'set_dns' 'manual' 'keep'
@@ -67,7 +81,9 @@ try {
     Check 'dhcp-rollback' 'set_ipv4' 'dhcp' 'rollback'
     Check 'timeout-rollback' 'set_dns' 'manual' 'timeout'
     Check 'dhcp-empty-then-lease' 'set_ipv4' 'dhcp' 'keep' $false 'delayed-lease'
-    Check 'dhcp-renewal-required' 'set_ipv4' 'dhcp' 'keep' $false 'renew-required'
+    Check 'dhcp-last-address-error84' 'set_ipv4' 'dhcp' 'keep' $false 'error-84'
+    Check 'dhcp-native-command-rejected' 'set_ipv4' 'dhcp' 'keep' $false 'native-error'
+    Check 'dhcp-command-success-mode-unchanged' 'set_ipv4' 'dhcp' 'keep' $false 'mode-unchanged'
     Check 'dhcp-unavailable-restores-from-empty' 'set_ipv4' 'dhcp' 'keep' $false 'no-lease'
     Check 'hyperv-dhcp-keep' 'set_ipv4' 'dhcp' 'keep' $false 'hyperv'
     Check 'default-switch-blocked' 'set_ipv4' 'dhcp' 'keep' $false 'default-switch'

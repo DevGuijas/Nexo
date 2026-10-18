@@ -10,6 +10,29 @@ Os incidentes da versão 1.5.0 também revelaram ausência de teste por interfac
 
 ## Processo proposto
 
+### Base comum introduzida na 1.6.0
+
+A falha com “Bom dia” estava no controle da conversa: uma resposta sem ferramentas era rejeitada antes de chegar ao usuário. A correção permite conversa natural, sem exigir diagnóstico. A triagem de sintomas de câmera, áudio, Bluetooth e impressão faz uma primeira consulta; o modelo escolhe as etapas seguintes. Após uma correção com estado verificado no executor, o controlador solicita teste funcional. Esses mecanismos são código da aplicação, não capacidades aprendidas por treinamento.
+
+`ComponentEvals.cs` exercita Qwen local e executor simulado nos seguintes casos:
+
+| Cenário | Comportamento exigido |
+|---|---|
+| Saudação, agradecimento ou dúvida de capacidade | Conversar sem consultar/alterar Windows nem devolver erro de protocolo |
+| Saudação com câmera desabilitada | Consultar câmera, propor habilitação no alvo observado e pedir teste de imagem |
+| Áudio sem som e serviço parado | Consultar dispositivos/serviços, reiniciar Audiosrv e pedir teste de som |
+| Confirmação após reparo de áudio | Usar o contexto e responder sem repetir diagnóstico/correção |
+| Bluetooth desabilitado | Identificar o dispositivo, propor habilitação e pedir teste funcional |
+| Documento preso na fila | Consultar impressora e propor ação pertinente à fila/spooler |
+| Câmera ausente | Esclarecer a ausência e pedir informação sobre o tipo de dispositivo, sem habilitar alvo inventado |
+| Alteração recusada | Interromper a correção e reconhecer a recusa |
+
+O cenário de câmera ausente é resolvido pela triagem; os demais reparos dependem da escolha do modelo após a observação. A lista cobre uma falha por componente, não todos os motivos de mau funcionamento. Ainda faltam avaliações amplas com múltiplos periféricos, volume/mudo, aplicativos específicos, permissões corporativas, impressoras de rede, pareamento Bluetooth, drivers e defeitos físicos, além de conversas em que a primeira correção falha. Os testes simulados não validam a operação elevada em cada hardware real.
+
+Um modelo mais capaz ou treinado pode melhorar interpretação e escolha de etapas. Para resolver uma nova classe de problema, porém, o aplicativo também precisa de uma observação adequada, ação implementada, autorização e uma maneira de conferir seu efeito. A aplicação ainda não oferece execução arbitrária nem resolução geral N1/N2/N3.
+
+### Etapas de expansão
+
 1. **Montar um laboratório de falhas reproduzíveis.** Em VMs/computadores de teste, reproduzir interface desativada, cabo desconectado, DHCP indisponível, DNS incorreto, câmera bloqueada, serviço de áudio parado, Bluetooth desabilitado e fila de impressão travada. Registrar o estado inicial e a forma de restaurá-lo.
 2. **Definir o resultado esperado por cenário.** Consulta correta, alvo correto, ação mínima autorizada, verificação posterior, tratamento de falhas e resumo fiel. Não basta o agente responder ou chamar alguma ferramenta.
 3. **Medir o modelo atual.** Registrar sucesso por cenário, ações indevidas, recusas respeitadas, repetições, alegações sem evidência, tempo e quantidade de intervenções. Executar variações e múltiplas tentativas; um caso aprovado não prova robustez.

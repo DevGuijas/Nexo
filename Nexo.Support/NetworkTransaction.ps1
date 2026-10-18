@@ -3,7 +3,18 @@ $request = $requestJson | ConvertFrom-Json
 $interfaceIndex = [int]$request.Index
 $before = $null
 $changed = $false
-$renewal = $null
+$dhcpTransition = @{}
+$failureState = $null
+function Set-AutomaticIP {
+    $current = Get-NetAdapter -InterfaceIndex $interfaceIndex -ErrorAction Stop
+    if ([guid]$current.InterfaceGuid -ne [guid]$before.Guid) { throw 'A identidade da interface mudou antes da transição DHCP.' }
+    # Let Windows perform the complete static-to-DHCP transition. Removing the last
+    # address first can leave Win32_NetworkAdapterConfiguration.IPEnabled false (84).
+    $output = @(& "$env:WINDIR\System32\netsh.exe" interface ipv4 set address "name=$interfaceIndex" source=dhcp store=persistent 2>&1)
+    $code = $LASTEXITCODE
+    $dhcpTransition.method='netsh interface ipv4 set address source=dhcp'; $dhcpTransition.exitCode=$code; $dhcpTransition.output=($output -join "`n")
+    if ($code -ne 0) { throw ('O Windows recusou a mudança para IP automático (código '+$code+'): '+($output -join ' ')) }
+}
 function Save-Result($filename, $value) {
     $destination = Join-Path $operationDir $filename
     $temporary = $destination + '.tmp'
@@ -48,7 +59,7 @@ function Restore-Network {
     if ($request.Action -eq 'set_ipv4') {
         Clear-ManualIP
         if ($before.Dhcp -eq 'Enabled') {
-            Set-NetIPInterface -InterfaceIndex $interfaceIndex -AddressFamily IPv4 -Dhcp Enabled
+            Set-AutomaticIP
         } else {
             Set-NetIPInterface -InterfaceIndex $interfaceIndex -AddressFamily IPv4 -Dhcp Disabled
             Read-Addresses | Remove-NetIPAddress -Confirm:$false
@@ -95,17 +106,10 @@ try {
             Get-DnsClientServerAddress -InterfaceIndex $interfaceIndex -AddressFamily IPv4 | Set-DnsClientServerAddress -ServerAddresses @($request.Servers)
         }
     } elseif ($request.Action -eq 'set_ipv4') {
-        Clear-ManualIP
         if ($request.Mode -eq 'dhcp') {
-            Set-NetIPInterface -InterfaceIndex $interfaceIndex -AddressFamily IPv4 -Dhcp Enabled
-            # Enabling DHCP does not guarantee immediate lease acquisition. Renew only
-            # the observed adapter, never all adapters (VPN/Hyper-V may coexist).
-            try {
-                $config = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "InterfaceIndex=$interfaceIndex" -ErrorAction Stop | Where-Object {[guid]$_.SettingID -eq [guid]$before.Guid})
-                if ($config.Count -ne 1) { throw 'Não foi encontrada configuração DHCP com a mesma identidade.' }
-                $renewal = Invoke-CimMethod -InputObject $config[0] -MethodName RenewDHCPLease -OperationTimeoutSec 10 -ErrorAction Stop
-            } catch { $renewal = @{error=$_.Exception.Message} }
+            Set-AutomaticIP
         } else {
+            Clear-ManualIP
             Set-NetIPInterface -InterfaceIndex $interfaceIndex -AddressFamily IPv4 -Dhcp Disabled
             # A previous lease can remain briefly when disabling DHCP.
             Read-Addresses | Remove-NetIPAddress -Confirm:$false
@@ -118,10 +122,13 @@ try {
     Start-Sleep -Seconds 3
     $after = Snapshot
     if ($request.Action -eq 'set_ipv4' -and $request.Mode -eq 'dhcp') {
+        # Verify the mode before waiting for a lease. A successful command exit alone
+        # is not confirmation, and an API rejection is not proof of a DHCP outage.
+        if ($after.Dhcp -ne 'Enabled') { throw 'O comando terminou, mas o Windows não confirmou IP automático. Não foi uma falha comprovada do servidor DHCP.' }
         $leaseDeadline = (Get-Date).AddSeconds(60)
         while (-not @($after.Addresses | Where-Object { [string]$_.PrefixOrigin -in 'Dhcp','3' -and [string]$_.AddressState -in 'Preferred','4' -and $_.IPAddress -notlike '169.254.*' }).Count) {
             if ((Test-Path -LiteralPath (Join-Path $operationDir 'decision.txt')) -and (Get-Content -LiteralPath (Join-Path $operationDir 'decision.txt') -Raw).Trim() -eq 'rollback') { throw 'Aquisição DHCP cancelada. Restaurando a configuração anterior.' }
-            if ((Get-Date) -ge $leaseDeadline) { throw 'DHCP foi habilitado e a renovação foi solicitada, mas não houve IPv4 utilizável após a espera de até 60 segundos. Restaurando a configuração anterior; o servidor DHCP, link ou porta podem estar indisponíveis.' }
+            if ((Get-Date) -ge $leaseDeadline) { throw 'O Windows confirmou IP automático, mas não foi observada concessão IPv4 utilizável no prazo. A causa ainda não foi comprovada; a configuração anterior será restaurada.' }
             Start-Sleep -Milliseconds 500
             $after = Snapshot
         }
@@ -139,15 +146,16 @@ try {
     while (-not (Test-Path -LiteralPath $decisionPath) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
     $keep = (Get-Date) -lt $deadline -and (Test-Path -LiteralPath $decisionPath) -and (Get-Content -LiteralPath $decisionPath -Raw).Trim() -eq 'keep'
     if ($keep) {
-        Save-Result 'result.json' @{success=$true;message='Configuração aplicada, estado consultado e permanência confirmada pelo usuário.';before=$before;after=(Snapshot);renewal=$renewal}
+        Save-Result 'result.json' @{success=$true;message='Configuração aplicada, estado consultado e permanência confirmada pelo usuário.';before=$before;after=(Snapshot);dhcpTransition=$dhcpTransition}
     } else {
         Restore-Network
         Save-Result 'result.json' @{success=$false;reverted=$true;message='Configuração anterior restaurada por cancelamento ou ausência de confirmação.';after=(Snapshot)}
     }
 } catch {
     $failure = $_.Exception.Message
+    try { $failureState = Snapshot } catch { $failureState = @{error=$_.Exception.Message} }
     $reverted = $false
     $rollbackError = $null
     if ($changed -and $before) { try { Restore-Network; $reverted=$true } catch { $rollbackError=$_.Exception.Message } }
-    Save-Result 'result.json' @{success=$false;error=$failure;changed=$changed;reverted=$reverted;rollbackError=$rollbackError;renewal=$renewal;backup=(Join-Path $operationDir 'before.json')}
+    Save-Result 'result.json' @{success=$false;error=$failure;changed=$changed;reverted=$reverted;rollbackError=$rollbackError;dhcpTransition=$dhcpTransition;failureState=$failureState;backup=(Join-Path $operationDir 'before.json')}
 }

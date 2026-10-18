@@ -73,6 +73,23 @@ public sealed class Database
     public bool AiEnabled { get; set; }
     public int AgentVersion { get; set; }
 }
+public sealed record SupportMetrics(int Open, int Resolved, int Escalated, double? ResolutionRate, double? EscalationRate, double? AverageClosureMinutes)
+{
+    public int Closed => Resolved + Escalated;
+    public static SupportMetrics Calculate(Database data)
+    {
+        var resolved = data.Conversations.Where(c => c.Status == "Resolvido").ToArray();
+        var escalated = data.Conversations.Where(c => c.Status == "Encaminhamento preparado").ToArray();
+        var open = data.Conversations.Count(c => c.Status != "Resolvido" && c.Status != "Encaminhamento preparado");
+        var closed = resolved.Length + escalated.Length;
+        if (closed == 0) return new SupportMetrics(open, 0, 0, null, null, null);
+        var durations = resolved.Select(c => (c.Entries.LastOrDefault()?.Time ?? c.Created) - c.Created)
+            .Concat(escalated.Select(c => (data.Tickets.Where(t => t.ConversationId == c.Id).OrderByDescending(t => t.Created).FirstOrDefault()?.Created ?? c.Entries.LastOrDefault()?.Time ?? c.Created) - c.Created))
+            .Select(duration => Math.Max(0, duration.TotalMinutes)).ToArray();
+        return new SupportMetrics(open, resolved.Length, escalated.Length,
+            (double)resolved.Length / closed, (double)escalated.Length / closed, durations.Average());
+    }
+}
 public static class Passwords
 {
     public static string Hash(string password)
@@ -125,13 +142,35 @@ public sealed class Store
     public void Save()
     {
         var temp = path + ".tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(Data, new JsonSerializerOptions { WriteIndented = true }));
-        File.Move(temp, path, true);
+        try
+        {
+            File.WriteAllText(temp, JsonSerializer.Serialize(Data, new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(temp, path, true);
+        }
+        catch
+        {
+            try { if (File.Exists(temp)) File.Delete(temp); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            throw;
+        }
     }
     public void Log(Account actor, string action)
+        => Commit(actor, action, () => { }, () => { });
+
+    internal void Commit(Account actor, string action, Action apply, Action rollback)
     {
-        Data.Audit.Add(new Audit { Actor = actor.Login, Action = action });
-        Save();
+        var entry = new Audit { Actor = actor.Login, Action = action };
+        try
+        {
+            apply();
+            Data.Audit.Add(entry);
+            Save();
+        }
+        catch
+        {
+            Data.Audit.Remove(entry);
+            rollback();
+            throw;
+        }
     }
     public Account Login(string login, string password)
     {
@@ -152,6 +191,7 @@ public sealed class Store
     {
         var current = Data.Accounts.SingleOrDefault(a => a.Id == actor.Id);
         if (current == null || !current.Active || !permission(current)) throw new InvalidOperationException("Sua conta não tem permissão para esta ação.");
+        if (current.MustChangePassword) throw new InvalidOperationException("Defina sua senha pessoal antes de usar o Nexo.");
     }
     public void SaveAccount(Account actor, Account edited, string? newPassword)
     {
@@ -166,24 +206,39 @@ public sealed class Store
         if (old == null && string.IsNullOrEmpty(newPassword)) throw new InvalidOperationException("Defina a senha inicial.");
         if (!string.IsNullOrEmpty(newPassword)) { Passwords.Validate(newPassword); edited.PasswordHash = Passwords.Hash(newPassword); edited.MustChangePassword = true; }
         else if (old != null) edited.PasswordHash = old.PasswordHash;
+        var oldPosition = old == null ? -1 : Data.Accounts.IndexOf(old);
         if (old != null) Data.Accounts.Remove(old);
         Data.Accounts.Add(edited);
-        Log(actor, "Conta e permissões atualizadas: " + edited.Login);
+        try { Log(actor, "Conta e permissões atualizadas: " + edited.Login); }
+        catch
+        {
+            Data.Accounts.Remove(edited);
+            if (old != null) Data.Accounts.Insert(oldPosition, old);
+            throw;
+        }
     }
     public void UpdateProfile(Account actor, string name, string email, string photo, string currentPassword, string newPassword)
     {
-        Require(actor, _ => true);
+        var current = Data.Accounts.SingleOrDefault(a => a.Id == actor.Id);
+        if (current == null || !current.Active) throw new InvalidOperationException("Sua conta não tem permissão para esta ação.");
         if (string.IsNullOrWhiteSpace(name)) throw new InvalidOperationException("Informe seu nome.");
         ValidateEmail(email);
+        if (current.MustChangePassword && newPassword.Length == 0) throw new InvalidOperationException("Defina uma nova senha para concluir o primeiro acesso.");
+        var before = (current.Name, current.Email, current.Photo, current.PasswordHash, current.MustChangePassword);
         if (newPassword.Length > 0)
         {
-            if (!Passwords.Verify(currentPassword, actor.PasswordHash)) throw new InvalidOperationException("A senha atual está incorreta.");
+            if (!Passwords.Verify(currentPassword, current.PasswordHash)) throw new InvalidOperationException("A senha atual está incorreta.");
             Passwords.Validate(newPassword);
-            actor.PasswordHash = Passwords.Hash(newPassword);
-            actor.MustChangePassword = false;
+            current.PasswordHash = Passwords.Hash(newPassword);
+            current.MustChangePassword = false;
         }
-        actor.Name = name.Trim(); actor.Email = email.Trim(); actor.Photo = photo;
-        Log(actor, "Perfil atualizado");
+        current.Name = name.Trim(); current.Email = email.Trim(); current.Photo = photo;
+        try { Log(current, "Perfil atualizado"); }
+        catch
+        {
+            (current.Name, current.Email, current.Photo, current.PasswordHash, current.MustChangePassword) = before;
+            throw;
+        }
     }
     public static void ValidateEmail(string email)
     {

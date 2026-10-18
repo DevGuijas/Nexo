@@ -8,7 +8,7 @@ function Get-NetAdapter {
 }
 function Get-NetIPInterface {param($AddressFamily,$InterfaceIndex,$ErrorAction) if($InterfaceIndex -eq 3){throw 'No MSFT_NetIPInterface InterfaceIndex=3'}; [pscustomobject]@{InterfaceIndex=8;Dhcp='Enabled'} }
 function Get-NetIPAddress {param($AddressFamily,$ErrorAction) [pscustomobject]@{InterfaceIndex=8;IPAddress='192.0.2.10';PrefixLength=24} }
-function Get-NetRoute {param($AddressFamily,$ErrorAction) [pscustomobject]@{InterfaceIndex=8;DestinationPrefix='0.0.0.0/0';NextHop='0.0.0.0'} }
+function Get-NetRoute {param($AddressFamily,$ErrorAction) [pscustomobject]@{InterfaceIndex=8;DestinationPrefix='0.0.0.0/0';NextHop='0.0.0.0';RouteMetric=256} }
 function Get-DnsClientServerAddress {param($AddressFamily,$InterfaceIndex,$ErrorAction) if($script:dnsFailure -or $InterfaceIndex -eq 3){throw 'DNS unavailable'}; [pscustomobject]@{InterfaceIndex=8;ServerAddresses=@('192.0.2.53')} }
 function Get-NetConnectionProfile {param($ErrorAction) [pscustomobject]@{InterfaceIndex=8;NetworkCategory='Public'} }
 function Enable-NetAdapter {param([Parameter(ValueFromPipeline=$true)]$InputObject,$Confirm) process {if($InputObject.ifIndex -ne 3){throw 'Wrong adapter selected'};$script:enableCount++;if(-not $script:enableFails){$script:status='Disconnected'}} }
