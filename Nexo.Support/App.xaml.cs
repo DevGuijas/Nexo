@@ -12,7 +12,7 @@ public partial class App : Application
         if (!first) { MessageBox.Show("O Nexo já está aberto nesta sessão."); Shutdown(); return; }
         try
         {
-            var store = new Store(e.Args.Contains("--screenshot") ? Path.Combine(AppContext.BaseDirectory, ".preview-data") : null);
+            var store = new Store(e.Args.Contains("--screenshot") ? Path.Combine(AppContext.BaseDirectory, ".preview-data") : null, directAccess: true);
             var window = new MainWindow(store);
             MainWindow = window;
             window.Show();

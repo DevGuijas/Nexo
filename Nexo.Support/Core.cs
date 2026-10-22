@@ -1,6 +1,7 @@
 using System.IO;
 using System.Net.Mail;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
@@ -25,6 +26,8 @@ public sealed class Entry
 {
     public string Role { get; set; } = "assistant";
     public string Text { get; set; } = "";
+    public string Presentation { get; set; } = "";
+    public long? DurationMs { get; set; }
     public DateTime Time { get; set; } = DateTime.Now;
 }
 public sealed class AgentMessage
@@ -118,9 +121,11 @@ public sealed class Store
     public Database Data { get; }
     public string Root { get; }
     private readonly string path;
+    private readonly bool directAccess;
     private readonly Dictionary<string, (int Attempts, DateTime Until)> failures = new(StringComparer.OrdinalIgnoreCase);
-    public Store(string? root = null)
+    public Store(string? root = null, bool directAccess = false)
     {
+        this.directAccess = directAccess;
         Root = root ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NexoSupport");
         Directory.CreateDirectory(Root);
         path = Path.Combine(Root, "data.json");
@@ -128,7 +133,7 @@ public sealed class Store
         else
         {
             Data = new Database();
-            Data.Accounts.Add(new Account { Login = "Guisbz", Name = "Guilherme", PasswordHash = Passwords.Hash("1234"), Admin = true, Repair = true, MustChangePassword = true });
+            if (!directAccess) Data.Accounts.Add(new Account { Login = "Guisbz", Name = "Guilherme", PasswordHash = Passwords.Hash("1234"), Admin = true, Repair = true, MustChangePassword = true });
             Save();
         }
         if (Data.AgentVersion < 2)
@@ -138,6 +143,46 @@ public sealed class Store
             Data.AgentVersion = 2;
             Save();
         }
+    }
+    public Account GetLocalSession()
+    {
+        if (!directAccess) throw new InvalidOperationException("A sessão direta não está habilitada.");
+        var session = CreateLocalSession();
+        var conversations = Data.Conversations.Where(item => item.UserId != session.Id).Select(item => (Item: item, Previous: item.UserId)).ToArray();
+        var tickets = Data.Tickets.Where(item => item.UserId != session.Id).Select(item => (Item: item, Previous: item.UserId)).ToArray();
+        if (conversations.Length > 0 || tickets.Length > 0)
+        {
+            try
+            {
+                foreach (var item in conversations) item.Item.UserId = session.Id;
+                foreach (var item in tickets) item.Item.UserId = session.Id;
+                Save();
+            }
+            catch
+            {
+                foreach (var item in conversations) item.Item.UserId = item.Previous;
+                foreach (var item in tickets) item.Item.UserId = item.Previous;
+                throw;
+            }
+        }
+        return session;
+    }
+    private static Account CreateLocalSession()
+    {
+        var windowsIdentity = Environment.UserDomainName + "\\" + Environment.UserName;
+        var identityHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(windowsIdentity)));
+        return new Account
+        {
+            Id = "local-" + identityHash,
+            Login = Environment.UserName,
+            Name = Environment.UserName,
+            Admin = false,
+            Diagnose = true,
+            Repair = true,
+            Tickets = true,
+            Active = true,
+            MustChangePassword = false
+        };
     }
     public void Save()
     {
@@ -189,6 +234,11 @@ public sealed class Store
     }
     public void Require(Account actor, Func<Account, bool> permission)
     {
+        if (directAccess && actor.Id == CreateLocalSession().Id)
+        {
+            if (!permission(CreateLocalSession())) throw new InvalidOperationException("Esta função não está disponível na sessão local.");
+            return;
+        }
         var current = Data.Accounts.SingleOrDefault(a => a.Id == actor.Id);
         if (current == null || !current.Active || !permission(current)) throw new InvalidOperationException("Sua conta não tem permissão para esta ação.");
         if (current.MustChangePassword) throw new InvalidOperationException("Defina sua senha pessoal antes de usar o Nexo.");

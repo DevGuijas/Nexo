@@ -1,10 +1,18 @@
 # Nexo — agente de suporte para Windows
 
-Aplicativo C# / WPF com IA local que escolhe ferramentas do Windows, executa ações, recebe os resultados e continua a investigação. A interface e as contas da primeira versão foram preservadas.
+Aplicativo C# / WPF com IA local que escolhe ferramentas do Windows, executa ações autorizadas, recebe os resultados e continua a investigação. O aplicativo abre direto no atendimento e usa a sessão atual do Windows.
 
 ## Abrir
 
-Execute `artifacts/Nexo-1.6.0/Nexo.exe`. A barra da janela deve mostrar **Nexo 1.6.0**. Feche a versão anterior antes de abrir. Requer **.NET Desktop Runtime 8 para Windows x64**. Para distribuir, extraia todos os arquivos de `artifacts/Nexo-1.6.0-Windows.zip` na mesma pasta.
+Para executar a compilação local, abra `artifacts/Nexo-1.6.2/Nexo.exe`. A barra da janela deve mostrar **Nexo 1.6.2**. Esse pacote é independente do .NET instalado no computador. Para distribuir o aplicativo com o modelo local, baixe [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe). Ele consulta a versão publicada na Oracle ao ser executado; veja [o procedimento de instalação e publicação](docs/INSTALADOR-NUVEM.md).
+
+### Novidade 1.6.2 — detalhes legíveis e distribuição
+
+Os detalhes expandidos das ferramentas mostram dispositivo, versão, origem e resultado em português, sem despejar JSON no chat. Quando a fonte do Windows não oferece driver para uma única placa NVIDIA PCI detectada, um pedido explícito de atualização pode baixar o NVIDIA App pelo domínio oficial após autorização. O arquivo só é disponibilizado se a assinatura digital da NVIDIA for válida. Esse download **não instala nem testa o driver**; o usuário conclui a escolha no aplicativo do fabricante e o Nexo só pode considerar a falha resolvida após teste funcional. O instalador da versão 1.6.2 baixa aplicativo, Ollama e modelo de uma versão assinada publicada na Oracle.
+
+### Novidade 1.6.1 — drivers e acompanhamento
+
+Pedidos explícitos para consultar ou atualizar o driver de um componente identificado seguem um fluxo limitado: inventário PnP, busca online de ofertas com ID exato, autorização nativa quando há uma oferta única e verificação do resultado. Sem oferta, o Nexo informa o dispositivo e a versão observada, registra que nada foi alterado e encerra a busca. O chat mostra as etapas como linhas expansíveis e destaca o resultado com a duração da verificação; não expõe raciocínio interno do modelo.
 
 ### Novidade 1.6.0 — conversa e investigação de componentes
 
@@ -91,7 +99,7 @@ Validação na interface WPF: envio pelos dois botões, rascunho preservado, blo
 
 Validação original: consultas reais somente de leitura, testes simulados do executor e avaliação do Qwen3 instalado com uma interface virtual sem IP, índice diferente e ação recusada. A versão 1.4.0 também exige que esses cenários avancem sem confirmação intermediária no chat. Não há garantia de resolução geral baseada nesses poucos cenários.
 
-As contas existentes continuam válidas. Em instalação nova: **Guisbz / 1234**, administrador. O primeiro acesso exige a troca de senha antes de liberar as funções do aplicativo. A atualização ativa `qwen3:8b` uma única vez, preservando perfis, senhas e históricos.
+O Nexo abre diretamente para o usuário atual do Windows. Não há tela de login nem senha inicial do aplicativo. Atendimentos antigos salvos neste perfil são associados à sessão local para continuar acessíveis. Alterações no Windows ainda pedem autorização específica e ações elevadas usam o UAC.
 
 ## IA instalada
 
@@ -111,10 +119,10 @@ Com o agente ativo, os pedidos comuns de falta de conexão passam primeiro pelo 
 | Bluetooth | Dispositivos e serviço | Habilitar/reiniciar dispositivo, reiniciar serviço Bluetooth |
 | Impressoras | Impressoras, drivers, portas e filas | Reiniciar spooler, cancelar trabalhos da impressora selecionada, habilitar/reiniciar dispositivo |
 | Sistema | Memória, discos, processos com maior uso de memória, erros recentes | Correções conforme causa e ferramentas disponíveis |
-| Drivers | Drivers oferecidos pelo Windows Update | Baixar e instalar um driver específico consultado, sem reinício automático |
+| Hardware e drivers | Dispositivos PnP presentes, códigos de erro, fabricante, IDs e versão/provedor do driver; ofertas online da fonte de atualizações configurada no Windows | Baixar e instalar somente uma oferta com ID de hardware exato para um único dispositivo observado, mediante confirmação e UAC, sem reinício automático |
 | Acompanhamento | Estado de link Ethernet físico, presença de periférico USB/Bluetooth identificado, inicialização do Windows | Orientar reconexão e observar transição; preparar retomada após reinício manual |
 
-Experimente: “Meu Bluetooth não funciona”, “A câmera está desabilitada, pode corrigir”, “A impressora está travada”, “Verifique meu áudio”. Para IPv4/DNS manual, informe os valores da sua rede quando solicitado. O modo básico anterior permanece disponível se o administrador desativar a IA.
+Experimente: “Meu Bluetooth não funciona”, “A câmera está desabilitada, pode corrigir”, “A impressora está travada”, “Verifique meu áudio”. Para IPv4/DNS manual, informe os valores da sua rede quando solicitado. O modo básico permanece disponível quando a IA está desativada nas configurações.
 
 ## Rede e recuperação
 
@@ -122,19 +130,17 @@ Antes de alterar IP/DNS, o executor salva `%LOCALAPPDATA%\NexoSupport\operations
 
 A restauração pode falhar por indisponibilidade do dispositivo ou políticas do Windows; o erro é registrado junto ao backup. Consultar a configuração ou receber DHCP não comprova conectividade com todos os serviços. Teste a conexão antes de manter a mudança. A reconfiguração de IP/DNS permite interfaces físicas e vEthernet do host identificadas; VPN e Default Switch permanecem bloqueados. A ativação de uma interface virtual desativada é permitida com confirmação, sem recriar switches.
 
-## Contas e dados
-
-Perfis com foto, nome, e-mail e senha. Administradores gerenciam contas, redefinem senhas, desativam usuários e atribuem permissões. Senhas usam PBKDF2-SHA256, salt aleatório e 210 mil iterações. Há proteção do último administrador ativo e bloqueio temporário após falhas.
+## Acesso local e dados
 
 Dados em `%LOCALAPPDATA%\NexoSupport\data.json`, por substituição de arquivo temporário. O histórico estruturado contém chamadas e resultados; contexto antigo é removido em turnos completos. A IA recebe dados apenas no serviço local `127.0.0.1:11434`.
 
-As contas pertencem ao aplicativo dentro de um perfil do Windows, não ao domínio. O arquivo depende da proteção desse perfil, sem criptografia integral nem auditoria inviolável. A permissão de correção do Nexo não concede privilégios do Windows: ações elevadas passam pelo UAC. Faça backup com o aplicativo fechado.
+O acesso do aplicativo acompanha a sessão Windows que abriu o Nexo; o arquivo depende da proteção desse perfil, sem criptografia integral nem auditoria inviolável. A sessão direta pode diagnosticar e propor correções, mas não recebe administração de contas. Correções continuam sujeitas à confirmação e não concedem privilégios do Windows; ações elevadas passam pelo UAC. Faça backup com o aplicativo fechado.
 
 ## Limites
 
 O agente opera pelas ferramentas implementadas, sem executar PowerShell livre gerado pelo modelo. Não é controle irrestrito de qualquer software, não manipula arbitrariamente interfaces de aplicativos, não faz pareamento Bluetooth com PIN nem altera automaticamente o dispositivo de áudio padrão.
 
-Drivers dependem da disponibilidade e políticas do Windows Update. Não há promessa de resolver qualquer incidente N3. Quando faltar uma ferramenta ou a correção falhar, o agente deve informar a limitação. Relatórios são exportáveis para a TI; ainda não há envio automático a GLPI/Jira ou outro sistema externo.
+Drivers dependem da disponibilidade e das políticas da fonte de atualizações configurada no Windows (Windows Update ou servidor gerenciado). O fallback NVIDIA baixa apenas o aplicativo oficial, não escolhe nem instala automaticamente um driver do fabricante. O Nexo não aceita URLs indicadas pelo modelo. Após uma instalação via Windows Update, compara a versão observada e o estado PnP; reinicialização pendente ou resultado não confirmado impedem declarar a correção concluída. Não há promessa de resolver qualquer incidente N3. Quando faltar uma ferramenta ou a correção falhar, o agente deve informar a limitação. Relatórios são exportáveis para a TI; ainda não há envio automático a GLPI/Jira ou outro sistema externo.
 
 ## Desenvolvimento e testes
 
@@ -142,7 +148,7 @@ Tutorial completo: [compilação, execução, publicação e evolução da IA](d
 
 Perguntas detalhadas sobre tecnologias, abertura do código, compilação, execução, segurança e limites: [perguntas e respostas sobre o Nexo](docs/PERGUNTAS-E-RESPOSTAS.md).
 
-Visão do código, fronteiras de autorização e limitações: [arquitetura e limites](docs/ARQUITETURA-E-LIMITES.md). Resultado da revisão de 16/10/2026: [relatório técnico de validação](docs/RELATORIO-TECNICO-VALIDACAO-2026-10-16.md).
+Visão do código, fronteiras de autorização e limitações: [arquitetura e limites](docs/ARQUITETURA-E-LIMITES.md). Resultados de validação: [revisão do núcleo em 16/10/2026](docs/RELATORIO-TECNICO-VALIDACAO-2026-10-16.md) e [interface/hardware em 21/10/2026](docs/VALIDACAO-HARDWARE-2026-10-21.md).
 
 ```powershell
 dotnet build Nexo.Support/Nexo.Support.csproj -c Release
@@ -154,12 +160,14 @@ dotnet run --project Nexo.Checks -- --adapter-evals
 dotnet run --project Nexo.Checks -- --network-evals
 dotnet run --project Nexo.Checks -- --interaction-evals
 dotnet run --project Nexo.Checks -- --interface-probe-live
-dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -o artifacts/Nexo-1.6.0
+dotnet run --project Nexo.Checks -- --hardware-live
+dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.6.2
+dotnet run --project Nexo.Setup.Checks -c Release
 ```
 
 `--diagnostics` consulta o Windows real. `--agent-live` usa o modelo instalado e verifica chamadas reais e recusa de correções, sem autorizar alterações. A suíte PowerShell substitui comandos de rede por simuladores e testa aplicação, falha, cancelamento e timeout com restauração.
 
-**Operações que alteram hardware, serviços ou drivers ainda precisam de validação em máquina/VM de teste.** Neste PC, os testes de integração foram de leitura; não foram modificadas configurações, filas ou drivers. `Nexo.exe --screenshot` gera prévias WPF com dados isolados.
+`--hardware-live` inventaria hardware gráfico presente e consulta ofertas online compatíveis em modo somente leitura. **Operações que alteram hardware, serviços ou drivers ainda precisam de validação em máquina/VM de teste.** Neste PC, os testes de integração foram de leitura; não foram modificadas configurações, filas ou drivers. `Nexo.exe --screenshot` gera prévias WPF com dados isolados.
 
 Referências: [Ollama — ciclo de ferramentas](https://docs.ollama.com/capabilities/tool-calling), [Qwen3 8B](https://ollama.com/library/qwen3:8b), [Microsoft — IPv4](https://learn.microsoft.com/en-us/powershell/module/nettcpip/new-netipaddress), [Microsoft — DNS](https://learn.microsoft.com/en-us/powershell/module/dnsclient/set-dnsclientserveraddress), [Microsoft — PnPUtil](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/pnputil-command-syntax).
 

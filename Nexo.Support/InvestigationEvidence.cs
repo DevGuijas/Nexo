@@ -12,7 +12,7 @@ public sealed class InvestigationEvidence
     private readonly HashSet<string> successfulTools = [];
     private readonly HashSet<string> successfulChanges = [];
     private readonly HashSet<string> observedTopics = [];
-    private readonly Dictionary<string, (string Topic, string Name, int Code)> observedDevices = [];
+    private readonly Dictionary<string, (string Topic, string Name, int Code, string[] HardwareIds, string[] CompatibleIds)> observedDevices = [];
     private readonly Dictionary<string, bool> observedPrinters = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (string Title, string HardwareId)> observedUpdates = [];
     private readonly HashSet<string> failedTools = [];
@@ -68,9 +68,8 @@ public sealed class InvestigationEvidence
     public bool UpdateMatchesIncident(string id, HashSet<string> incidentTopics)
     {
         if (!observedUpdates.TryGetValue(id, out var update)) return false;
-        if (SupportIntake.IncidentTopics(update.Title).Overlaps(incidentTopics)) return true;
-        return update.HardwareId.Length > 0 && observedDevices.Any(device => incidentTopics.Contains(device.Value.Topic)
-            && (device.Key.Contains(update.HardwareId, StringComparison.OrdinalIgnoreCase) || update.HardwareId.Contains(device.Key, StringComparison.OrdinalIgnoreCase)));
+        return update.HardwareId.Length > 0 && observedDevices.Values.Any(device => incidentTopics.Contains(device.Topic)
+            && device.HardwareIds.Concat(device.CompatibleIds).Any(hardwareId => string.Equals(hardwareId, update.HardwareId, StringComparison.OrdinalIgnoreCase)));
     }
     public bool UpdateTargetUnambiguous(string id, HashSet<string> incidentTopics, string request)
     {
@@ -139,16 +138,20 @@ public sealed class InvestigationEvidence
                 case "get_processes" or "get_recent_errors": observedTopics.Add("system"); break;
                 case "enable_camera" or "allow_camera": observedTopics.Add("camera"); break;
             }
-            if (name == "diagnose_device" && args.ValueKind == JsonValueKind.Object && args.TryGetProperty("topic", out var category) && category.ValueKind == JsonValueKind.String)
+            if ((name is "diagnose_device" or "get_hardware_inventory") && args.ValueKind == JsonValueKind.Object
+                && args.TryGetProperty(name == "diagnose_device" ? "topic" : "category", out var category) && category.ValueKind == JsonValueKind.String)
             {
                 var topic = category.GetString() ?? "";
+                if (name == "get_hardware_inventory" && (topic is "problem" or "display" or "storage" or "usb")) topic = "hardware";
                 observedTopics.Add(topic);
-                if (root.TryGetProperty("data", out var deviceData) && deviceData.ValueKind == JsonValueKind.Object && deviceData.TryGetProperty("devices", out var devices) && devices.ValueKind == JsonValueKind.Array)
+                if (root.TryGetProperty("data", out var deviceData) && deviceData.ValueKind == JsonValueKind.Object
+                    && (deviceData.TryGetProperty("devices", out var devices) || deviceData.TryGetProperty("Devices", out devices)) && devices.ValueKind == JsonValueKind.Array)
                     foreach (var device in devices.EnumerateArray())
                         if (device.ValueKind == JsonValueKind.Object && device.TryGetProperty("Id", out var id) && id.ValueKind == JsonValueKind.String && id.GetString() is { Length: > 0 } value)
                             observedDevices[value] = (topic,
                                 device.TryGetProperty("Name", out var display) && display.ValueKind == JsonValueKind.String ? display.GetString() ?? "" : "",
-                                device.TryGetProperty("Code", out var code) && code.ValueKind == JsonValueKind.Number && code.TryGetInt32(out var numericCode) ? numericCode : -1);
+                                device.TryGetProperty("Code", out var code) && code.ValueKind == JsonValueKind.Number && code.TryGetInt32(out var numericCode) ? numericCode : -1,
+                                TextArray(device, "HardwareIds"), TextArray(device, "CompatibleIds"));
             }
             if (name == "get_printers" && root.TryGetProperty("data", out var printerData) && printerData.ValueKind == JsonValueKind.String)
             {
@@ -198,6 +201,10 @@ public sealed class InvestigationEvidence
             ? JsonSerializer.Serialize(new { dns = test.TryGetProperty("dnsResolved", out var d) ? d.ToString() : "", tcp = test.TryGetProperty("tcpConnected", out var t) ? t.ToString() : "" }) : result;
         observations[signature] = (fingerprint, observations.TryGetValue(signature, out var old) && old.Result == fingerprint ? old.Count + 1 : 1);
     }
+    private static string[] TextArray(JsonElement source, string name)
+        => source.TryGetProperty(name, out var values) && values.ValueKind == JsonValueKind.Array
+            ? values.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String).Select(value => value.GetString() ?? "").Where(value => value.Length > 0).ToArray()
+            : [];
     public string Summary(string reason = "")
     {
         var lines = new List<string>();

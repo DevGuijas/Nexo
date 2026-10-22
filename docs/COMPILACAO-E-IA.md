@@ -1,6 +1,6 @@
 # Tutorial de compilação, execução e evolução da IA
 
-Este documento explica como preparar o ambiente, compilar, testar e publicar o Nexo 1.6.0. A segunda parte mostra como o modelo de IA é usado pelo projeto e como organizar um experimento de fine-tuning sem confundir treinamento com correções no código do aplicativo.
+Este documento explica como preparar o ambiente, compilar, testar e publicar o Nexo 1.6.2. A segunda parte mostra como o modelo de IA é usado pelo projeto e como organizar um experimento de fine-tuning sem confundir treinamento com correções no código do aplicativo.
 
 ## 1. Visão geral do projeto
 
@@ -126,13 +126,13 @@ Ou execute diretamente o resultado de Release:
 .\Nexo.Support\bin\Release\net8.0-windows\Nexo.exe
 ```
 
-Na primeira instalação, a conta inicial é `Guisbz`, senha `1234`. O aplicativo exige a troca dessa senha antes de liberar as funções; o perfil continua acessível para concluir a troca.
+O Nexo abre diretamente com a identidade da sessão atual do Windows. Não é necessário criar uma conta nem informar senha no aplicativo. Correções continuam sujeitas à confirmação explícita; operações que precisam de elevação usam o UAC do Windows.
 
 Para testar a IA:
 
 1. Confirme que `ollama list` mostra `qwen3:8b`.
 2. Abra o Nexo.
-3. Entre com uma conta administradora.
+3. Acesse **Configurações** pela navegação lateral.
 4. Em **Configurações**, habilite o agente de IA e mantenha o nome `qwen3:8b`.
 5. Use **Verificar modelo local**.
 
@@ -191,7 +191,7 @@ Há duas formas principais de publicação.
 Gera uma pasta menor. O computador de destino precisa ter o **.NET Desktop Runtime 8 x64**:
 
 ```powershell
-$nexoPublishDir = ".\artifacts\Nexo-1.6.0-local"
+$nexoPublishDir = ".\artifacts\Nexo-1.6.2-local"
 dotnet publish .\Nexo.Support\Nexo.Support.csproj `
   -c Release `
   -r win-x64 `
@@ -210,7 +210,7 @@ Execute o resultado:
 Inclui o runtime na publicação e gera uma pasta consideravelmente maior, mas o usuário não precisa instalar o .NET 8 separadamente:
 
 ```powershell
-$nexoPublishDir = ".\artifacts\Nexo-1.6.0-self-contained"
+$nexoPublishDir = ".\artifacts\Nexo-1.6.2-self-contained"
 dotnet publish .\Nexo.Support\Nexo.Support.csproj `
   -c Release `
   -r win-x64 `
@@ -225,11 +225,13 @@ O Ollama e o modelo continuam separados nos dois casos. Uma publicação self-co
 Depois de conferir que o executável abre:
 
 ```powershell
-$nexoZip = ".\artifacts\Nexo-1.6.0-local-Windows.zip"
+$nexoZip = ".\artifacts\Nexo-1.6.2-local-Windows.zip"
 Compress-Archive -Path "$nexoPublishDir\*" -DestinationPath $nexoZip
 ```
 
 Use nomes novos para não sobrescrever por acidente um pacote já validado. Distribua o ZIP inteiro; não copie somente `Nexo.exe`.
+
+Para distribuir também o Ollama e o modelo, use o instalador assinado por manifesto descrito em [Instalador e publicação na Oracle](INSTALADOR-NUVEM.md). O executável de instalação publicado está disponível em [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe).
 
 ## 8. Problemas comuns de compilação
 

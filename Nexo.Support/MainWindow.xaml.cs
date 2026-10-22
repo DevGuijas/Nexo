@@ -1,4 +1,5 @@
 using Microsoft.Win32;
+using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
@@ -22,8 +23,10 @@ public partial class MainWindow : Window
     private WrapPanel? quickReplyPanel;
     public MainWindow(Store store)
     {
-        InitializeComponent(); Title = "Nexo 1.6.0 • Suporte inteligente"; this.store = store; support = new SupportService(store);
-        SizeChanged += (_, _) => ControlHint.Visibility = ActualHeight < 820 ? Visibility.Collapsed : Visibility.Visible;
+        InitializeComponent(); Title = "Nexo 1.6.2 • Suporte inteligente"; this.store = store; support = new SupportService(store);
+        user = store.GetLocalSession();
+        RefreshIdentity();
+        NewConversation();
         Closing += (_, e) =>
         {
             if (!busy) return;
@@ -36,6 +39,15 @@ public partial class MainWindow : Window
     }
     private static TextBlock Text(string text, double size = 14, string color = "#E9EDF5") => new() { Text = text, FontSize = size, Foreground = Brush(color), TextWrapping = TextWrapping.Wrap };
     private static SolidColorBrush Brush(string hex) => new((Color)ColorConverter.ConvertFromString(hex));
+    private static string AnswerPresentation(string answer)
+    {
+        var normalized = AgentProtocol.Normalize(answer);
+        return normalized.Contains("nao consegui") || normalized.Contains("nao conseguiu selecionar") || normalized.Contains("resposta invalida")
+            || normalized.Contains("limite de etapas") || normalized.Contains("interrompi as acoes")
+            || normalized.Contains("nao foi concluida") || normalized.Contains("nao foi confirmada")
+            || normalized.Contains("formato invalido") || normalized.Contains("voce recusou")
+            ? "error" : "result";
+    }
     private Button Action(string label, RoutedEventHandler handler, bool primary = false)
     {
         var b = new Button { Content = label, Margin = new Thickness(0, 0, 10, 8), HorizontalContentAlignment = HorizontalAlignment.Center };
@@ -53,33 +65,14 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "Não foi possível concluir esta etapa. " + ex.Message + "\n\nConfira o histórico antes de tentar novamente.", "Nexo", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
-    private void LoginKeyDown(object sender, KeyEventArgs e) { if (e.Key == Key.Enter) LoginClick(sender, e); }
-    private void LoginClick(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            user = store.Login(LoginName.Text, LoginPassword.Password);
-            LoginPassword.Clear(); LoginError.Text = ""; LoginView.Visibility = Visibility.Collapsed; Shell.Visibility = Visibility.Visible;
-            RefreshIdentity(); NewConversation();
-            if (user.MustChangePassword) ShowPage("profile");
-        }
-        catch (Exception ex) { LoginError.Text = ex.Message; }
-    }
     private void RefreshIdentity()
     {
-        user = store.Data.Accounts.Single(a => a.Id == user.Id);
-        SidebarName.Text = user.Name; SidebarRole.Text = user.Admin ? "Administrador" : "Usuário";
-        foreach (var el in new UIElement[] { AdminLabel, UsersNav, SettingsNav, AuditNav }) el.Visibility = user.Admin ? Visibility.Visible : Visibility.Collapsed;
-        ModeBadge.Text = store.Data.AiEnabled ? "●  Agente local · " + store.Data.Model : "●  Diagnóstico local";
-        TicketButton.IsEnabled = user.Tickets;
-    }
-    private void LogoutClick(object sender, RoutedEventArgs e)
-    {
-        if (busy) return;
-        store.Log(user, "Logout realizado"); conversation = null; conversationTools = null; Messages.Children.Clear(); Shell.Visibility = Visibility.Collapsed; LoginView.Visibility = Visibility.Visible; LoginPassword.Clear();
+        SidebarName.Text = user.Name; SidebarRole.Text = "Sessão local do Windows";
+        AdminLabel.Visibility = UsersNav.Visibility = Visibility.Collapsed;
+        SettingsNav.Visibility = AuditNav.Visibility = Visibility.Visible;
+        RefreshChatActions();
     }
     private void NavigateClick(object sender, RoutedEventArgs e) => Guard(() => ShowPage((string)((Button)sender).Tag));
-    private void ProfileClick(object sender, RoutedEventArgs e) => ShowPage("profile");
     private void NewChatClick(object sender, RoutedEventArgs e) { if (!busy) { NewConversation(); ShowPage("chat"); } }
     private void NewConversation()
     {
@@ -87,7 +80,9 @@ public partial class MainWindow : Window
         conversationTools = null;
         conversation = new Conversation { UserId = user.Id };
         Messages.Children.Clear(); Composer.Clear();
-        ProgressText.Text = "Pronto para ouvir você.\n\nAs verificações e seus resultados aparecerão aqui.";
+        ProgressText.Text = "";
+        ProgressPanel.Visibility = Visibility.Collapsed;
+        RefreshChatActions();
         var welcome = new StackPanel { Margin = new Thickness(0, 16, 0, 0) };
         welcome.Children.Add(Text("✦", 42, "#8CAEFF"));
         welcome.Children.Add(new TextBlock { Text = "Olá, " + user.Name.Split(' ')[0] + ".\nComo posso ajudar hoje?", FontFamily = new FontFamily("Georgia"), FontSize = 34, Margin = new Thickness(0, 18, 0, 12), LineHeight = 44 });
@@ -104,8 +99,7 @@ public partial class MainWindow : Window
     private void ShowPage(string target)
     {
         if (busy) return;
-        if (user.MustChangePassword) target = "profile";
-        if (target is "users" or "settings" or "audit") store.Require(user, a => a.Admin);
+        if (target == "users") store.Require(user, a => a.Admin);
         page = target;
         ChatView.Visibility = target == "chat" ? Visibility.Visible : Visibility.Collapsed;
         PageScroll.Visibility = target == "chat" ? Visibility.Collapsed : Visibility.Visible;
@@ -114,6 +108,13 @@ public partial class MainWindow : Window
         PageContent.Children.Clear();
         switch (target) { case "profile": Profile(); break; case "users": Users(); break; case "history": History(); break; case "tickets": Tickets(); break; case "settings": Settings(); break; case "audit": Audits(); break; }
         PageScroll.ScrollToTop();
+    }
+    private void RefreshChatActions()
+    {
+        var available = conversation is { Status: "Em andamento" } && conversation.Entries.Count > 0;
+        ChatActions.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
+        ResolvedButton.IsEnabled = available && !busy;
+        TicketButton.IsEnabled = available && !busy && user.Tickets;
     }
     private void Heading(string title, string description)
     {
@@ -188,10 +189,10 @@ public partial class MainWindow : Window
     {
         if (e.Key == Key.Enter && modifiers == ModifierKeys.Shift) { e.Handled = true; if (!e.IsRepeat) await Send(Composer.Text); }
     }
-    private void AddEntry(string role, string text)
+    private void AddEntry(string role, string text, string presentation = "", long? durationMs = null)
     {
         if (conversation == null) return;
-        var entry = new Entry { Role = role, Text = text }; conversation.Entries.Add(entry);
+        var entry = new Entry { Role = role, Text = text, Presentation = presentation, DurationMs = durationMs }; conversation.Entries.Add(entry);
         try { store.Save(); }
         catch { conversation.Entries.Remove(entry); throw; }
         RenderEntry(entry);
@@ -199,23 +200,29 @@ public partial class MainWindow : Window
     private void RenderEntry(Entry entry)
     {
         ClearQuickReplies();
-        var body = new StackPanel(); body.Children.Add(Text(entry.Role == "user" ? user.Name + "  ·  " + entry.Time.ToString("HH:mm") : "✦  Nexo  ·  " + entry.Time.ToString("HH:mm"), 11, entry.Role == "user" ? "#A3AEC1" : "#8CAEFF"));
-        var text = new TextBox { Text = entry.Text, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, BorderThickness = new Thickness(0), Background = Brushes.Transparent, Padding = new Thickness(0), Margin = new Thickness(0, 12, 0, 0), FontSize = 14, IsReadOnlyCaretVisible = false };
         if (entry.Role == "tool")
         {
-            body.Children.Clear();
-            text.MaxHeight = 240; text.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            var outcomeLabel = "Resultado";
-            try
-            {
-                using var result = JsonDocument.Parse(entry.Text[(entry.Text.IndexOf('\n') + 1)..]);
-                outcomeLabel = result.RootElement.TryGetProperty("success", out var ok) && ok.GetBoolean() ? "Concluído" : "Não concluído";
-                text.Text = JsonSerializer.Serialize(result.RootElement, new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
-            }
-            catch (JsonException) { }
-            body.Children.Add(new Expander { Header = outcomeLabel + " · " + entry.Text.Split('\n')[0], Content = text, Foreground = Brush(outcomeLabel == "Não concluído" ? "#E9C28B" : "#A7C4FF") });
+            RenderToolEntry(entry);
+            RefreshChatActions();
+            ChatScroll.ScrollToEnd();
+            return;
         }
-        else body.Children.Add(text);
+        var body = new StackPanel();
+        var result = entry.Presentation is "result" or "error" or "resolved";
+        if (result)
+        {
+            var title = entry.Presentation switch { "error" => "Etapa não concluída", "resolved" => "Resolvido por você", _ => "Resultado da verificação" };
+            body.Children.Add(Text(title, 14, entry.Presentation == "error" ? "#E9C28B" : "#B8E8C6"));
+            if (entry.DurationMs is > 0)
+            {
+                var elapsed = TimeSpan.FromMilliseconds(entry.DurationMs.Value);
+                var timing = Text(elapsed.TotalMinutes >= 1 ? $"Verificação executada em {(int)elapsed.TotalMinutes} min {elapsed.Seconds} s" : $"Verificação executada em {Math.Max(1, (int)elapsed.TotalSeconds)} s", 11, "#9FBAA8");
+                timing.Margin = new Thickness(0, 5, 0, 0); body.Children.Add(timing);
+            }
+        }
+        else body.Children.Add(Text(entry.Role == "user" ? user.Name + "  ·  " + entry.Time.ToString("HH:mm") : "✦  Nexo  ·  " + entry.Time.ToString("HH:mm"), 11, entry.Role == "user" ? "#A3AEC1" : "#8CAEFF"));
+        var text = new TextBox { Text = entry.Text, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, BorderThickness = new Thickness(0), Background = Brushes.Transparent, Padding = new Thickness(0), Margin = new Thickness(0, 12, 0, 0), FontSize = 14, IsReadOnlyCaretVisible = false };
+        body.Children.Add(text);
         if (entry.Role == "assistant" && conversation?.Status == "Em andamento" && ReferenceEquals(conversation.Entries.LastOrDefault(), entry))
         {
             var replies = QuickReplies.For(entry.Text);
@@ -234,7 +241,23 @@ public partial class MainWindow : Window
                 body.Children.Add(quickReplyPanel);
             }
         }
-        var card = Card(body); card.Background = Brush(entry.Role == "user" ? "#192334" : "#12161D"); Messages.Children.Add(card); ChatScroll.ScrollToEnd();
+        var card = Card(body);
+        card.Background = Brush(entry.Role == "user" ? "#192334" : entry.Presentation == "error" ? "#29231C" : result ? "#1C2923" : "#12161D");
+        if (result) card.BorderBrush = Brush(entry.Presentation == "error" ? "#645039" : "#385642");
+        Messages.Children.Add(card); RefreshChatActions(); ChatScroll.ScrollToEnd();
+    }
+    private void RenderToolEntry(Entry entry)
+    {
+        var separator = entry.Text.IndexOf('\n');
+        var label = (separator >= 0 ? entry.Text[..separator] : entry.Text).TrimEnd('…');
+        var raw = separator >= 0 ? entry.Text[(separator + 1)..] : "";
+        var (state, explanation, warning) = ToolResultPresentation.Describe(label, raw);
+        var color = warning ? "#E9C28B" : "#A7C4FF";
+        var detail = new TextBox { Text = explanation, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, BorderThickness = new Thickness(0), Background = Brushes.Transparent,
+            Padding = new Thickness(0), MaxHeight = 240, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, IsReadOnlyCaretVisible = false, FontSize = 12 };
+        var title = new TextBlock { Text = "▸  " + label + "  ·  " + state, Foreground = Brush(color), FontSize = 12 };
+        var expander = new Expander { Header = title, Content = detail, Foreground = Brush(color), Margin = new Thickness(0, 0, 0, 9) };
+        Messages.Children.Add(expander);
     }
     private void ClearQuickReplies()
     {
@@ -253,29 +276,31 @@ public partial class MainWindow : Window
         if (conversation.Status != "Em andamento") { NewConversation(); }
         if (conversation!.Entries.Count == 0) { Messages.Children.Clear(); conversation.Title = prompt.Length > 70 ? prompt[..70] + "…" : prompt; store.Data.Conversations.Add(conversation); }
         if (!preserveDraft) Composer.Clear(); AddEntry("user", prompt.Trim());
+        var turnClock = Stopwatch.StartNew();
         await Execute(async token =>
         {
             if (store.Data.AiEnabled)
             {
                 UpdateProgress("Conectando o agente ao executor do Windows…");
-                if (!user.Repair || AgentProtocol.RequestsReadOnly(prompt) || !NetworkWorkflow.Matches(prompt)) await LocalModel.EnsureRunning(token);
+                if (!DriverWorkflow.Matches(prompt) && (!user.Repair || AgentProtocol.RequestsReadOnly(prompt) || !NetworkWorkflow.Matches(prompt))) await LocalModel.EnsureRunning(token);
                 var events = new Progress<string>(UpdateProgress);
                 var executor = conversationTools ??= new WindowsTools(store, user, ConfirmChange, events, text => AddEntry("assistant", text));
                 var agent = new AgentService(store, executor);
-                AddEntry("assistant", await agent.Run(user, conversation!, events, (label, result) => AddEntry("tool", label + "\n" + result), token));
+                var answer = await agent.Run(user, conversation!, events, (label, result) => AddEntry("tool", label + "\n" + result), token);
+                AddEntry("assistant", answer, AnswerPresentation(answer), turnClock.ElapsedMilliseconds);
                 return;
             }
             var topic = SupportService.Topic(prompt);
             if (topic != "general")
             {
-                AddEntry("assistant", "Vou consultar o Windows para entender o que está acontecendo. Você pode acompanhar as etapas ao lado.");
+                AddEntry("assistant", "Vou consultar o Windows para entender o que está acontecendo. Você pode acompanhar as etapas na conversa.");
                 var diagnostic = await support.Diagnose(user, topic, new Progress<string>(UpdateProgress), token);
-                AddEntry("assistant", "Verificação concluída.\n\n" + diagnostic.Summary); RenderActions(diagnostic);
+                AddEntry("assistant", "Verificação concluída.\n\n" + diagnostic.Summary, "result", turnClock.ElapsedMilliseconds); RenderActions(diagnostic);
             }
             else
             {
                 UpdateProgress(store.Data.AiEnabled ? "Consultando o modelo de IA local…" : "Preparando orientação local…");
-                AddEntry("assistant", await support.AskAi(user, conversation!, token));
+                AddEntry("assistant", await support.AskAi(user, conversation!, token), "result", turnClock.ElapsedMilliseconds);
             }
         });
     }
@@ -290,13 +315,14 @@ public partial class MainWindow : Window
         if (busy) return;
         busy = true; operation = new CancellationTokenSource(); BusyBar.Visibility = Visibility.Visible; CancelButton.Visibility = cancellable ? Visibility.Visible : Visibility.Collapsed; CancelButton.IsEnabled = cancellable;
         if (quickReplyPanel != null) quickReplyPanel.IsEnabled = false;
-        SendButton.IsEnabled = false; Navigation.IsEnabled = false; ProfileNav.IsEnabled = false; ResolvedButton.IsEnabled = false; TicketButton.IsEnabled = false; Composer.IsEnabled = false;
+        SendButton.IsEnabled = false; Navigation.IsEnabled = false; NewChatButton.IsEnabled = false; Composer.IsEnabled = false; RefreshChatActions();
+        ProgressPanel.Visibility = Visibility.Visible;
         ProgressText.Text = "ACOMPANHAMENTO";
         try { await action(operation.Token); UpdateProgress("Resultado disponível no chat."); }
-        catch (OperationCanceledException) when (operation.IsCancellationRequested) { AddEntry("assistant", "Atendimento interrompido. As ações já concluídas permanecem registradas acima; cancelar não desfaz uma correção concluída."); UpdateProgress("Atendimento interrompido."); }
-        catch (OperationCanceledException) { AddEntry("assistant", "A etapa expirou ou foi interrompida antes de confirmar o resultado. Confira os resultados registrados acima antes de tentar novamente ou encaminhar à TI."); UpdateProgress("Etapa não concluída: resultado não confirmado."); store.Log(user, "Operação interrompida sem cancelamento do usuário"); }
-        catch (Exception ex) { AddEntry("assistant", "Não consegui concluir esta etapa. " + ex.Message + "\n\nVocê pode tentar novamente ou gerar um encaminhamento para a TI."); UpdateProgress("Etapa não concluída."); store.Log(user, "Operação não concluída: " + ex.GetType().Name); }
-        finally { busy = false; operation.Dispose(); operation = null; BusyBar.Visibility = Visibility.Collapsed; CancelButton.Visibility = Visibility.Collapsed; CancelButton.IsEnabled = true; SendButton.IsEnabled = Navigation.IsEnabled = ProfileNav.IsEnabled = ResolvedButton.IsEnabled = Composer.IsEnabled = true; TicketButton.IsEnabled = user.Tickets; if (quickReplyPanel != null) quickReplyPanel.IsEnabled = true; ChatScroll.ScrollToEnd(); }
+        catch (OperationCanceledException) when (operation.IsCancellationRequested) { AddEntry("assistant", "Atendimento interrompido. As ações já concluídas permanecem registradas acima; cancelar não desfaz uma correção concluída.", "error"); UpdateProgress("Atendimento interrompido."); }
+        catch (OperationCanceledException) { AddEntry("assistant", "A etapa expirou ou foi interrompida antes de confirmar o resultado. Confira os resultados registrados acima antes de tentar novamente ou encaminhar à TI.", "error"); UpdateProgress("Etapa não concluída: resultado não confirmado."); store.Log(user, "Operação interrompida sem cancelamento do usuário"); }
+        catch (Exception ex) { AddEntry("assistant", "Não consegui concluir esta etapa. " + ex.Message + "\n\nVocê pode tentar novamente ou gerar um encaminhamento para a TI.", "error"); UpdateProgress("Etapa não concluída."); store.Log(user, "Operação não concluída: " + ex.GetType().Name); }
+        finally { busy = false; operation.Dispose(); operation = null; BusyBar.Visibility = Visibility.Collapsed; CancelButton.Visibility = Visibility.Collapsed; ProgressPanel.Visibility = Visibility.Collapsed; CancelButton.IsEnabled = true; SendButton.IsEnabled = Navigation.IsEnabled = NewChatButton.IsEnabled = Composer.IsEnabled = true; RefreshChatActions(); if (quickReplyPanel != null) quickReplyPanel.IsEnabled = true; ChatScroll.ScrollToEnd(); }
     }
     private void CancelClick(object sender, RoutedEventArgs e)
     {
@@ -345,7 +371,7 @@ public partial class MainWindow : Window
     {
         if (busy || conversation == null || conversation.Entries.Count == 0) return;
         var current = conversation; var previousStatus = current.Status;
-        var entry = new Entry { Role = "assistant", Text = "Que bom que funcionou! Marquei este atendimento como resolvido por você. Quando precisar, é só começar uma nova conversa." };
+        var entry = new Entry { Role = "assistant", Presentation = "resolved", Text = "Que bom que funcionou! Marquei este atendimento como resolvido por você. Quando precisar, é só começar uma nova conversa." };
         store.Commit(user, "Resolução confirmada pelo usuário: " + current.Id,
             () => { current.Status = "Resolvido"; current.Entries.Add(entry); },
             () => { current.Status = previousStatus; current.Entries.Remove(entry); });
@@ -372,7 +398,7 @@ public partial class MainWindow : Window
         foreach (var item in items)
         {
             var row = new StackPanel(); row.Children.Add(Text(item.Title, 17)); row.Children.Add(Text(item.Created.ToString("g") + "  ·  " + item.Status, 12, "#939CAA"));
-            var open = Action("Abrir conversa →", (_, _) => { conversation = item; conversationTools = null; Messages.Children.Clear(); foreach (var entry in item.Entries) RenderEntry(entry); ProgressText.Text = "Atendimento recuperado.\n\nPara uma nova ação, envie o problema novamente e obtenha um diagnóstico atualizado."; ShowPage("chat"); }); open.Margin = new Thickness(0, 18, 0, 0); open.HorizontalAlignment = HorizontalAlignment.Left; row.Children.Add(open); PageContent.Children.Add(Card(row));
+            var open = Action("Abrir conversa →", (_, _) => { conversation = item; conversationTools = null; Messages.Children.Clear(); foreach (var entry in item.Entries) RenderEntry(entry); ProgressPanel.Visibility = Visibility.Collapsed; ProgressText.Text = ""; RefreshChatActions(); ShowPage("chat"); }); open.Margin = new Thickness(0, 18, 0, 0); open.HorizontalAlignment = HorizontalAlignment.Left; row.Children.Add(open); PageContent.Children.Add(Card(row));
         }
     }
     private void Tickets()
@@ -393,8 +419,8 @@ public partial class MainWindow : Window
         Heading("Configurações", "Um agente local conectado às ferramentas deste computador.");
         var panel = new StackPanel(); panel.Children.Add(Text("Agente de suporte · Ollama", 18)); panel.Children.Add(Text("A IA escolhe ferramentas, consulta o Windows, solicita as alterações necessárias e verifica os resultados. O modelo recebe o histórico recente e as saídas das ferramentas no serviço local 127.0.0.1:11434.", 14, "#939CAA"));
         var enabled = Check(panel, "Usar agente IA para conduzir os atendimentos", store.Data.AiEnabled); var model = Field(panel, "Modelo com suporte a ferramentas", store.Data.Model);
-        panel.Children.Add(Text("Dispositivos, Bluetooth, áudio, câmera, impressoras, IP, DNS, serviços, processos, logs e drivers do Windows Update. As alterações respeitam as permissões da conta e a autorização exibida na tela.", 12, "#939CAA"));
-        var save = Action("Salvar configuração", (_, _) => Guard(() => { store.Require(user, a => a.Admin); if (enabled.IsChecked == true && string.IsNullOrWhiteSpace(model.Text)) throw new InvalidOperationException("Informe o nome do modelo instalado."); store.Data.Model = model.Text.Trim(); store.Data.AiEnabled = enabled.IsChecked == true; store.Log(user, "Configuração de IA atualizada"); RefreshIdentity(); MessageBox.Show(this, "Configuração salva. O agente será utilizado no próximo atendimento."); }), true); save.Margin = new Thickness(0, 22, 0, 0); panel.Children.Add(save);
+        panel.Children.Add(Text("Dispositivos, Bluetooth, áudio, câmera, impressoras, IP, DNS, serviços, processos, logs e drivers do Windows Update. Alterações no Windows continuam exigindo autorização; operações elevadas também passam pelo UAC.", 12, "#939CAA"));
+        var save = Action("Salvar configuração", (_, _) => Guard(() => { store.Require(user, a => a.Id == user.Id); if (enabled.IsChecked == true && string.IsNullOrWhiteSpace(model.Text)) throw new InvalidOperationException("Informe o nome do modelo instalado."); var previous = (store.Data.Model, store.Data.AiEnabled); store.Commit(user, "Configuração de IA atualizada", () => { store.Data.Model = model.Text.Trim(); store.Data.AiEnabled = enabled.IsChecked == true; }, () => { store.Data.Model = previous.Model; store.Data.AiEnabled = previous.AiEnabled; }); RefreshIdentity(); MessageBox.Show(this, "Configuração salva. O agente será utilizado no próximo atendimento."); }), true); save.Margin = new Thickness(0, 22, 0, 0); panel.Children.Add(save);
         var connectionStatus = Text("", 13, "#A7C4FF");
         panel.Children.Add(Action("Verificar modelo local", async (_, _) =>
         {
@@ -409,11 +435,11 @@ public partial class MainWindow : Window
             }
             catch (Exception ex) { connectionStatus.Text = "Não foi possível verificar: " + ex.Message; }
         })); panel.Children.Add(connectionStatus); PageContent.Children.Add(Card(panel));
-        PageContent.Children.Add(Card(Text("Esta versão mantém contas e histórico neste perfil do Windows. A administração central de vários computadores e a integração com uma ferramenta de chamados são próximas etapas do produto.", 13, "#939CAA")));
+        PageContent.Children.Add(Card(Text("Atendimentos e registros ficam neste perfil do Windows. A administração central de vários computadores e a integração com uma ferramenta de chamados são próximas etapas do produto.", 13, "#939CAA")));
     }
     private void Audits()
     {
-        Heading("Registro de ações", "Logins, permissões, diagnósticos e correções registrados localmente.");
+        Heading("Registro de ações", "Acessos, diagnósticos, autorizações e correções registrados localmente.");
         var metrics = SupportMetrics.Calculate(store.Data);
         var summary = metrics.Closed == 0
             ? "Nenhum atendimento encerrado ainda. As taxas aparecem após o usuário confirmar resolução ou preparar um encaminhamento."
@@ -435,13 +461,11 @@ public partial class MainWindow : Window
             var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
             using var output = File.Create(Path.Combine(AppContext.BaseDirectory, name)); encoder.Save(output);
         }
-        await Capture("nexo-login.png");
-        LoginName.Text = "Guisbz"; LoginPassword.Password = "1234"; LoginClick(this, new RoutedEventArgs());
-        if (Shell.Visibility != Visibility.Visible) throw new InvalidOperationException("Falha na verificação visual de login.");
+        try
+        {
+        if (Shell.Visibility != Visibility.Visible || !Messages.Children.OfType<StackPanel>().Any()) throw new InvalidOperationException("Falha na abertura direta do aplicativo.");
         ShowPage("chat"); await Capture("nexo-preview.png");
-        ShowPage("profile"); await Capture("nexo-profile.png");
-        ShowPage("users"); await Capture("nexo-users.png");
-        user.MustChangePassword = false; store.Data.AiEnabled = false;
+        store.Data.AiEnabled = false;
         NewConversation(); ShowPage("chat"); await Send("Olá, preciso de ajuda");
         if (conversation?.Entries.Count != 2 || busy) throw new InvalidOperationException("Falha no fluxo de conversa local.");
         await Capture("nexo-conversation.png");
@@ -479,6 +503,7 @@ public partial class MainWindow : Window
         var shiftEnter = new KeyEventArgs(Keyboard.PrimaryDevice, inputSource, 0, Key.Enter) { RoutedEvent = Keyboard.PreviewKeyDownEvent };
         await HandleComposerKey(shiftEnter, ModifierKeys.Shift);
         if (!shiftEnter.Handled || conversation.Entries.Last(e => e.Role == "user").Text != "Mensagem\ncom duas linhas" || Composer.Text.Length != 0) throw new InvalidOperationException("Shift + Enter não enviou a mensagem multilinha.");
+        ProgressPanel.Visibility = Visibility.Visible;
         ProgressText.Text = "ACOMPANHAMENTO";
         for (var i = 0; i < 70; i++) UpdateProgress($"Etapa {i + 1}: verificando interface, IP e gateway…");
         BusyBar.Visibility = CancelButton.Visibility = Visibility.Visible;
@@ -491,12 +516,30 @@ public partial class MainWindow : Window
             if (ProgressScroll.VerticalOffset != 0) throw new InvalidOperationException("Não foi possível voltar às primeiras etapas.");
             ProgressScroll.ScrollToEnd(); UpdateLayout();
             if (ProgressScroll.VerticalOffset <= 0) throw new InvalidOperationException("Não foi possível rolar às últimas etapas.");
-            if (TicketButton.TranslatePoint(new Point(0, TicketButton.ActualHeight), ChatView).Y > ChatView.ActualHeight || CancelButton.ActualHeight <= 0) throw new InvalidOperationException("Controles de atendimento ficaram fora da janela.");
-            var labelPositions = Navigation.Children.OfType<Button>().Select(b => ((StackPanel)b.Content).Children.OfType<TextBlock>().Last().TranslatePoint(new Point(), Navigation).X).ToArray();
-            if (labelPositions.Max() - labelPositions.Min() > 1) throw new InvalidOperationException("Rótulos da navegação desalinhados.");
+            var ticketTop = TicketButton.TranslatePoint(new Point(), ChatView).Y;
+            var ticketRight = TicketButton.TranslatePoint(new Point(TicketButton.ActualWidth, 0), ChatView).X;
+            var composerTop = Composer.TranslatePoint(new Point(), ChatView).Y;
+            var newChatRight = NewChatButton.TranslatePoint(new Point(NewChatButton.ActualWidth, 0), Shell).X;
+            if (ticketTop >= composerTop || ticketRight > ChatView.ActualWidth || newChatRight > 232 || CancelButton.ActualHeight <= 0)
+                throw new InvalidOperationException("Ações da conversa ou novo atendimento fora da posição esperada.");
+            var labelPositions = Navigation.Children.OfType<Button>().Where(b => b.IsVisible).Select(b => ((StackPanel)b.Content).Children.OfType<TextBlock>().Last().TranslatePoint(new Point(), Navigation).X).ToArray();
+            if (labelPositions.Max() - labelPositions.Min() > 1) throw new InvalidOperationException("Rótulos da navegação desalinhados: " + string.Join(", ", labelPositions.Select(value => value.ToString("F1"))));
             await Capture(size.Item1 == 1380 ? "nexo-progress.png" : "nexo-progress-small.png");
         }
-        File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "ui-checks.txt"), "Login, navegação, envio e resposta local: aprovados.\nAtalhos Sim/Não, rascunho e bloqueio de resposta antiga: aprovados.\nEnter livre para quebra de linha e manipulador Shift + Enter envia mensagem multilinha: aprovados.\n70 etapas com rolagem ao início/fim, controles acessíveis e rótulos alinhados em 1380x900 e 1060x720: aprovados. Nenhuma ação no Windows executada.");
+        Width = 1380; Height = 900;
+        NewConversation(); Messages.Children.Clear();
+        AddEntry("user", "Atualize os drivers da minha placa de vídeo");
+        AddEntry("tool", ToolCatalog.Label("get_hardware_inventory") + "\n" + WindowsTools.Ok(new { Devices = new[] { new Device("GPU de exemplo", "PCI\\GPU1", 0, "OK") { DriverVersion = "1.0" } } }));
+        AddEntry("tool", ToolCatalog.Label("scan_driver_updates") + "\n" + WindowsTools.Ok("[]"));
+        AddEntry("assistant", "Identifiquei GPU de exemplo (driver 1.0). A fonte de atualizações configurada no Windows não ofereceu driver compatível agora. Nenhuma alteração foi feita.", "result", 14300);
+        await Capture("nexo-driver-result.png");
+        File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "ui-checks.txt"), "Abertura direta e navegação, envio e resposta local: aprovados.\nNovo atendimento na lateral; resolução e encaminhamento acima do compositor: aprovados em 1380x900 e 1060x720.\nAtalhos Sim/Não, rascunho e bloqueio de resposta antiga: aprovados.\nEnter livre para quebra de linha e manipulador Shift + Enter envia mensagem multilinha: aprovados.\n70 etapas com rolagem ao início/fim, controles acessíveis e rótulos alinhados. Nenhuma ação no Windows executada.");
         Application.Current.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "ui-checks.txt"), "Falha na prévia: " + ex);
+            Application.Current.Shutdown(1);
+        }
     }
 }

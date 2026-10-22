@@ -51,6 +51,27 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     }
     public static string NetworkQuery => NetworkAdapterScripts.Read("NetworkInventory.ps1");
     private static bool Fresh(DateTimeOffset? observedAt) => observedAt is { } at && DateTimeOffset.UtcNow - at <= TimeSpan.FromMinutes(5);
+    private const string DriverSearchScript = """
+        $session=New-Object -ComObject Microsoft.Update.Session
+        $searcher=$session.CreateUpdateSearcher()
+        $searcher.Online=$true
+        $searcher.ServerSelection=0
+        $search=$searcher.Search("IsInstalled=0 and IsHidden=0 and Type='Driver'")
+        """;
+    private static string HardwareFilter(string category) => category switch
+    {
+        "problem" => "[int]$_.ConfigManagerErrorCode -ne 0",
+        "display" => "$_.PNPClass -eq 'Display'",
+        "network" => "$_.PNPClass -eq 'Net'",
+        "storage" => "$_.PNPClass -in 'DiskDrive','HDC','SCSIAdapter'",
+        "usb" => "$_.PNPClass -in 'USB','HIDClass'",
+        "camera" => "$_.PNPClass -in 'Camera','Image'",
+        "audio" => "$_.PNPClass -in 'AudioEndpoint','MEDIA'",
+        "bluetooth" => "$_.PNPClass -eq 'Bluetooth'",
+        "printer" => "$_.PNPClass -in 'Printer','PrintQueue'",
+        _ => throw new InvalidOperationException("Categoria de hardware não permitida.")
+    };
+    private static string HardwareTopic(string category) => category is "camera" or "audio" or "bluetooth" or "printer" or "network" ? category : "hardware";
 
     // The schema sent to Ollama is advisory. Enforce it again at the executor boundary.
     internal static void ValidateArguments(string name, JsonElement args)
@@ -176,6 +197,23 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 var extra = topic == "camera" ? await SupportService.Powershell("Get-ItemProperty -LiteralPath 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -ErrorAction SilentlyContinue | Select-Object Value | ConvertTo-Json -Compress", token) : "";
                 observedDevicesAt = DateTimeOffset.UtcNow;
                 return Ok(new { count = devices.Count, devices, privacy = extra, note = devices.Count == 0 ? "Nenhum dispositivo desta categoria foi encontrado. Não existe dispositivo identificado para habilitar. Pode estar ausente, desconectado ou sem reconhecimento; não afirme que está desabilitado sem evidência." : "Code 22 = desabilitado; Code 0 = sem erro de PnP, não comprova funcionamento no aplicativo." });
+            case "get_hardware_inventory":
+                var category = Value(args, "category");
+                var filter = HardwareFilter(category);
+                observedDevices.Clear();
+                observedDevicesAt = null;
+                var inventoryScript = "$drivers=@{}; @(Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop) | ForEach-Object {if($_.DeviceID){$drivers[[string]$_.DeviceID]=$_}}; " +
+                    "$items=@(Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object {$_.Present -eq $true -and (" + filter + ")} | Sort-Object Name); " +
+                    "$selected=@($items | Select-Object -First 80 | ForEach-Object {$d=$drivers[[string]$_.PNPDeviceID]; [pscustomobject]@{Name=[string]$_.Name;Id=[string]$_.PNPDeviceID;Code=[int]$_.ConfigManagerErrorCode;Status=[string]$_.Status;Class=[string]$_.PNPClass;Manufacturer=[string]$_.Manufacturer;HardwareIds=@($_.HardwareID | Where-Object {$_});CompatibleIds=@($_.CompatibleID | Where-Object {$_});DriverProvider=[string]$d.DriverProviderName;DriverVersion=[string]$d.DriverVersion}}); " +
+                    "[pscustomobject]@{Category=" + Quote(category) + ";Total=$items.Count;Truncated=($items.Count -gt 80);Devices=$selected} | ConvertTo-Json -Depth 6 -Compress";
+                using (var inventory = JsonDocument.Parse(await SupportService.Powershell(inventoryScript, token, 90)))
+                {
+                    var listed = inventory.RootElement.GetProperty("Devices");
+                    var foundDevices = JsonSerializer.Deserialize<List<Device>>(listed.GetRawText()) ?? [];
+                    foreach (var device in foundDevices.Where(d => !string.IsNullOrWhiteSpace(d.Id))) observedDevices[device.Id] = (HardwareTopic(category), device);
+                    observedDevicesAt = DateTimeOffset.UtcNow;
+                    return Ok(inventory.RootElement.Clone());
+                }
             case "get_printers":
                 observedPrinters.Clear();
                 observedPrintersAt = null;
@@ -239,25 +277,43 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 if (!await Approve(new ChangeRequest("Cancelar trabalhos de impressão", "Remover " + queue.Trim() + " trabalho(s) da fila “" + printer + "”. Eles precisarão ser enviados novamente."), token)) return Denied();
                 return await Elevated("$p=Get-Printer | Where-Object {$_.Name -eq " + Quote(printer) + "}; if(-not $p){throw 'Impressora não encontrada'}; Get-PrintJob -PrinterName $p.Name | Remove-PrintJob; [pscustomobject]@{Printer=$p.Name;RemainingJobs=@(Get-PrintJob -PrinterName $p.Name).Count}", token);
             case "scan_driver_updates":
+                if (!Fresh(observedDevicesAt) || observedDevices.Count == 0) throw new InvalidOperationException("Identifique o hardware com get_hardware_inventory ou diagnose_device antes de buscar drivers.");
                 observedUpdates.Clear();
                 observedUpdatesAt = null;
-                progress.Report("Consultando drivers disponíveis no Windows Update; isso pode levar alguns minutos…");
-                var updates = await SupportService.Powershell("$session=New-Object -ComObject Microsoft.Update.Session; $search=$session.CreateUpdateSearcher().Search(\"IsInstalled=0 and IsHidden=0 and Type='Driver'\"); ConvertTo-Json -Compress -InputObject @($search.Updates | ForEach-Object { [pscustomobject]@{Id=$_.Identity.UpdateID;Revision=$_.Identity.RevisionNumber;Title=$_.Title;HardwareID=$_.DriverHardwareID;Downloaded=$_.IsDownloaded} })", token, 180);
+                progress.Report("Buscando online na fonte de atualizações configurada no Windows; isso pode levar alguns minutos…");
+                var updates = await SupportService.Powershell(DriverSearchScript + "\nConvertTo-Json -Compress -InputObject @($search.Updates | ForEach-Object { [pscustomobject]@{Id=$_.Identity.UpdateID;Revision=[int]$_.Identity.RevisionNumber;Title=[string]$_.Title;HardwareID=[string]$_.DriverHardwareID;Manufacturer=[string]$_.DriverManufacturer;Provider=[string]$_.DriverProvider;Downloaded=[bool]$_.IsDownloaded} })", token, 180);
+                var matchingUpdates = new List<object>();
                 using (var doc = JsonDocument.Parse(updates)) foreach (var update in doc.RootElement.EnumerateArray())
                 {
                     var updateIdFromScan = update.GetProperty("Id").GetString() ?? "";
                     if (!Guid.TryParse(updateIdFromScan, out _)) continue;
-                    observedUpdates[updateIdFromScan] = (update.GetProperty("Title").GetString() ?? "", update.GetProperty("HardwareID").GetString() ?? "", update.GetProperty("Revision").GetInt32());
+                    var hardwareId = update.GetProperty("HardwareID").GetString() ?? "";
+                    Device matched;
+                    try { matched = MatchDriverTarget(hardwareId, observedDevices.Values.Select(item => item.Device)); }
+                    catch (InvalidOperationException) { continue; }
+                    var title = update.GetProperty("Title").GetString() ?? "";
+                    var revision = update.GetProperty("Revision").GetInt32();
+                    observedUpdates[updateIdFromScan] = (title, hardwareId, revision);
+                    matchingUpdates.Add(new { Id = updateIdFromScan, Revision = revision, Title = title, HardwareID = hardwareId,
+                        Manufacturer = update.GetProperty("Manufacturer").GetString() ?? "", Provider = update.GetProperty("Provider").GetString() ?? "",
+                        Target = matched.Name, Downloaded = update.GetProperty("Downloaded").GetBoolean(), Source = "Fonte de atualizações configurada no Windows" });
                 }
                 observedUpdatesAt = DateTimeOffset.UtcNow;
-                return Ok(updates);
+                return Ok(JsonSerializer.Serialize(matchingUpdates));
+            case "download_nvidia_app":
+                if (!Fresh(observedDevicesAt) || observedDevices.Count != 1 || !OfficialDriverSource.IsNvidiaDisplay(observedDevices.Values.Single().Device))
+                    throw new InvalidOperationException("O aplicativo NVIDIA só pode ser baixado após identificar uma única placa NVIDIA PCI presente.");
+                if (!await Approve(new ChangeRequest("Baixar aplicativo oficial da NVIDIA", "O Windows Update não ofereceu um driver. Baixar o instalador do NVIDIA App a partir de nvidia.com/us.download.nvidia.com para escolher o driver da placa detectada. O Nexo verificará a assinatura digital antes de disponibilizar o arquivo. Esta etapa ainda não instala um driver."), token)) return Denied();
+                progress.Report("Baixando do domínio oficial da NVIDIA e verificando a assinatura digital…");
+                var vendorDownload = await OfficialDriverSource.DownloadNvidiaApp(token);
+                return Ok(new { FileName = vendorDownload.Path, Source = vendorDownload.Url.ToString(), Signature = "Valid", Installed = false });
             case "install_driver_update":
                 var updateId = Value(args, "update_id");
                 if (!Fresh(observedUpdatesAt) || !observedUpdates.TryGetValue(updateId, out var selectedUpdate) || !Guid.TryParse(updateId, out _)) throw new InvalidOperationException("Consulte os drivers disponíveis e use um Id retornado nesta etapa.");
                 if (!Fresh(observedDevicesAt)) throw new InvalidOperationException("Faça um novo diagnóstico do dispositivo antes de instalar o driver.");
                 var driverTarget = MatchDriverTarget(selectedUpdate.HardwareId, observedDevices.Values.Select(item => item.Device));
-                if (!await Approve(new ChangeRequest("Instalar driver do Windows Update", "Baixar e instalar o driver: " + selectedUpdate.Title + " (" + updateId + ", revisão " + selectedUpdate.Revision + ") para “" + driverTarget.Name + "”. Pode interromper o dispositivo e exigir reinicialização. A instalação inclui aceitar os termos do fornecedor desse driver. O Nexo não reiniciará o PC automaticamente."), token)) return Denied();
-                return await Elevated("$s=New-Object -ComObject Microsoft.Update.Session; $found=$s.CreateUpdateSearcher().Search(\"IsInstalled=0 and IsHidden=0 and Type='Driver'\"); $matches=@($found.Updates | Where-Object {$_.Identity.UpdateID -eq " + Quote(updateId) + " -and [int]$_.Identity.RevisionNumber -eq " + selectedUpdate.Revision + " -and [string]$_.Title -eq " + Quote(selectedUpdate.Title) + " -and [string]$_.DriverHardwareID -eq " + Quote(selectedUpdate.HardwareId) + "}); if($matches.Count -ne 1){throw 'Driver consultado não está mais disponível com a mesma identidade e revisão'}; $u=$matches[0]; if(-not $u.EulaAccepted){$u.AcceptEula()}; $collection=New-Object -ComObject Microsoft.Update.UpdateColl; [void]$collection.Add($u); $d=$s.CreateUpdateDownloader();$d.Updates=$collection; $download=$d.Download(); if($download.ResultCode -ne 2){throw 'Download não concluído'}; $i=$s.CreateUpdateInstaller();$i.Updates=$collection; $r=$i.Install(); if($r.ResultCode -ne 2){throw ('Instalação não concluída: '+$r.ResultCode)}; [pscustomobject]@{Driver=$u.Title;ResultCode=[int]$r.ResultCode;RebootRequired=$r.RebootRequired}", token);
+                if (!await Approve(new ChangeRequest("Instalar driver pela fonte do Windows", "Baixar e instalar: " + selectedUpdate.Title + " (" + updateId + ", revisão " + selectedUpdate.Revision + ") para “" + driverTarget.Name + "”. Origem: fonte de atualizações configurada no Windows. Pode interromper o dispositivo e exigir reinicialização. A instalação inclui aceitar os termos do fornecedor. O Nexo não reiniciará o PC automaticamente."), token)) return Denied();
+                return VerifyDriverInstallationResult(await Elevated(DriverInstallationScript(updateId, selectedUpdate.Title, selectedUpdate.HardwareId, selectedUpdate.Revision, driverTarget.Id), token));
             default: throw new InvalidOperationException("Ferramenta não permitida: " + name);
         }
     }
@@ -274,6 +330,49 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             .Any(id => string.Equals(id, hardwareId, StringComparison.OrdinalIgnoreCase))).ToArray();
         if (matches.Length != 1) throw new InvalidOperationException("O driver não corresponde a um único dispositivo diagnosticado. Consulte o dispositivo e avalie a atualização manualmente.");
         return matches[0];
+    }
+    private static string DriverInstallationScript(string updateId, string title, string hardwareId, int revision, string deviceId) => DriverSearchScript + "\n" + $$"""
+        $targetId={{Quote(deviceId)}}
+        $hardwareId={{Quote(hardwareId)}}
+        $before=@(Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object {$_.PNPDeviceID -eq $targetId -and $_.Present -eq $true})
+        if($before.Count -ne 1 -or -not (@($before[0].HardwareID)+@($before[0].CompatibleID) -contains $hardwareId)){throw 'Identidade do hardware mudou; instalação bloqueada'}
+        $beforeDriver=@(Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | Where-Object {$_.DeviceID -eq $targetId} | Select-Object -First 1)
+        $matches=@($search.Updates | Where-Object {$_.Identity.UpdateID -eq {{Quote(updateId)}} -and [int]$_.Identity.RevisionNumber -eq {{revision}} -and [string]$_.Title -eq {{Quote(title)}} -and [string]$_.DriverHardwareID -eq $hardwareId})
+        if($matches.Count -ne 1){throw 'Driver consultado não está mais disponível com a mesma identidade e revisão'}
+        $update=$matches[0]
+        if(-not $update.EulaAccepted){$update.AcceptEula()}
+        $collection=New-Object -ComObject Microsoft.Update.UpdateColl
+        [void]$collection.Add($update)
+        $downloader=$session.CreateUpdateDownloader()
+        $downloader.Updates=$collection
+        $download=$downloader.Download()
+        if([int]$download.ResultCode -ne 2){throw ('Download não concluído: '+[int]$download.ResultCode)}
+        $installer=$session.CreateUpdateInstaller()
+        $installer.Updates=$collection
+        $result=$installer.Install()
+        if([int]$result.ResultCode -ne 2 -or [int]$result.GetUpdateResult(0).ResultCode -ne 2){throw ('Instalação não concluída: '+[int]$result.ResultCode)}
+        $after=@(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object {$_.PNPDeviceID -eq $targetId -and $_.Present -eq $true})
+        $afterDriver=@(Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | Where-Object {$_.DeviceID -eq $targetId} | Select-Object -First 1)
+        $beforeVersion=[string]$beforeDriver[0].DriverVersion
+        $afterVersion=[string]$afterDriver[0].DriverVersion
+        $verification=if([bool]$result.RebootRequired){'pending_restart'}elseif($after.Count -eq 1 -and [int]$after[0].ConfigManagerErrorCode -eq 0 -and $afterVersion -and $afterVersion -ne $beforeVersion){'version_changed'}else{'unconfirmed'}
+        [pscustomobject]@{Driver=[string]$update.Title;Target=[string]$before[0].Name;BeforeVersion=$beforeVersion;AfterVersion=$afterVersion;DeviceCodeAfter=$(if($after.Count -eq 1){[int]$after[0].ConfigManagerErrorCode}else{-1});RebootRequired=[bool]$result.RebootRequired;Verification=$verification;Source='Fonte de atualizações configurada no Windows'}
+        """;
+    internal static string VerifyDriverInstallationResult(string output)
+    {
+        using var document = JsonDocument.Parse(output);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.True || !root.TryGetProperty("data", out var data)
+            || data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("Verification", out var verification)
+            || verification.ValueKind != JsonValueKind.String) return output;
+        if (verification.GetString() != "unconfirmed") return output;
+        return JsonSerializer.Serialize(new
+        {
+            success = false,
+            installationReported = true,
+            error = "O Windows relatou a instalação, mas ainda não foi possível confirmar a nova versão do driver no dispositivo. Confira o Gerenciador de Dispositivos antes de considerar a correção concluída.",
+            data = data.Clone()
+        });
     }
     private async Task<bool> Approve(ChangeRequest request, CancellationToken token)
     {

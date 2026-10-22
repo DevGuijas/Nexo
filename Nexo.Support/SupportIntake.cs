@@ -17,17 +17,22 @@ public static class SupportIntake
         if (Regex.IsMatch(text, @"\b(bluetooth|bthserv)\b")) topics.Add("bluetooth");
         if (Regex.IsMatch(text, @"\b(impressoras?|imprimir|impressao|printer|print queue|fila de impressao|spooler)\b")) topics.Add("printer");
         if (Regex.IsMatch(text, @"\b(lentidao|desempenho|memoria|disco|processos)\b")) topics.Add("system");
+        if (Regex.IsMatch(text, @"\b(hardware|drivers?|controladores?|placa de video|gpu|dispositivo desconhecido|gerenciador de dispositivos)\b")) topics.Add("hardware");
         return topics;
     }
 
     public static string? InitialTopic(string request)
     {
         var text = new string(request.Normalize(NormalizationForm.FormD).Where(c => CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark).Select(char.ToLowerInvariant).ToArray());
-        if (!Regex.IsMatch(text, @"\b(nao\s+(funciona|aparece|conecta|imprime|consigo|liga)|sem\s+(som|audio|imagem|camera|microfone|bluetooth)|sumiu|desapareceu|preso|presos|presa|travou|travada|problema|falha|parou|para quando|desconectar e conectar)\b")) return null;
+        var hasSymptom = Regex.IsMatch(text, @"\b(nao\s+(funciona|aparece|conecta|imprime|consigo|liga)|sem\s+(som|audio|imagem|camera|microfone|bluetooth)|sumiu|desapareceu|preso|presos|presa|travou|travada|problema|falha|parou|para quando|desconectar e conectar)\b");
+        var hardwareRequest = Regex.IsMatch(text, @"\b(hardware|drivers?|controladores?|placa de video|gpu|dispositivo desconhecido|gerenciador de dispositivos)\b")
+            && Regex.IsMatch(text, @"\b(atualiz\w*|instal\w*|verific\w*|detect\w*|diagnostic\w*)\b");
+        if (!hasSymptom && !hardwareRequest) return null;
         if (Regex.IsMatch(text, @"\b(camera|webcam)\b")) return "camera";
         if (Regex.IsMatch(text, @"\b(impressoras?|imprimir|impressao)\b")) return "printer";
         if (Regex.IsMatch(text, @"\b(som|audio|microfone|fone)\b")) return "audio";
         if (text.Contains("bluetooth")) return "bluetooth";
+        if (Regex.IsMatch(text, @"\b(hardware|drivers?|controladores?|placa de video|gpu|dispositivo desconhecido|gerenciador de dispositivos)\b")) return "hardware";
         return null;
     }
 }

@@ -22,6 +22,11 @@ public static class SecurityChecks
         var confirmationCount = 0;
         var tools = new WindowsTools(store, admin, _ => { confirmationCount++; return Task.FromResult(false); }, new Progress<string>());
         RejectSync(() => WindowsTools.ValidateArguments("run_command", Args(new { command = "whoami" })), "Ferramenta de comando arbitrário não existe no executor");
+        RejectSync(() => WindowsTools.ValidateArguments("get_hardware_inventory", Args(new { category = "../../download.exe" })), "Inventário de hardware rejeita categoria fora da lista");
+        var hardwareIntake = AgentService.InitialObservation(SupportIntake.InitialTopic("Atualize o driver do meu hardware")!);
+        WindowsTools.ValidateArguments(hardwareIntake.Name, hardwareIntake.Arguments);
+        assert(hardwareIntake.Name == "get_hardware_inventory" && hardwareIntake.Arguments.GetProperty("category").GetString() == "problem", "Pedido de driver inicia pelo inventário PnP permitido");
+        assert(ToolCatalog.IsReadOnly("get_hardware_inventory"), "Inventário de hardware não altera o Windows");
         RejectSync(() => WindowsTools.ValidateArguments("flush_dns", Args(new { command = "whoami" })), "Propriedade inesperada rejeitada antes da confirmação");
         RejectSync(() => WindowsTools.ValidateArguments("restart_service", Args(new { service = "Spooler;whoami" })), "Serviço fora da lista rejeitado");
         RejectSync(() => WindowsTools.ValidateArguments("test_connection", Args(new { host = "example.com", port = "443" })), "Tipo incorreto de porta rejeitado");
@@ -89,6 +94,26 @@ public static class SecurityChecks
         var matched = WindowsTools.MatchDriverTarget("hid\\x", [new Device("A", "USB\\1", 0, "OK") { HardwareIds = ["HID\\X"] }]);
         assert(matched.Name == "A", "HardwareID exato encontra dispositivo diagnosticado");
         RejectSync(() => WindowsTools.MatchDriverTarget("HID\\X", [new Device("A", "USB\\1", 0, "OK") { HardwareIds = ["HID\\X"] }, new Device("B", "USB\\2", 0, "OK") { CompatibleIds = ["HID\\X"] }]), "Driver com múltiplos alvos exige avaliação manual");
+
+        var driverEvidence = new InvestigationEvidence();
+        const string offeredId = "00000000-0000-0000-0000-000000000123";
+        driverEvidence.Observe("get_hardware_inventory", "display", Args(new { category = "display" }), WindowsTools.Ok(new { Devices = new[] {
+            new Device("Placa gráfica", "PCI\\VEN_1234&DEV_5678\\A", 0, "OK") { HardwareIds = ["PCI\\VEN_1234&DEV_5678"] }
+        } }));
+        driverEvidence.Observe("scan_driver_updates", "drivers", Args(new { }), WindowsTools.Ok(JsonSerializer.Serialize(new[] {
+            new { Id = offeredId, Title = "Driver gráfico", HardwareID = "PCI\\VEN_1234&DEV_5678" }
+        })));
+        assert(driverEvidence.UpdateTargetUnambiguous(offeredId, ["hardware"], "Atualize o driver da placa de vídeo"), "Oferta exige correspondência exata com hardware observado");
+        var wrongEvidence = new InvestigationEvidence();
+        wrongEvidence.Observe("get_hardware_inventory", "display", Args(new { category = "display" }), WindowsTools.Ok(new { Devices = new[] {
+            new Device("Placa gráfica", "PCI\\VEN_1234&DEV_5678\\A", 0, "OK") { HardwareIds = ["PCI\\VEN_1234&DEV_5678"] }
+        } }));
+        wrongEvidence.Observe("scan_driver_updates", "drivers", Args(new { }), WindowsTools.Ok(JsonSerializer.Serialize(new[] {
+            new { Id = offeredId, Title = "Driver gráfico", HardwareID = "PCI\\VEN_1234&DEV_567" }
+        })));
+        assert(!wrongEvidence.UpdateTargetUnambiguous(offeredId, ["hardware"], "Atualize o driver da placa de vídeo"), "Nome do driver ou ID parcial não autoriza instalação");
+        using (var verification = JsonDocument.Parse(WindowsTools.VerifyDriverInstallationResult(WindowsTools.Ok(new { Verification = "unconfirmed", BeforeVersion = "1.0", AfterVersion = "1.0" }))))
+            assert(!verification.RootElement.GetProperty("success").GetBoolean() && verification.RootElement.GetProperty("installationReported").GetBoolean(), "Instalação sem versão nova não é declarada como comprovada");
 
         var cameraEvidence = new InvestigationEvidence();
         var cameraArgs = Args(new { topic = "camera" });

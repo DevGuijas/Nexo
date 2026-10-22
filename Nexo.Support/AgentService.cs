@@ -29,7 +29,11 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         pode consultar rede, testar DNS/TCP, configurar DNS e IPv4/DHCP, limpar DNS, consultar
         dispositivos, habilitar câmera desabilitada, ajustar acesso de câmera, reiniciar áudio
         ou spooler de impressão, diagnosticar Bluetooth, impressoras, memória, processos, logs e
-        instalar drivers específicos oferecidos pelo Windows Update. Use ferramentas, não apenas ensine passos.
+        inventariar hardware PnP e instalar drivers específicos oferecidos pela fonte de atualizações
+        configurada no Windows (Windows Update ou servidor gerenciado). Use ferramentas, não apenas ensine passos.
+        Para drivers, consulte primeiro get_hardware_inventory ou diagnose_device, depois
+        scan_driver_updates. Só instale oferta com HardwareID exato para um único dispositivo
+        observado. Não baixe executáveis de sites arbitrários nem ignore a política de atualizações.
         Para investigar um problema, faça primeiro uma consulta relevante, leia seu resultado e
         escolha o próximo teste ou correção. Nunca diga que não tem acesso ao PC: consulte as ferramentas.
         Para pedidos claros de mudanças, consulte o estado, use a ferramenta adequada e verifique após.
@@ -109,6 +113,13 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         Ao terminar, diga o que verificou, o que alterou e o que o usuário deve testar. Não use Markdown complexo.
         """;
 
+    internal static (string Name, JsonElement Arguments) InitialObservation(string topic) => topic switch
+    {
+        "printer" => ("get_printers", JsonSerializer.SerializeToElement(new { })),
+        "hardware" => ("get_hardware_inventory", JsonSerializer.SerializeToElement(new { category = "problem" })),
+        _ => ("diagnose_device", JsonSerializer.SerializeToElement(new { topic }))
+    };
+
     public async Task<string> Run(Account actor, Conversation conversation, IProgress<string> progress, Action<string, string> record, CancellationToken token)
     {
         store.Require(actor, _ => true);
@@ -149,12 +160,30 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         var incidentTopics = conversation.Entries.Where(e => e.Role == "user").Reverse().Select(e => SupportIntake.IncidentTopics(e.Text)).FirstOrDefault(topics => topics.Count > 0) ?? [];
         var userConfirmedFunction = AgentProtocol.UserConfirmedFunction(userRequest);
         var observationOnly = System.Text.RegularExpressions.Regex.IsMatch(userRequest, @"(?i)(acompanhar|detecte|detectar).*(conect|cabo)|desconectar e conectar");
+        if (DriverWorkflow.Matches(userRequest))
+        {
+            var answer = await DriverWorkflow.Run(userRequest, readOnly, async (name, values) =>
+            {
+                token.ThrowIfCancellationRequested(); progress.Report(ToolCatalog.Label(name));
+                var parameters = JsonSerializer.SerializeToElement(values);
+                history.Add(new AgentMessage { role = "assistant", tool_calls = JsonSerializer.SerializeToElement(new[] { new { function = new { name, arguments = parameters } } }) });
+                var driverClock = Stopwatch.StartNew();
+                string output;
+                try { output = ValidToolResult(await tools.Execute(name, parameters, token)); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex) { output = JsonSerializer.Serialize(new { success = false, error = ex.Message }); }
+                history.Add(new AgentMessage { role = "tool", tool_name = name, content = output });
+                record(ToolCatalog.Label(name), output); AuditTool("Fluxo de driver", name, output, parameters, driverClock.ElapsedMilliseconds); store.Save();
+                token.ThrowIfCancellationRequested();
+                return JsonSerializer.Deserialize<JsonElement>(output);
+            }, token);
+            return Finish(answer);
+        }
         var initialObserved = false;
         var initialTopic = SupportIntake.InitialTopic(userRequest);
         if (initialTopic != null)
         {
-            var name = initialTopic == "printer" ? "get_printers" : "diagnose_device";
-            var parameters = initialTopic == "printer" ? JsonSerializer.SerializeToElement(new { }) : JsonSerializer.SerializeToElement(new { topic = initialTopic });
+            var (name, parameters) = InitialObservation(initialTopic);
             token.ThrowIfCancellationRequested(); progress.Report(ToolCatalog.Label(name));
             history.Add(new AgentMessage { role = "assistant", tool_calls = JsonSerializer.SerializeToElement(new[] { new { function = new { name, arguments = parameters } } }) });
             var observationClock = Stopwatch.StartNew();
@@ -350,7 +379,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                             _ => null
                         };
                     if (name is "enable_network_adapter" or "set_ipv4" or "set_dns" && root.TryGetProperty("success", out var completed) && completed.ValueKind == JsonValueKind.True && !InvestigationEvidence.ExplicitlyUnchanged(root)) networkRecoveryNeeded = true;
-                    if (name is "get_network" or "diagnose_device" && root.TryGetProperty("success", out var observed) && observed.ValueKind == JsonValueKind.True) allowWatch = true;
+                    if (name is "get_network" or "diagnose_device" or "get_hardware_inventory" && root.TryGetProperty("success", out var observed) && observed.ValueKind == JsonValueKind.True) allowWatch = true;
                     if (name == "test_connection" && arguments.TryGetProperty("host", out var host) && System.Net.IPAddress.TryParse(host.GetString(), out _) && root.TryGetProperty("data", out var data) && data.TryGetProperty("tcpConnected", out var connected) && connected.ValueKind == JsonValueKind.True) allowFlushDns = true;
                     if (name is "set_ipv4" or "set_dns" && root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False && root.TryGetProperty("backup", out _))
                     {
@@ -468,13 +497,14 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 return key switch
                 {
                     "topic" when item is "camera" or "audio" or "bluetooth" or "printer" or "network" or "system" => item,
+                    "category" when item is "problem" or "display" or "network" or "storage" or "usb" or "camera" or "audio" or "bluetooth" or "printer" => item,
                     "kind" when item is "device" or "network" => item,
                     "mode" when item is "automatic" or "manual" or "dhcp" or "static" => item,
                     "service" when item is "Audiosrv" or "Spooler" or "bthserv" or "WlanSvc" => item,
                     _ => null
                 };
             }
-            var safeParameters = new[] { "topic", "kind", "mode", "service", "interface_index", "port" }
+            var safeParameters = new[] { "topic", "category", "kind", "mode", "service", "interface_index", "port" }
                 .Select(key => (Key: key, Value: SafeValue(key))).Where(item => item.Value != null)
                 .Select(item => item.Key + "=" + item.Value);
             var context = string.Join(", ", safeParameters);
@@ -503,7 +533,11 @@ public static class LocalModel
         try { using var response = await http.GetAsync("http://127.0.0.1:11434/api/tags", token); response.EnsureSuccessStatusCode(); return; }
         catch (HttpRequestException) { }
         catch (TaskCanceledException) when (!token.IsCancellationRequested) { }
-        var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Ollama", "ollama.exe");
+        var path = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Ollama", "ollama.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Ollama", "ollama.exe")
+        }.FirstOrDefault(File.Exists);
         if (!File.Exists(path)) throw new InvalidOperationException("O Ollama não está instalado neste perfil do Windows.");
         // The service outlives Nexo. Shell execution detaches its console handles so
         // command-line validation does not wait for a server started by the test.
@@ -524,9 +558,9 @@ public static class LocalModel
 
 public static class ToolCatalog
 {
-    public static bool IsObservationTool(string name) => name is "finish_support" or "ask_user" or "get_network" or "diagnose_device" or "wait_for_reconnect" or "test_connection" or "probe_network_interfaces";
+    public static bool IsObservationTool(string name) => name is "finish_support" or "ask_user" or "get_network" or "diagnose_device" or "get_hardware_inventory" or "wait_for_reconnect" or "test_connection" or "probe_network_interfaces";
     public static bool IsMutation(string name) => !IsReadOnly(name) && name is not ("wait_for_reconnect" or "prepare_restart");
-    public static bool IsReadOnly(string name) => name is "finish_support" or "ask_user" or "get_network" or "test_connection" or "diagnose_device" or "get_printers" or "get_services" or "get_recent_errors" or "get_processes" or "scan_driver_updates" or "get_boot_status" or "probe_network_interfaces";
+    public static bool IsReadOnly(string name) => name is "finish_support" or "ask_user" or "get_network" or "test_connection" or "diagnose_device" or "get_hardware_inventory" or "get_printers" or "get_services" or "get_recent_errors" or "get_processes" or "scan_driver_updates" or "get_boot_status" or "probe_network_interfaces";
     public static object[] ForScope(bool readOnly, bool allowFlushDns = true, bool allowWatch = true, bool allowMutations = true) => Definitions.Where(d => { var name = JsonSerializer.SerializeToElement(d).GetProperty("function").GetProperty("name").GetString()!; return (!readOnly || IsReadOnly(name)) && (allowFlushDns || name != "flush_dns") && (allowWatch || name != "wait_for_reconnect") && (allowMutations || !IsMutation(name)); }).ToArray();
     private static object Str(string description) => new { type = "string", description };
     private static object Int(string description) => new { type = "integer", description };
@@ -542,6 +576,7 @@ public static class ToolCatalog
         Tool("probe_network_interfaces", "Consulta e testa TCP IPv4 por cada interface, com origem vinculada. Não pergunte nomes de interfaces ao usuário; use esta comparação antes de escolher uma correção.", new(), []),
         Tool("test_connection", "Testa resolução DNS e uma conexão TCP ao destino informado. Não altera configurações.", new() { ["host"] = Str("Hostname ou IPv4 que o usuário está tentando acessar"), ["port"] = Int("Porta TCP, por exemplo 443 para HTTPS") }, ["host", "port"]),
         Tool("diagnose_device", "Consulta estado e IDs exatos de câmera, áudio, Bluetooth, impressora ou sistema.", new() { ["topic"] = new { type = "string", @enum = new[] { "camera", "audio", "bluetooth", "printer", "system" } } }, ["topic"]),
+        Tool("get_hardware_inventory", "Detecta dispositivos PnP presentes, problemas, IDs de hardware e versão/provedor do driver. Consulte antes de procurar atualização. category=problem para dispositivos com erro; escolha uma categoria quando souber o componente.", new() { ["category"] = new { type = "string", @enum = new[] { "problem", "display", "network", "storage", "usb", "camera", "audio", "bluetooth", "printer" } } }, ["category"]),
         Tool("get_printers", "Consulta impressoras instaladas, drivers, portas e estado das filas sem ler os documentos."),
         Tool("get_services", "Consulta estado dos serviços de áudio, Bluetooth, impressão e Wi-Fi."),
         Tool("get_recent_errors", "Consulta os últimos erros do log Sistema nas últimas 24h."),
@@ -555,8 +590,9 @@ public static class ToolCatalog
         Tool("enable_device", "Habilita um dispositivo de áudio, câmera, Bluetooth ou impressora detectado com Code 22. Exige ID exato do diagnóstico.", new() { ["device_id"] = Str("Id retornado pelo diagnose_device") }, ["device_id"]),
         Tool("restart_device", "Reinicia um dispositivo de áudio, câmera, Bluetooth ou impressora consultado e verifica seu estado. Pode interromper seu uso.", new() { ["device_id"] = Str("Id retornado pelo diagnose_device") }, ["device_id"]),
         Tool("clear_print_queue", "Cancela todos os trabalhos de uma impressora específica, após autorização. Os documentos precisarão ser enviados novamente.", new() { ["printer_name"] = Str("Nome exato de get_printers") }, ["printer_name"]),
-        Tool("scan_driver_updates", "Busca drivers não instalados oferecidos pelo Windows Update. Pode demorar alguns minutos. Não instala."),
-        Tool("install_driver_update", "Baixa e instala um driver específico do Windows Update previamente consultado, com autorização. Não reinicia o PC.", new() { ["update_id"] = Str("Id exato de scan_driver_updates, relacionado ao dispositivo com problema") }, ["update_id"])
+        Tool("scan_driver_updates", "Busca online drivers oferecidos pela fonte padrão de atualizações do Windows, respeitando política corporativa. Exige hardware observado; retorna apenas ofertas com HardwareID único correspondente. Não instala."),
+        Tool("download_nvidia_app", "Após identificar uma única placa NVIDIA PCI presente, baixa o NVIDIA App do site oficial e valida a assinatura digital. Pede autorização. Não instala o aplicativo nem o driver."),
+        Tool("install_driver_update", "Baixa e instala um driver específico da fonte de atualizações do Windows previamente consultado, com autorização e verificação posterior. Não reinicia o PC.", new() { ["update_id"] = Str("Id exato de scan_driver_updates, relacionado ao dispositivo com problema") }, ["update_id"])
     ];
-    public static string Label(string name) => name switch { "probe_network_interfaces" => "Testando as interfaces de rede individualmente…", "wait_for_reconnect" => "Acompanhando a reconexão do dispositivo…", "prepare_restart" => "Preparando a retomada após reiniciar…", "get_boot_status" => "Verificando a inicialização do Windows…", "get_network" => "Verificando IP, DNS, gateway e adaptadores…", "enable_network_adapter" => "Ativando e verificando a interface de rede…", "test_connection" => "Testando resolução DNS e conexão…", "diagnose_device" => "Verificando dispositivos e sistema…", "get_printers" => "Verificando impressoras e filas…", "get_services" => "Consultando serviços do Windows…", "get_recent_errors" => "Consultando erros recentes do sistema…", "get_processes" => "Verificando consumo de memória dos aplicativos…", "set_dns" => "Configurando os servidores DNS…", "set_ipv4" => "Configurando o endereço IPv4…", "flush_dns" => "Limpando cache DNS…", "enable_camera" or "enable_device" => "Habilitando e verificando o dispositivo…", "restart_device" => "Reiniciando e verificando o dispositivo…", "allow_camera" => "Ajustando a permissão da câmera…", "restart_service" => "Reiniciando e verificando o serviço…", "clear_print_queue" => "Limpando a fila da impressora…", "scan_driver_updates" => "Buscando drivers no Windows Update…", "install_driver_update" => "Baixando e instalando o driver selecionado…", _ => "Validando ferramenta…" };
+    public static string Label(string name) => name switch { "probe_network_interfaces" => "Testando as interfaces de rede individualmente…", "wait_for_reconnect" => "Acompanhando a reconexão do dispositivo…", "prepare_restart" => "Preparando a retomada após reiniciar…", "get_boot_status" => "Verificando a inicialização do Windows…", "get_network" => "Verificando IP, DNS, gateway e adaptadores…", "enable_network_adapter" => "Ativando e verificando a interface de rede…", "test_connection" => "Testando resolução DNS e conexão…", "diagnose_device" => "Verificando dispositivos e sistema…", "get_hardware_inventory" => "Identificando hardware e drivers instalados…", "get_printers" => "Verificando impressoras e filas…", "get_services" => "Consultando serviços do Windows…", "get_recent_errors" => "Consultando erros recentes do sistema…", "get_processes" => "Verificando consumo de memória dos aplicativos…", "set_dns" => "Configurando os servidores DNS…", "set_ipv4" => "Configurando o endereço IPv4…", "flush_dns" => "Limpando cache DNS…", "enable_camera" or "enable_device" => "Habilitando e verificando o dispositivo…", "restart_device" => "Reiniciando e verificando o dispositivo…", "allow_camera" => "Ajustando a permissão da câmera…", "restart_service" => "Reiniciando e verificando o serviço…", "clear_print_queue" => "Limpando a fila da impressora…", "scan_driver_updates" => "Buscando drivers na fonte de atualizações do Windows…", "download_nvidia_app" => "Baixando o aplicativo oficial da NVIDIA…", "install_driver_update" => "Baixando e instalando o driver selecionado…", _ => "Validando ferramenta…" };
 }

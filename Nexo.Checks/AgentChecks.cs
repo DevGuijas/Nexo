@@ -81,6 +81,97 @@ internal static class AgentChecks
             Call("finish_support", new { message = "Consulta concluída." }));
         assert(noContentTools.Calls.SequenceEqual(["get_services"]) && noContent == "Consulta concluída.", "Resposta só com tool_calls é aceita sem content");
 
+        const string videoRequest = "Atualize os drivers da minha placa de vídeo";
+        const string videoHardwareId = "PCI\\VEN_1234&DEV_5678";
+        var videoInventory = WindowsTools.Ok(new { Total = 1, Truncated = false, Devices = new[] {
+            new Device("GPU de teste", "PCI\\GPU1", 0, "OK") { HardwareIds = [videoHardwareId], DriverVersion = "1.0", DriverProvider = "Fornecedor de teste" }
+        } });
+        var noDriverOffers = new FlowTools((name, _) => name switch
+        {
+            "get_hardware_inventory" => videoInventory,
+            "scan_driver_updates" => WindowsTools.Ok("[]"),
+            _ => throw new Exception("Oferta ausente não pode iniciar instalação")
+        });
+        var noOfferAnswer = await Run(videoRequest, noDriverOffers);
+        assert(noDriverOffers.Calls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates"])
+            && noOfferAnswer.Contains("GPU de teste") && noOfferAnswer.Contains("não ofereceu driver compatível")
+            && noOfferAnswer.Contains("Nenhuma alteração"), "Pedido de driver sem oferta termina com evidência, sem depender do modelo");
+
+        var nvidiaInventory = WindowsTools.Ok(new { Total = 1, Truncated = false, Devices = new[] {
+            new Device("NVIDIA GeForce RTX 5060 Ti", "PCI\\VEN_10DE&DEV_2D04", 0, "OK") { HardwareIds = ["PCI\\VEN_10DE&DEV_2D04"], DriverVersion = "32.0", DriverProvider = "NVIDIA" }
+        } });
+        var nvidiaFallback = new FlowTools((name, _) => name switch
+        {
+            "get_hardware_inventory" => nvidiaInventory,
+            "scan_driver_updates" => WindowsTools.Ok("[]"),
+            "download_nvidia_app" => WindowsTools.Ok(new { FileName = "C:\\Nexo\\NVIDIA_app.exe", Signature = "Valid", Installed = false }),
+            _ => throw new Exception("Ferramenta inesperada")
+        });
+        var nvidiaAnswer = await Run(videoRequest, nvidiaFallback);
+        assert(nvidiaFallback.Calls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates", "download_nvidia_app"])
+            && nvidiaAnswer.Contains("Baixei") && nvidiaAnswer.Contains("ainda não foi instalado"), "GPU NVIDIA sem oferta usa fornecedor oficial sem afirmar instalação");
+        var nvidiaRejected = new FlowTools((name, _) => name switch
+        {
+            "get_hardware_inventory" => nvidiaInventory,
+            "scan_driver_updates" => WindowsTools.Ok("[]"),
+            "download_nvidia_app" => "{\"success\":false,\"denied\":true}",
+            _ => throw new Exception("Ferramenta inesperada")
+        });
+        var rejectedAnswer = await Run(videoRequest, nvidiaRejected);
+        assert(nvidiaRejected.Calls.Count == 3 && rejectedAnswer.Contains("recusou") && rejectedAnswer.Contains("Nenhum driver foi alterado"), "Recusa do download oficial encerra sem alegar alteração");
+
+        var ambiguousVideo = new FlowTools((name, _) => name == "get_hardware_inventory" ? WindowsTools.Ok(new { Truncated = false, Devices = new[] {
+            new Device("GPU interna", "PCI\\GPU1", 0, "OK") { HardwareIds = [videoHardwareId] },
+            new Device("GPU externa", "PCI\\GPU2", 0, "OK") { HardwareIds = ["PCI\\VEN_9999&DEV_0001"] }
+        } }) : throw new Exception("Dispositivos ambíguos não podem iniciar busca"));
+        var ambiguousVideoAnswer = await Run(videoRequest, ambiguousVideo);
+        assert(ambiguousVideo.Calls.SequenceEqual(["get_hardware_inventory"]) && ambiguousVideoAnswer.Contains("Qual deles"), "Duas GPUs exigem identificação antes da busca de driver");
+
+        const string offeredDriverId = "00000000-0000-0000-0000-000000000789";
+        var videoOffer = WindowsTools.Ok(JsonSerializer.Serialize(new[] { new { Id = offeredDriverId, Title = "Driver gráfico de teste", HardwareID = videoHardwareId, Target = "GPU de teste" } }));
+        var deniedDriver = new FlowTools((name, _) => name switch
+        {
+            "get_hardware_inventory" => videoInventory,
+            "scan_driver_updates" => videoOffer,
+            "install_driver_update" => JsonSerializer.Serialize(new { success = false, denied = true }),
+            _ => throw new Exception("Ferramenta inesperada")
+        });
+        var deniedDriverAnswer = await Run(videoRequest, deniedDriver);
+        assert(deniedDriver.Calls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates", "install_driver_update"])
+            && deniedDriverAnswer.Contains("recusou") && deniedDriverAnswer.Contains("Nenhum driver foi instalado"), "Recusa de driver encerra o fluxo sem alegar instalação");
+
+        var installedDriver = new FlowTools((name, _) => name switch
+        {
+            "get_hardware_inventory" => videoInventory,
+            "scan_driver_updates" => videoOffer,
+            "install_driver_update" => WindowsTools.Ok(new { Verification = "version_changed", AfterVersion = "2.0" }),
+            _ => throw new Exception("Ferramenta inesperada")
+        });
+        var installedAnswer = await Run(videoRequest, installedDriver);
+        assert(installedDriver.Calls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates", "install_driver_update"])
+            && installedAnswer.Contains("versão observada passou para 2.0") && installedAnswer.Contains("resolução funcional ainda não está confirmada"),
+            "Driver instalado exige verificação da versão e teste funcional");
+
+        var readOnlyDriver = new FlowTools((name, _) => name switch
+        {
+            "get_hardware_inventory" => videoInventory,
+            "scan_driver_updates" => videoOffer,
+            _ => throw new Exception("Pedido somente leitura não pode instalar driver")
+        });
+        var readOnlyAnswer = await Run("Apenas verifique os drivers da minha placa de vídeo; não altere nada.", readOnlyDriver);
+        assert(readOnlyDriver.Calls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates"])
+            && readOnlyAnswer.Contains("Fiz apenas a consulta"), "Consulta de driver não instala oferta encontrada");
+
+        var mismatchedOffer = new FlowTools((name, _) => name switch
+        {
+            "get_hardware_inventory" => videoInventory,
+            "scan_driver_updates" => WindowsTools.Ok(JsonSerializer.Serialize(new[] { new { Id = offeredDriverId, Title = "Driver errado", HardwareID = "PCI\\VEN_XXXX", Target = "GPU de teste" } })),
+            _ => throw new Exception("Oferta sem ID exato não pode iniciar instalação")
+        });
+        var mismatchedAnswer = await Run(videoRequest, mismatchedOffer);
+        assert(mismatchedOffer.Calls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates"])
+            && mismatchedAnswer.Contains("não corresponde exatamente"), "Driver com ID incompatível é bloqueado antes de instalar");
+
         var cancelledTools = new FlowTools((_, _) => throw new OperationCanceledException("Cancelado durante a ferramenta"));
         using (var model = new ModelSequence([Call("get_services", new { }), Call("finish_support", new { message = "Concluído." })]))
         using (var http = new HttpClient(model))

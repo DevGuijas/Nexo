@@ -6,4 +6,4 @@
  <ItemGroup><None Update="Fixtures/*.json" CopyToOutputDirectory="PreserveNewest" /></ItemGroup>
  <ItemGroup><Compile Include="../Nexo.Support/InvestigationEvidence.cs" Link="InvestigationEvidence.cs"/><Compile Include="../Nexo.Support/PhysicalObservation.cs" Link="PhysicalObservation.cs"/></ItemGroup>
  <ItemGroup><Compile Include="../Nexo.Support/NetworkWorkflow.cs" Link="NetworkWorkflow.cs"/></ItemGroup>
-<ItemGroup><Compile Include="../Nexo.Support/InterfaceProbe.cs" Link="InterfaceProbe.cs"/></ItemGroup><ItemGroup><Compile Include="../Nexo.Support/SupportIntake.cs" Link="SupportIntake.cs"/></ItemGroup></Project>
+<ItemGroup><Compile Include="../Nexo.Support/InterfaceProbe.cs" Link="InterfaceProbe.cs"/></ItemGroup><ItemGroup><Compile Include="../Nexo.Support/SupportIntake.cs" Link="SupportIntake.cs"/><Compile Include="../Nexo.Support/DriverWorkflow.cs" Link="DriverWorkflow.cs"/><Compile Include="../Nexo.Support/OfficialDriverSource.cs" Link="OfficialDriverSource.cs"/><Compile Include="../Nexo.Support/ToolResultPresentation.cs" Link="ToolResultPresentation.cs"/></ItemGroup></Project>

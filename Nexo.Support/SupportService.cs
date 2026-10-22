@@ -11,6 +11,10 @@ public sealed record Device(string Name, string Id, int Code, string Status)
 {
     public string[] HardwareIds { get; init; } = [];
     public string[] CompatibleIds { get; init; } = [];
+    public string Class { get; init; } = "";
+    public string Manufacturer { get; init; } = "";
+    public string DriverProvider { get; init; } = "";
+    public string DriverVersion { get; init; } = "";
 }
 public sealed record Diagnostic(string Topic, string Summary, List<Device> Devices);
 public sealed class SupportService(Store store)

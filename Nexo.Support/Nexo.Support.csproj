@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Nexo</AssemblyName>
-    <Version>1.6.0</Version>
+    <Version>1.6.2</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
   <ItemGroup><EmbeddedResource Include="NetworkTransaction.ps1" LogicalName="Nexo.NetworkTransaction.ps1" /></ItemGroup>

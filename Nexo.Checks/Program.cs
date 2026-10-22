@@ -6,6 +6,39 @@ void Assert(bool condition, string title) { if (!condition) throw new Exception(
 void Reject(Action action, string title) { try { action(); } catch (InvalidOperationException) { Assert(true, title); return; } throw new Exception("FAIL: " + title); }
 try
 {
+    var freshDirectRoot = Path.Combine(root, "direct-fresh");
+    var freshDirectStore = new Store(freshDirectRoot, directAccess: true);
+    var directSession = freshDirectStore.GetLocalSession();
+    Assert(freshDirectStore.Data.Accounts.Count == 0 && directSession.Name == Environment.UserName && !directSession.Admin, "Acesso direto usa a identidade Windows sem criar conta administrativa padrão");
+    freshDirectStore.Require(directSession, a => a.Diagnose);
+    freshDirectStore.Require(directSession, a => a.Repair);
+    freshDirectStore.Require(directSession, a => a.Tickets);
+    Assert(true, "Sessão direta permite diagnóstico, correção sujeita a confirmação e encaminhamento");
+    Reject(() => freshDirectStore.Require(directSession, a => a.Admin), "Sessão direta não recebe administração de contas");
+    Reject(() => freshDirectStore.Login("Guisbz", "1234"), "Instalação direta não aceita credencial administrativa inicial");
+    var humanHardware = ToolResultPresentation.Describe("Identificando hardware e drivers instalados", WindowsTools.Ok(new { Devices = new[] { new { Name = "NVIDIA GeForce RTX 5060 Ti", DriverVersion = "32.0", DriverProvider = "NVIDIA", Id = "PCI\\VEN_10DE" } } }));
+    Assert(humanHardware.Detail.Contains("NVIDIA GeForce RTX 5060 Ti") && humanHardware.Detail.Contains("32.0") && !humanHardware.Detail.Contains("PCI\\VEN") && !humanHardware.Detail.Contains('{'), "Detalhe do hardware explica o resultado sem JSON nem identificadores técnicos");
+    var humanScan = ToolResultPresentation.Describe("Buscando drivers na fonte de atualizações do Windows", WindowsTools.Ok("[]"));
+    Assert(humanScan.State == "0 ofertas compatíveis" && humanScan.Detail.Contains("Nenhum arquivo foi baixado"), "Busca sem oferta mostra fonte e limite real da execução");
+    var humanDenied = ToolResultPresentation.Describe("Instalando driver", "{\"success\":false,\"denied\":true}");
+    Assert(humanDenied.Warning && humanDenied.Detail.Contains("interrompeu"), "Recusa é exibida em linguagem clara");
+    Assert(OfficialDriverSource.AllowedNvidiaDownload(new Uri("https://us.download.nvidia.com/nvapp/client/11.0.9.565/NVIDIA_app_v11.0.9.565.exe"))
+        && !OfficialDriverSource.AllowedNvidiaDownload(new Uri("https://us.download.nvidia.com.evil.example/nvapp/client/11.0.9.565/NVIDIA_app_v11.0.9.565.exe"))
+        && !OfficialDriverSource.AllowedNvidiaDownload(new Uri("http://us.download.nvidia.com/nvapp/client/11.0.9.565/NVIDIA_app_v11.0.9.565.exe")),
+        "Download NVIDIA aceita apenas domínio oficial, HTTPS e caminho com versão consistente");
+
+    var migrationRoot = Path.Combine(root, "direct-migration");
+    var previousStore = new Store(migrationRoot);
+    var previousUser = previousStore.Login("Guisbz", "1234");
+    var oldConversation = new Conversation { UserId = previousUser.Id };
+    var oldTicket = new Ticket { UserId = previousUser.Id };
+    previousStore.Data.Conversations.Add(oldConversation);
+    previousStore.Data.Tickets.Add(oldTicket);
+    previousStore.Save();
+    var migratedStore = new Store(migrationRoot, directAccess: true);
+    var migratedSession = migratedStore.GetLocalSession();
+    Assert(migratedStore.Data.Conversations.Single().UserId == migratedSession.Id && migratedStore.Data.Tickets.Single().UserId == migratedSession.Id, "Acesso direto preserva atendimentos e encaminhamentos locais existentes");
+
     var store = new Store(root);
     store.Data.AiEnabled = false;
     var admin = store.Login("Guisbz", "1234");
@@ -96,6 +129,38 @@ try
         var reports = result.RootElement.GetProperty("data").GetProperty("Interfaces").EnumerateArray().ToArray();
         Console.WriteLine(result.RootElement.GetRawText());
         Assert(reports.Length > 0 && reports.Any(r => r.GetProperty("ProbeCompleted").GetBoolean()), "Sondagem real somente leitura vincula a saída à interface");
+    }
+    if (args.Contains("--hardware-live"))
+    {
+        var beforeAi = store.Data.AiEnabled;
+        store.Data.AiEnabled = true;
+        try
+        {
+            var attemptedChanges = 0;
+            var actualCalls = new List<string>();
+            int? availableOffers = null;
+            var hardwareTools = new WindowsTools(store, admin, _ => { attemptedChanges++; return Task.FromResult(false); }, new Progress<string>());
+            var question = new Conversation { UserId = admin.Id, Entries = [new Entry { Role = "user", Text = "Apenas verifique os drivers da minha placa de vídeo; não altere nada." }] };
+            var driverAnswer = await new AgentService(store, hardwareTools).Run(admin, question, new Progress<string>(), (label, output) =>
+            {
+                using var result = System.Text.Json.JsonDocument.Parse(output);
+                actualCalls.Add(question.AgentHistory.Last(message => message.role == "tool").tool_name ?? "");
+                if (actualCalls.Last() == "get_hardware_inventory" && result.RootElement.GetProperty("success").GetBoolean())
+                    Console.WriteLine("  Dispositivos gráficos observados: " + result.RootElement.GetProperty("data").GetProperty("Devices").GetArrayLength());
+                if (actualCalls.Last() == "scan_driver_updates" && result.RootElement.GetProperty("success").GetBoolean())
+                {
+                    using var offers = System.Text.Json.JsonDocument.Parse(result.RootElement.GetProperty("data").GetString() ?? "[]");
+                    availableOffers = offers.RootElement.GetArrayLength();
+                    Console.WriteLine("  Ofertas correspondentes: " + availableOffers);
+                }
+            }, CancellationToken.None);
+            Assert(actualCalls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates"]), "Agente inventaria hardware real e busca ofertas sem chamadas extras");
+            Assert(driverAnswer.Length > 0 && availableOffers.HasValue && attemptedChanges == 0 && !actualCalls.Contains("install_driver_update")
+                && (availableOffers > 0 || driverAnswer.Contains("não ofereceu driver compatível")),
+                "Pedido real de driver termina com evidência em somente leitura, sem instalação");
+            Console.WriteLine("  Resposta: " + driverAnswer);
+        }
+        finally { store.Data.AiEnabled = beforeAi; }
     }
     if (args.Contains("--diagnostics"))
     {

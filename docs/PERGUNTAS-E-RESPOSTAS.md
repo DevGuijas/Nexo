@@ -18,8 +18,8 @@ O projeto busca tornar o diagnóstico de problemas comuns de Windows mais guiado
 - **WPF:** interface gráfica para Windows.
 - **Ollama e Qwen3 8B:** modelo de linguagem executado localmente, usado para interpretar a conversa e selecionar ferramentas do catálogo.
 - **PowerShell e APIs do Windows:** consultas e operações específicas do sistema, encapsuladas pelo executor do aplicativo.
-- **JSON local:** persistência de contas, conversas e registros técnicos.
-- **PBKDF2-SHA256:** derivação de senha com salt aleatório para as contas locais do aplicativo.
+- **Windows Update Agent:** consulta online e instala apenas ofertas de driver compatíveis com o hardware observado, usando a fonte configurada no Windows.
+- **JSON local:** persistência de conversas, encaminhamentos e registros técnicos.
 
 O aplicativo principal não depende de pacotes NuGet externos. O modelo de IA é instalado separadamente e não é compilado dentro de `Nexo.exe`.
 
@@ -80,7 +80,7 @@ Também é possível abrir diretamente o executável gerado:
 
 ### 10. Como executar uma versão já empacotada?
 
-Extraia todos os arquivos de `artifacts\Nexo-1.6.0-Windows.zip` para a mesma pasta e abra `Nexo.exe`. Essa publicação depende do **.NET Desktop Runtime 8 para Windows x64**. Não copie apenas o executável, pois os demais arquivos publicados podem ser necessários.
+Para uma instalação nova, baixe o [NexoSetup.exe publicado na Oracle](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe) e execute-o no Windows x64. Ele consulta a versão atual, baixa o Nexo, o Ollama e o modelo `qwen3:8b`, valida os pacotes e cria o atalho no menu Iniciar. Reexecutar o instalador consulta a versão publicada mais recente. A primeira instalação precisa de conexão e de aproximadamente 7 GB para os downloads, além do espaço para os arquivos instalados. Para uma compilação manual, use `dotnet publish` conforme [o guia de compilação](COMPILACAO-E-IA.md).
 
 ### 11. Como preparar a IA local?
 
@@ -91,11 +91,11 @@ ollama pull qwen3:8b
 ollama list
 ```
 
-Depois abra o Nexo, entre com uma conta administradora, habilite o agente de IA em **Configurações**, mantenha `qwen3:8b` como modelo e use **Verificar modelo local**. O Nexo tenta iniciar o serviço Ollama automaticamente. O modelo ocupa aproximadamente 5–6 GB e não acompanha o ZIP do aplicativo.
+Depois abra o Nexo, acesse **Configurações**, habilite o agente de IA, mantenha `qwen3:8b` como modelo e use **Verificar modelo local**. O Nexo tenta iniciar o serviço Ollama automaticamente. O modelo ocupa aproximadamente 5–6 GB e não acompanha o ZIP isolado do aplicativo. O instalador publicado na Oracle baixa e prepara o modelo automaticamente.
 
-### 12. Qual é a conta inicial?
+### 12. Preciso fazer login para usar o Nexo?
 
-O tutorial do projeto registra a conta inicial `Guisbz`, senha `1234`. No primeiro acesso, o aplicativo exige que a senha seja trocada antes de liberar as funções; o perfil permanece acessível para concluir essa etapa. Troque a senha antes de usar uma cópia compartilhada do sistema.
+Não. O aplicativo abre diretamente usando a sessão atual do Windows e identifica o atendimento com o nome desse usuário. Acesso a alterações continua protegido por confirmação dentro do Nexo e, quando necessário, pelo UAC. Os atendimentos antigos do perfil local são mantidos e associados à sessão direta.
 
 ### 13. Como executar as verificações automatizadas?
 
@@ -119,7 +119,7 @@ Não. O modelo recebe um catálogo limitado de ferramentas. O executor seleciona
 
 ### 16. Como o Nexo impede uma alteração sem autorização?
 
-O executor confere permissões da conta e pede confirmação específica no aplicativo antes de alterações protegidas. Operações que exigem elevação também passam pelo UAC do Windows. Se o usuário recusar, a etapa é encerrada sem executar a alteração. A permissão de reparo do Nexo não concede, por si só, privilégios administrativos do Windows.
+O catálogo limita quais alterações podem ser propostas; cada mudança protegida exige confirmação específica no aplicativo. Operações que exigem elevação também passam pelo UAC do Windows. Se o usuário recusar, a etapa é encerrada sem executar a alteração. A autorização no Nexo não concede, por si só, privilégios administrativos do Windows.
 
 ### 17. Como o sistema evita dizer que corrigiu algo quando não corrigiu?
 
@@ -131,7 +131,7 @@ Uma recusa impede aquela alteração e é devolvida ao controlador como resultad
 
 ### 19. Onde os dados ficam armazenados?
 
-Os dados locais do aplicativo ficam em `%LOCALAPPDATA%\NexoSupport\data.json`. Isso inclui contas e histórico de atendimentos com chamadas e resultados técnicos. As senhas são armazenadas como derivação PBKDF2-SHA256 com salt aleatório, mas o arquivo inteiro não tem criptografia integral. Trate o arquivo, backups e relatórios exportados como potencialmente sensíveis.
+Os dados locais do aplicativo ficam em `%LOCALAPPDATA%\NexoSupport\data.json`. Isso inclui histórico de atendimentos com chamadas e resultados técnicos. O arquivo inteiro não tem criptografia integral. Trate o arquivo, backups e relatórios exportados como potencialmente sensíveis.
 
 ### 20. A conversa é enviada para a nuvem?
 
