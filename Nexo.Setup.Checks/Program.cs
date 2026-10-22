@@ -3,6 +3,12 @@ using System.Security.Cryptography;
 using System.Text;
 using Nexo.Setup;
 
+if (args.Contains("--remote"))
+{
+    Environment.ExitCode = await Installer.RunAsync(["--check"], Console.WriteLine, false);
+    return;
+}
+
 var root = Path.Combine(Path.GetTempPath(), "NexoSetupChecks-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(root);
 var count = 0;
@@ -23,6 +29,9 @@ try
         new Package("releases/1.6.2/qwen3-8b-model.zip", hash, 5_000_000_000), new Package("releases/1.6.2/OllamaSetup.exe", hash, 1000));
     Installer.ValidateManifest(valid);
     Check(true, "Manifesto completo e modelo esperado aceitos");
+    Installer.ValidateManifest(valid with { Version = "1.6.3", App = valid.App with { Path = "releases/1.6.3/nexo-app.zip" } });
+    Check(true, "Nova versão pode reutilizar pacotes de modelo e runtime com hash assinado");
+    Reject(() => Installer.ValidateManifest(valid with { Version = "1.6.3" }), "Aplicativo deve pertencer à versão publicada");
     Reject(() => Installer.ValidateManifest(valid with { App = valid.App with { Path = "../evil.exe" } }), "Caminho fora da versão rejeitado");
     Reject(() => Installer.ValidateManifest(valid with { Model = "outro-modelo" }), "Modelo inesperado rejeitado");
     Reject(() => Installer.ValidateManifest(valid with { App = valid.App with { Sha256 = "invalido" } }), "Hash inválido rejeitado");

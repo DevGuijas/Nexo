@@ -4,11 +4,15 @@ Aplicativo C# / WPF com IA local que escolhe ferramentas do Windows, executa aç
 
 ## Abrir
 
-Para executar a compilação local, abra `artifacts/Nexo-1.6.2/Nexo.exe`. A barra da janela deve mostrar **Nexo 1.6.2**. Esse pacote é independente do .NET instalado no computador. Para distribuir o aplicativo com o modelo local, baixe [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe). Ele consulta a versão publicada na Oracle ao ser executado; veja [o procedimento de instalação e publicação](docs/INSTALADOR-NUVEM.md).
+Para executar a compilação local, rode `dotnet run --project Nexo.Support -c Release`. Para instalar o aplicativo com o modelo local, baixe [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe). Ele consulta a versão publicada na Oracle ao ser executado; veja [o procedimento de instalação e publicação](docs/INSTALADOR-NUVEM.md).
+
+### Novidade 1.6.3 — driver NVIDIA e instalador gráfico
+
+Se o Windows não oferece atualização para uma única placa NVIDIA detectada, o Nexo consulta o catálogo oficial do fabricante para o modelo e o Windows identificados. Se houver versão WHQL mais recente, apresenta a licença e pede autorização explícita; baixa o pacote de `us.download.nvidia.com`, valida a assinatura NVIDIA, instala o driver de vídeo e confere a versão observada pelo Windows. Reinicialização ou falta de confirmação deixam a correção pendente, e o usuário ainda precisa testar a função. O instalador agora abre um assistente gráfico com etapas, progresso e opção de instalação por usuário. A opção para todos os usuários fica indisponível enquanto o runtime e o modelo forem instalados por perfil.
 
 ### Novidade 1.6.2 — detalhes legíveis e distribuição
 
-Os detalhes expandidos das ferramentas mostram dispositivo, versão, origem e resultado em português, sem despejar JSON no chat. Quando a fonte do Windows não oferece driver para uma única placa NVIDIA PCI detectada, um pedido explícito de atualização pode baixar o NVIDIA App pelo domínio oficial após autorização. O arquivo só é disponibilizado se a assinatura digital da NVIDIA for válida. Esse download **não instala nem testa o driver**; o usuário conclui a escolha no aplicativo do fabricante e o Nexo só pode considerar a falha resolvida após teste funcional. O instalador da versão 1.6.2 baixa aplicativo, Ollama e modelo de uma versão assinada publicada na Oracle.
+Os detalhes expandidos das ferramentas mostram dispositivo, versão, origem e resultado em português, sem despejar JSON no chat. A versão 1.6.2 introduziu a distribuição por manifesto assinado na Oracle e o download do NVIDIA App; o fluxo de instalação direta de driver veio na 1.6.3.
 
 ### Novidade 1.6.1 — drivers e acompanhamento
 

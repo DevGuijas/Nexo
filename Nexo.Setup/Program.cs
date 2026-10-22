@@ -5,6 +5,9 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Runtime.InteropServices;
+using System.Net.Http;
+using System.IO;
+using System.Windows;
 
 namespace Nexo.Setup;
 
@@ -18,7 +21,16 @@ public static class Installer
     private static readonly HttpClient Client = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromHours(2) };
     private static readonly string LocalAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 
-    public static async Task<int> Main(string[] args)
+    [STAThread]
+    public static int Main(string[] args)
+    {
+        if (args.Contains("--check")) return RunAsync(args, Console.WriteLine, false).GetAwaiter().GetResult();
+        var window = new SetupWindow(args);
+        new Application().Run(window);
+        return window.ExitCode;
+    }
+
+    public static async Task<int> RunAsync(string[] args, Action<string> report, bool showMessage)
     {
         var checkOnly = args.Length == 1 && args[0] == "--check" || args.Length == 3 && args[0] == "--check" && args[1] == "--manifest";
         var manifestText = args.Length == 0 || args.Length == 1 && checkOnly ? DefaultManifestUrl
@@ -26,13 +38,13 @@ public static class Installer
             : args.Length == 3 && checkOnly ? args[2] : "";
         if (!Uri.TryCreate(manifestText, UriKind.Absolute, out var manifestUrl))
         {
-            Console.Error.WriteLine("Uso: NexoSetup.exe [--manifest https://servidor-oracle/.../latest.json]");
+            report("Uso: NexoSetup.exe [--manifest https://servidor-oracle/.../latest.json]");
             return 2;
         }
         try
         {
             ValidateManifestUri(manifestUrl);
-            Console.WriteLine("Consultando a versão publicada do Nexo…");
+            report("Consultando a versão publicada do Nexo…");
             using var response = await Client.GetAsync(manifestUrl, HttpCompletionOption.ResponseHeadersRead);
             response.EnsureSuccessStatusCode();
             if (response.Content.Headers.ContentLength is > 64_000) throw new InvalidDataException("Manifesto muito grande.");
@@ -56,16 +68,16 @@ public static class Installer
                     using var head = await Client.SendAsync(new HttpRequestMessage(HttpMethod.Head, uri));
                     head.EnsureSuccessStatusCode();
                     if (head.Content.Headers.ContentLength != package.Bytes) throw new InvalidDataException("Tamanho remoto inesperado: " + package.Path);
-                    Console.WriteLine("Disponível: " + package.Path);
+                    report("Disponível: " + package.Path);
                 }
-                Console.WriteLine("Manifesto assinado e arquivos publicados para a versão " + manifest.Version + ".");
+                report("Manifesto assinado e arquivos publicados para a versão " + manifest.Version + ".");
                 return 0;
             }
             var cache = Path.Combine(LocalAppData, "Nexo", "InstallerCache", manifest.Version);
             Directory.CreateDirectory(cache);
-            var appZip = await Download(baseUrl, manifest.App, Path.Combine(cache, "nexo-app.zip"));
-            var modelZip = await Download(baseUrl, manifest.ModelArchive, Path.Combine(cache, "qwen3-model.zip"));
-            var ollamaSetup = manifest.Ollama == null ? null : await Download(baseUrl, manifest.Ollama, Path.Combine(cache, "OllamaSetup.exe"));
+            var appZip = await Download(baseUrl, manifest.App, Path.Combine(cache, "nexo-app.zip"), report);
+            var modelZip = await Download(baseUrl, manifest.ModelArchive, Path.Combine(cache, "qwen3-model.zip"), report);
+            var ollamaSetup = manifest.Ollama == null ? null : await Download(baseUrl, manifest.Ollama, Path.Combine(cache, "OllamaSetup.exe"), report);
 
             var appRoot = Path.Combine(LocalAppData, "Programs", "Nexo");
             var stage = appRoot + ".new";
@@ -77,7 +89,7 @@ public static class Installer
 
             if (!OllamaInstalled())
             {
-                Console.WriteLine("Instalando o Ollama…");
+                report("Instalando o Ollama…");
                 if (ollamaSetup != null)
                 {
                     if (!await VerifyOllamaSignature(ollamaSetup))
@@ -88,28 +100,28 @@ public static class Installer
                 if (!OllamaInstalled()) throw new IOException("O Ollama não foi encontrado após a instalação.");
             }
 
-            Console.WriteLine("Instalando o modelo local qwen3:8b…");
+            report("Instalando o modelo local qwen3:8b…");
             var modelsRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ollama", "models");
             Directory.CreateDirectory(modelsRoot);
             await InstallModelArchive(modelZip, modelsRoot);
             var modelManifest = Path.Combine(modelsRoot, "manifests", "registry.ollama.ai", "library", "qwen3", "8b");
             if (!File.Exists(modelManifest)) throw new InvalidDataException("O modelo qwen3:8b não foi encontrado no pacote.");
 
-            Console.WriteLine("Ativando o Nexo " + manifest.Version + "…");
+            report("Ativando o Nexo " + manifest.Version + "…");
             if (Directory.Exists(backup)) Directory.Delete(backup, true);
             if (Directory.Exists(appRoot)) Directory.Move(appRoot, backup);
             try { Directory.Move(stage, appRoot); }
             catch { if (Directory.Exists(backup) && !Directory.Exists(appRoot)) Directory.Move(backup, appRoot); throw; }
             try { CreateStartMenuShortcut(appRoot); }
-            catch (Exception ex) { Console.WriteLine("Atalho não criado: " + ex.Message); }
-            Console.WriteLine("Instalação concluída: " + Path.Combine(appRoot, "Nexo.exe"));
-            MessageBoxW(IntPtr.Zero, "Nexo " + manifest.Version + " instalado com o modelo local. Abra pelo menu Iniciar.", "Nexo instalado", 0x40);
+            catch (Exception ex) { report("Atalho não criado: " + ex.Message); }
+            report("Instalação concluída: " + Path.Combine(appRoot, "Nexo.exe"));
+            if (showMessage) MessageBoxW(IntPtr.Zero, "Nexo " + manifest.Version + " instalado com o modelo local. Abra pelo menu Iniciar.", "Nexo instalado", 0x40);
             return 0;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine("Instalação interrompida: " + ex.Message);
-            if (!checkOnly) MessageBoxW(IntPtr.Zero, "A instalação foi interrompida: " + ex.Message, "Nexo", 0x10);
+            report("Instalação interrompida: " + ex.Message);
+            if (!checkOnly && showMessage) MessageBoxW(IntPtr.Zero, "A instalação foi interrompida: " + ex.Message, "Nexo", 0x10);
             return 1;
         }
     }
@@ -142,21 +154,21 @@ public static class Installer
         {
             if (package == null) throw new InvalidDataException("Arquivo ausente no manifesto.");
             if (package.Path is not { } path || !Regex.IsMatch(path, @"^releases/\d+\.\d+\.\d+/[A-Za-z0-9_.-]+$")
-                || !path.StartsWith("releases/" + manifest.Version + "/", StringComparison.Ordinal)
+                || package == manifest.App && !path.StartsWith("releases/" + manifest.Version + "/", StringComparison.Ordinal)
                 || !Regex.IsMatch(package.Sha256 ?? "", "^[0-9a-fA-F]{64}$") || package.Bytes is < 1000 or > 8_000_000_000)
                 throw new InvalidDataException("Arquivo do manifesto inválido.");
         }
     }
 
-    private static async Task<string> Download(Uri baseUrl, Package package, string destination)
+    private static async Task<string> Download(Uri baseUrl, Package package, string destination, Action<string> report)
     {
         var source = PackageUrl(baseUrl, package);
         if (File.Exists(destination) && new FileInfo(destination).Length == package.Bytes && await HashMatches(destination, package.Sha256))
         {
-            Console.WriteLine("Arquivo já verificado: " + Path.GetFileName(destination));
+            report("Arquivo já verificado: " + Path.GetFileName(destination));
             return destination;
         }
-        Console.WriteLine("Baixando " + Path.GetFileName(destination) + "…");
+        report("Baixando " + Path.GetFileName(destination) + "…");
         var temp = destination + ".download";
         try
         {
@@ -176,7 +188,7 @@ public static class Installer
                     if (total > package.Bytes) throw new InvalidDataException("Download maior que o tamanho anunciado.");
                     await output.WriteAsync(buffer.AsMemory(0, read));
                     var percent = (int)(total * 100 / package.Bytes);
-                    if (percent >= reported + 10) { reported = percent / 10 * 10; Console.WriteLine($"  {reported}% recebido"); }
+                    if (percent >= reported + 10) { reported = percent / 10 * 10; report($"  {reported}% recebido"); }
                 }
                 if (total != package.Bytes) throw new InvalidDataException("Download incompleto.");
             }

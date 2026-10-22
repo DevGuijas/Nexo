@@ -4,7 +4,8 @@ param(
     [string]$OutputDirectory = 'artifacts/cloud-release',
     [string]$ModelRoot = "$env:USERPROFILE\.ollama\models",
     [string]$SigningKeyPath = "$env:USERPROFILE\.nexo-release-signing.pem",
-    [switch]$ReuseArchives
+    [switch]$ReuseArchives,
+    [switch]$ReusePublishedDependencies
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
@@ -29,6 +30,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Falha ao publicar o aplicativo.' }
 if (Test-Path -LiteralPath $appArchive) { Remove-Item -LiteralPath $appArchive -Force }
 [System.IO.Compression.ZipFile]::CreateFromDirectory($appStage, $appArchive, [System.IO.Compression.CompressionLevel]::Optimal, $false)
 
+if (-not $ReusePublishedDependencies) {
 $modelManifest = Join-Path $ModelRoot 'manifests/registry.ollama.ai/library/qwen3/8b'
 if (!(Test-Path -LiteralPath $modelManifest)) { throw 'Modelo qwen3:8b não está disponível no Ollama local.' }
 $modelData = Get-Content -LiteralPath $modelManifest -Raw | ConvertFrom-Json
@@ -53,8 +55,9 @@ try {
         }
     } finally { $zip.Dispose() }
 } finally { $stream.Dispose() }
+}
 } else {
-    if (!(Test-Path -LiteralPath $appArchive) -or !(Test-Path -LiteralPath $modelArchive)) { throw 'Arquivos existentes não foram encontrados para reutilização.' }
+    if (!(Test-Path -LiteralPath $appArchive) -or (-not $ReusePublishedDependencies -and !(Test-Path -LiteralPath $modelArchive))) { throw 'Arquivos existentes não foram encontrados para reutilização.' }
 }
 
 $ollamaTarget = $null
@@ -66,8 +69,27 @@ function Package([string]$path) {
     $item = Get-Item -LiteralPath $path
     return @{ path = "releases/$version/$($item.Name)"; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant(); bytes = $item.Length }
 }
-$latest = [ordered]@{ schema = 1; version = $version; model = 'qwen3:8b'; app = (Package $appArchive); modelArchive = (Package $modelArchive) }
-if ($ollamaTarget) { $latest.ollama = (Package $ollamaTarget) }
+$latest = [ordered]@{ schema = 1; version = $version; model = 'qwen3:8b'; app = (Package $appArchive) }
+if ($ReusePublishedDependencies) {
+    $origin = 'https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/'
+    $previousContent = (Invoke-WebRequest -Uri ($origin + 'latest.json') -UseBasicParsing).Content
+    $previousBytes = if ($previousContent -is [byte[]]) { $previousContent } else { [System.Text.Encoding]::UTF8.GetBytes([string]$previousContent) }
+    $signatureContent = (Invoke-WebRequest -Uri ($origin + 'latest.sig') -UseBasicParsing).Content
+    $previousSignature = if ($signatureContent -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($signatureContent).Trim() } else { ([string]$signatureContent).Trim() }
+    $publicKey = Join-Path $projectRoot 'Nexo.Setup/release-public.pem'
+    $verifier = [System.Security.Cryptography.RSA]::Create()
+    try {
+        $verifier.ImportFromPem([System.IO.File]::ReadAllText($publicKey))
+        if (-not $verifier.VerifyData($previousBytes, [Convert]::FromBase64String($previousSignature), [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)) { throw 'Manifesto anterior não possui assinatura válida.' }
+    } finally { $verifier.Dispose() }
+    $previous = [System.Text.Encoding]::UTF8.GetString($previousBytes) | ConvertFrom-Json
+    if ($previous.model -ne 'qwen3:8b' -or !$previous.modelArchive -or !$previous.ollama) { throw 'Pacotes publicados não podem ser reutilizados.' }
+    $latest.modelArchive = $previous.modelArchive
+    $latest.ollama = $previous.ollama
+} else {
+    $latest.modelArchive = Package $modelArchive
+    if ($ollamaTarget) { $latest.ollama = Package $ollamaTarget }
+}
 $latestPath = Join-Path $releaseRoot 'latest.json'
 $latest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $latestPath -Encoding utf8NoBOM
 $rsa = [System.Security.Cryptography.RSA]::Create()

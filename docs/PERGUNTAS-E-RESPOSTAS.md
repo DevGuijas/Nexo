@@ -80,7 +80,7 @@ Também é possível abrir diretamente o executável gerado:
 
 ### 10. Como executar uma versão já empacotada?
 
-Para uma instalação nova, baixe o [NexoSetup.exe publicado na Oracle](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe) e execute-o no Windows x64. Ele consulta a versão atual, baixa o Nexo, o Ollama e o modelo `qwen3:8b`, valida os pacotes e cria o atalho no menu Iniciar. Reexecutar o instalador consulta a versão publicada mais recente. A primeira instalação precisa de conexão e de aproximadamente 7 GB para os downloads, além do espaço para os arquivos instalados. Para uma compilação manual, use `dotnet publish` conforme [o guia de compilação](COMPILACAO-E-IA.md).
+Para uma instalação nova, baixe o [NexoSetup.exe publicado na Oracle](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe) e execute-o no Windows x64. O assistente gráfico instala no perfil atual, consulta a versão publicada, baixa o Nexo, o Ollama e o modelo `qwen3:8b`, valida os pacotes e cria o atalho no menu Iniciar. A opção para todos os usuários ainda está desabilitada porque o runtime e o modelo são instalados por perfil. Reexecutar o instalador consulta a versão publicada mais recente. A primeira instalação precisa de conexão e de aproximadamente 7 GB para os downloads, além do espaço para os arquivos instalados. Para uma compilação manual, use `dotnet publish` conforme [o guia de compilação](COMPILACAO-E-IA.md).
 
 ### 11. Como preparar a IA local?
 
@@ -149,7 +149,7 @@ Há fluxos e ferramentas para rede, câmera, áudio, Bluetooth, impressoras, inf
 
 ### 23. O Nexo instala qualquer driver?
 
-Não. A implementação procura drivers oferecidos pelo Windows Update e restringe a instalação ao item identificado e escolhido. A disponibilidade depende das fontes e políticas do Windows Update. A instalação pode pedir reinicialização, mas o Nexo não reinicia o computador automaticamente.
+Não. Primeiro o Nexo procura ofertas compatíveis na fonte configurada no Windows e restringe a instalação ao hardware observado. Para uma única placa NVIDIA identificada sem oferta nessa fonte, ele também consulta o catálogo oficial da NVIDIA. Se houver um driver WHQL mais recente para o modelo e Windows detectados, pede autorização e aceite da licença do fabricante, baixa do domínio oficial, confere a assinatura digital e tenta instalar apenas o driver de vídeo. Depois confere a versão retornada pelo Windows. A instalação pode pedir reinicialização; o Nexo não reinicia o computador automaticamente e a solução funcional depende de teste do usuário. Outros fabricantes e instalações em ambientes corporativos restritos ainda dependem da TI.
 
 ### 24. O agente consegue reparar qualquer periférico?
 

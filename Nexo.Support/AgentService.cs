@@ -30,10 +30,14 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         dispositivos, habilitar câmera desabilitada, ajustar acesso de câmera, reiniciar áudio
         ou spooler de impressão, diagnosticar Bluetooth, impressoras, memória, processos, logs e
         inventariar hardware PnP e instalar drivers específicos oferecidos pela fonte de atualizações
-        configurada no Windows (Windows Update ou servidor gerenciado). Use ferramentas, não apenas ensine passos.
+        configurada no Windows (Windows Update ou servidor gerenciado). Para uma única GPU NVIDIA
+        identificada sem oferta no Windows, consulte find_official_nvidia_driver e, se houver
+        versão mais nova, use install_official_nvidia_driver com autorização explícita.
+        Use ferramentas, não apenas ensine passos.
         Para drivers, consulte primeiro get_hardware_inventory ou diagnose_device, depois
         scan_driver_updates. Só instale oferta com HardwareID exato para um único dispositivo
-        observado. Não baixe executáveis de sites arbitrários nem ignore a política de atualizações.
+        observado. Não baixe executáveis de sites arbitrários. Se uma política corporativa
+        proibir a instalação, encaminhe o caso à TI.
         Para investigar um problema, faça primeiro uma consulta relevante, leia seu resultado e
         escolha o próximo teste ou correção. Nunca diga que não tem acesso ao PC: consulte as ferramentas.
         Para pedidos claros de mudanças, consulte o estado, use a ferramenta adequada e verifique após.
@@ -375,7 +379,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                                 _ => null
                             },
                             "flush_dns" => "tente acessar novamente o endereço que falhou",
-                            "install_driver_update" => "teste o dispositivo no aplicativo em que percebeu a falha e informe se o Windows solicitou reinicialização",
+                            "install_driver_update" or "install_official_nvidia_driver" => "teste o dispositivo no aplicativo em que percebeu a falha e informe se o Windows solicitou reinicialização",
                             _ => null
                         };
                     if (name is "enable_network_adapter" or "set_ipv4" or "set_dns" && root.TryGetProperty("success", out var completed) && completed.ValueKind == JsonValueKind.True && !InvestigationEvidence.ExplicitlyUnchanged(root)) networkRecoveryNeeded = true;
@@ -474,6 +478,9 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 "enable_device" or "restart_device" when args.TryGetProperty("device_id", out var device) && device.ValueKind == JsonValueKind.String => evidence.DeviceTopic(device.GetString() ?? ""),
                 _ => null
             };
+            if (name == "install_official_nvidia_driver")
+                return incidentTopics.Contains("display") && args.TryGetProperty("driver_id", out var vendorDriver)
+                    && vendorDriver.ValueKind == JsonValueKind.String;
             if (name == "install_driver_update")
                 return args.TryGetProperty("update_id", out var update) && update.ValueKind == JsonValueKind.String
                     && evidence.UpdateTargetUnambiguous(update.GetString() ?? "", incidentTopics, userRequest);
@@ -560,7 +567,7 @@ public static class ToolCatalog
 {
     public static bool IsObservationTool(string name) => name is "finish_support" or "ask_user" or "get_network" or "diagnose_device" or "get_hardware_inventory" or "wait_for_reconnect" or "test_connection" or "probe_network_interfaces";
     public static bool IsMutation(string name) => !IsReadOnly(name) && name is not ("wait_for_reconnect" or "prepare_restart");
-    public static bool IsReadOnly(string name) => name is "finish_support" or "ask_user" or "get_network" or "test_connection" or "diagnose_device" or "get_hardware_inventory" or "get_printers" or "get_services" or "get_recent_errors" or "get_processes" or "scan_driver_updates" or "get_boot_status" or "probe_network_interfaces";
+    public static bool IsReadOnly(string name) => name is "finish_support" or "ask_user" or "get_network" or "test_connection" or "diagnose_device" or "get_hardware_inventory" or "get_printers" or "get_services" or "get_recent_errors" or "get_processes" or "scan_driver_updates" or "find_official_nvidia_driver" or "get_boot_status" or "probe_network_interfaces";
     public static object[] ForScope(bool readOnly, bool allowFlushDns = true, bool allowWatch = true, bool allowMutations = true) => Definitions.Where(d => { var name = JsonSerializer.SerializeToElement(d).GetProperty("function").GetProperty("name").GetString()!; return (!readOnly || IsReadOnly(name)) && (allowFlushDns || name != "flush_dns") && (allowWatch || name != "wait_for_reconnect") && (allowMutations || !IsMutation(name)); }).ToArray();
     private static object Str(string description) => new { type = "string", description };
     private static object Int(string description) => new { type = "integer", description };
@@ -591,8 +598,10 @@ public static class ToolCatalog
         Tool("restart_device", "Reinicia um dispositivo de áudio, câmera, Bluetooth ou impressora consultado e verifica seu estado. Pode interromper seu uso.", new() { ["device_id"] = Str("Id retornado pelo diagnose_device") }, ["device_id"]),
         Tool("clear_print_queue", "Cancela todos os trabalhos de uma impressora específica, após autorização. Os documentos precisarão ser enviados novamente.", new() { ["printer_name"] = Str("Nome exato de get_printers") }, ["printer_name"]),
         Tool("scan_driver_updates", "Busca online drivers oferecidos pela fonte padrão de atualizações do Windows, respeitando política corporativa. Exige hardware observado; retorna apenas ofertas com HardwareID único correspondente. Não instala."),
+        Tool("find_official_nvidia_driver", "Para uma única placa NVIDIA identificada, busca no catálogo oficial da NVIDIA um driver WHQL mais recente para o modelo e Windows observados. Não instala."),
+        Tool("install_official_nvidia_driver", "Baixa do domínio oficial NVIDIA o driver WHQL previamente identificado, valida assinatura digital, pede autorização e instala apenas o driver de vídeo; verifica a versão depois. Não reinicia o PC.", new() { ["driver_id"] = Str("ID exato retornado por find_official_nvidia_driver") }, ["driver_id"]),
         Tool("download_nvidia_app", "Após identificar uma única placa NVIDIA PCI presente, baixa o NVIDIA App do site oficial e valida a assinatura digital. Pede autorização. Não instala o aplicativo nem o driver."),
         Tool("install_driver_update", "Baixa e instala um driver específico da fonte de atualizações do Windows previamente consultado, com autorização e verificação posterior. Não reinicia o PC.", new() { ["update_id"] = Str("Id exato de scan_driver_updates, relacionado ao dispositivo com problema") }, ["update_id"])
     ];
-    public static string Label(string name) => name switch { "probe_network_interfaces" => "Testando as interfaces de rede individualmente…", "wait_for_reconnect" => "Acompanhando a reconexão do dispositivo…", "prepare_restart" => "Preparando a retomada após reiniciar…", "get_boot_status" => "Verificando a inicialização do Windows…", "get_network" => "Verificando IP, DNS, gateway e adaptadores…", "enable_network_adapter" => "Ativando e verificando a interface de rede…", "test_connection" => "Testando resolução DNS e conexão…", "diagnose_device" => "Verificando dispositivos e sistema…", "get_hardware_inventory" => "Identificando hardware e drivers instalados…", "get_printers" => "Verificando impressoras e filas…", "get_services" => "Consultando serviços do Windows…", "get_recent_errors" => "Consultando erros recentes do sistema…", "get_processes" => "Verificando consumo de memória dos aplicativos…", "set_dns" => "Configurando os servidores DNS…", "set_ipv4" => "Configurando o endereço IPv4…", "flush_dns" => "Limpando cache DNS…", "enable_camera" or "enable_device" => "Habilitando e verificando o dispositivo…", "restart_device" => "Reiniciando e verificando o dispositivo…", "allow_camera" => "Ajustando a permissão da câmera…", "restart_service" => "Reiniciando e verificando o serviço…", "clear_print_queue" => "Limpando a fila da impressora…", "scan_driver_updates" => "Buscando drivers na fonte de atualizações do Windows…", "download_nvidia_app" => "Baixando o aplicativo oficial da NVIDIA…", "install_driver_update" => "Baixando e instalando o driver selecionado…", _ => "Validando ferramenta…" };
+    public static string Label(string name) => name switch { "probe_network_interfaces" => "Testando as interfaces de rede individualmente…", "wait_for_reconnect" => "Acompanhando a reconexão do dispositivo…", "prepare_restart" => "Preparando a retomada após reiniciar…", "get_boot_status" => "Verificando a inicialização do Windows…", "get_network" => "Verificando IP, DNS, gateway e adaptadores…", "enable_network_adapter" => "Ativando e verificando a interface de rede…", "test_connection" => "Testando resolução DNS e conexão…", "diagnose_device" => "Verificando dispositivos e sistema…", "get_hardware_inventory" => "Identificando hardware e drivers instalados…", "get_printers" => "Verificando impressoras e filas…", "get_services" => "Consultando serviços do Windows…", "get_recent_errors" => "Consultando erros recentes do sistema…", "get_processes" => "Verificando consumo de memória dos aplicativos…", "set_dns" => "Configurando os servidores DNS…", "set_ipv4" => "Configurando o endereço IPv4…", "flush_dns" => "Limpando cache DNS…", "enable_camera" or "enable_device" => "Habilitando e verificando o dispositivo…", "restart_device" => "Reiniciando e verificando o dispositivo…", "allow_camera" => "Ajustando a permissão da câmera…", "restart_service" => "Reiniciando e verificando o serviço…", "clear_print_queue" => "Limpando a fila da impressora…", "scan_driver_updates" => "Buscando drivers na fonte de atualizações do Windows…", "find_official_nvidia_driver" => "Consultando drivers oficiais da NVIDIA…", "install_official_nvidia_driver" => "Instalando e verificando o driver NVIDIA…", "download_nvidia_app" => "Baixando o aplicativo oficial da NVIDIA…", "install_driver_update" => "Baixando e instalando o driver selecionado…", _ => "Validando ferramenta…" };
 }

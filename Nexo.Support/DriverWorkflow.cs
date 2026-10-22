@@ -77,19 +77,39 @@ public static class DriverWorkflow
                 return observed + ". Uma oferta não corresponde exatamente ao dispositivo observado. Interrompi a instalação; nenhum driver foi alterado.";
             if (offers.Length == 0)
             {
-                if (allowInstall && category == "display" && targetId.StartsWith("PCI\\VEN_10DE&", StringComparison.OrdinalIgnoreCase)
+                if (category == "display" && targetId.StartsWith("PCI\\VEN_10DE&", StringComparison.OrdinalIgnoreCase)
                     && ids.Any(id => id.StartsWith("PCI\\VEN_10DE&", StringComparison.OrdinalIgnoreCase)))
                 {
                     token.ThrowIfCancellationRequested();
-                    var vendor = await execute("download_nvidia_app", new { });
-                    if (vendor.TryGetProperty("denied", out var refused) && refused.ValueKind == JsonValueKind.True)
-                        return observed + ". O Windows não ofereceu driver compatível e você recusou o download do aplicativo oficial da NVIDIA. Nenhum driver foi alterado.";
+                    var vendor = await execute("find_official_nvidia_driver", new { });
                     if (!Succeeded(vendor))
-                        return observed + ". O Windows não ofereceu driver compatível. Também não consegui obter o aplicativo oficial da NVIDIA: " + Error(vendor) + " Nenhum driver foi alterado; encaminhe à TI se precisar de ajuda.";
+                        return observed + ". O Windows não ofereceu driver compatível. A consulta oficial da NVIDIA falhou: " + Error(vendor) + " Nenhum driver foi alterado; encaminhe à TI se precisar de ajuda.";
                     if (!vendor.TryGetProperty("data", out var vendorData) || vendorData.ValueKind != JsonValueKind.Object
-                        || Field(vendorData, "Signature") != "Valid" || Field(vendorData, "FileName").Length == 0)
-                        return observed + ". O download da NVIDIA não retornou evidência suficiente para uso. Nenhum driver foi alterado.";
-                    return observed + ". O Windows não ofereceu driver compatível. Baixei o NVIDIA App do site oficial e validei a assinatura digital em: " + Field(vendorData, "FileName") + ". Abra esse instalador e escolha o driver para a placa identificada. O driver ainda não foi instalado nem testado; se a instalação falhar, encaminhe à TI.";
+                        || !vendorData.TryGetProperty("Available", out var available) || available.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                        return observed + ". A consulta da NVIDIA retornou dados inválidos. Nenhum driver foi alterado.";
+                    if (available.ValueKind == JsonValueKind.False)
+                        return observed + ". Nem a fonte configurada no Windows nem a NVIDIA ofereceram uma versão mais nova compatível agora. Nenhum driver foi alterado.";
+                    var driverId = Field(vendorData, "DriverId");
+                    var offeredVersion = Field(vendorData, "Version");
+                    if (!Regex.IsMatch(driverId, @"^\d{4,8}$") || !Regex.IsMatch(offeredVersion, @"^\d{3}\.\d{2}$")
+                        || !string.Equals(Field(vendorData, "Target"), targetName, StringComparison.OrdinalIgnoreCase))
+                        return observed + ". A oferta NVIDIA não corresponde ao dispositivo observado. Nenhum driver foi alterado.";
+                    if (!allowInstall)
+                        return observed + ". Encontrei o driver NVIDIA " + offeredVersion + " no catálogo oficial. Fiz apenas a consulta; nenhum driver foi alterado.";
+                    token.ThrowIfCancellationRequested();
+                    var installedVendor = await execute("install_official_nvidia_driver", new { driver_id = driverId });
+                    if (installedVendor.TryGetProperty("denied", out var refused) && refused.ValueKind == JsonValueKind.True)
+                        return observed + ". Você recusou o download e a instalação do driver NVIDIA " + offeredVersion + ". Nenhum driver foi alterado.";
+                    if (!Succeeded(installedVendor))
+                        return observed + ". A instalação do driver NVIDIA " + offeredVersion + " não foi confirmada: " + Error(installedVendor) + " Confira o Gerenciador de Dispositivos ou encaminhe à TI.";
+                    if (!installedVendor.TryGetProperty("data", out var installedData) || installedData.ValueKind != JsonValueKind.Object)
+                        return observed + ". O instalador NVIDIA não retornou verificação suficiente. Não considero a correção concluída.";
+                    return Field(installedData, "Verification") switch
+                    {
+                        "version_changed" => observed + ". Instalei o driver NVIDIA " + offeredVersion + " e o Windows agora informa a versão " + Field(installedData, "AfterVersion") + ". Teste a placa de vídeo no aplicativo em que percebeu a falha; a resolução funcional ainda precisa da sua confirmação.",
+                        "pending_restart" => observed + ". O instalador NVIDIA solicitou reinicialização. Salve seu trabalho, reinicie manualmente e teste a placa de vídeo. A correção ainda não está confirmada.",
+                        _ => observed + ". O instalador NVIDIA terminou, mas o Windows não confirmou a nova versão. Não considero a correção concluída; confira o Gerenciador de Dispositivos ou encaminhe à TI."
+                    };
                 }
                 return observed + ". A fonte de atualizações configurada no Windows não ofereceu driver compatível agora. Nenhuma alteração foi feita. Se o problema continuar, descreva o sintoma ou encaminhe este atendimento à TI.";
             }

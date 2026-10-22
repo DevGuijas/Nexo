@@ -104,21 +104,23 @@ internal static class AgentChecks
         {
             "get_hardware_inventory" => nvidiaInventory,
             "scan_driver_updates" => WindowsTools.Ok("[]"),
-            "download_nvidia_app" => WindowsTools.Ok(new { FileName = "C:\\Nexo\\NVIDIA_app.exe", Signature = "Valid", Installed = false }),
+            "find_official_nvidia_driver" => WindowsTools.Ok(new { Available = true, DriverId = "282412", Version = "621.01", Target = "NVIDIA GeForce RTX 5060 Ti" }),
+            "install_official_nvidia_driver" => WindowsTools.Ok(new { Verification = "version_changed", AfterVersion = "32.0.15.2101" }),
             _ => throw new Exception("Ferramenta inesperada")
         });
         var nvidiaAnswer = await Run(videoRequest, nvidiaFallback);
-        assert(nvidiaFallback.Calls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates", "download_nvidia_app"])
-            && nvidiaAnswer.Contains("Baixei") && nvidiaAnswer.Contains("ainda não foi instalado"), "GPU NVIDIA sem oferta usa fornecedor oficial sem afirmar instalação");
+        assert(nvidiaFallback.Calls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates", "find_official_nvidia_driver", "install_official_nvidia_driver"])
+            && nvidiaAnswer.Contains("Instalei o driver NVIDIA") && nvidiaAnswer.Contains("resolução funcional ainda precisa"), "GPU NVIDIA usa pacote oficial e exige verificação");
         var nvidiaRejected = new FlowTools((name, _) => name switch
         {
             "get_hardware_inventory" => nvidiaInventory,
             "scan_driver_updates" => WindowsTools.Ok("[]"),
-            "download_nvidia_app" => "{\"success\":false,\"denied\":true}",
+            "find_official_nvidia_driver" => WindowsTools.Ok(new { Available = true, DriverId = "282412", Version = "621.01", Target = "NVIDIA GeForce RTX 5060 Ti" }),
+            "install_official_nvidia_driver" => "{\"success\":false,\"denied\":true}",
             _ => throw new Exception("Ferramenta inesperada")
         });
         var rejectedAnswer = await Run(videoRequest, nvidiaRejected);
-        assert(nvidiaRejected.Calls.Count == 3 && rejectedAnswer.Contains("recusou") && rejectedAnswer.Contains("Nenhum driver foi alterado"), "Recusa do download oficial encerra sem alegar alteração");
+        assert(nvidiaRejected.Calls.Count == 4 && rejectedAnswer.Contains("recusou") && rejectedAnswer.Contains("Nenhum driver foi alterado"), "Recusa do download oficial encerra sem alegar alteração");
 
         var ambiguousVideo = new FlowTools((name, _) => name == "get_hardware_inventory" ? WindowsTools.Ok(new { Truncated = false, Devices = new[] {
             new Device("GPU interna", "PCI\\GPU1", 0, "OK") { HardwareIds = [videoHardwareId] },

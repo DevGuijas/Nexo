@@ -40,3 +40,17 @@ O detalhe expansível de execução apresenta identificação de hardware, ofert
 | URL oficial, assinatura exigida e resumo sem JSON | Aprovados em testes determinísticos | Casos `Download NVIDIA aceita apenas domínio oficial`, `Detalhe do hardware explica o resultado` e `Busca sem oferta mostra fonte` em `Nexo.Checks` |
 | Pacote NVIDIA disponível para o cenário observado | Download oficial e assinatura `Valid`, editor `NVIDIA Corporation`; nenhuma instalação executada | `https://www.nvidia.com/en-us/software/nvidia-app/` → `https://us.download.nvidia.com/nvapp/client/11.0.9.565/NVIDIA_app_v11.0.9.565.exe` |
 | Instalação e teste de driver NVIDIA em hardware real | **Bloqueado:** não executados | Requer seleção do driver no NVIDIA App, autorização de alteração e validação após reinício se solicitado |
+
+## Revisão 1.6.3 — pacote de driver NVIDIA
+
+O fluxo para uma única GPU NVIDIA agora consulta também o catálogo oficial do fabricante quando a fonte Windows não retorna oferta. A consulta localiza o produto pelo nome observado, confere Windows 10/11, versão WHQL superior à instalada e URL restrita a `us.download.nvidia.com`. O executor pede confirmação com aceite da licença, baixa o pacote completo, valida a assinatura Authenticode da NVIDIA, solicita UAC, instala o componente de vídeo e lê novamente a versão do dispositivo. Recusa, alvo alterado, resposta malformada, assinatura inválida, erro ou versão não confirmada impedem declarar instalação concluída. Um resultado confirmado ainda pede teste funcional ao usuário.
+
+| Verificação | Resultado | Evidência |
+|---|---|---|
+| Regressão do agente | Aprovada: 174 verificações, sem alteração de hardware | `dotnet run --project Nexo.Checks -c Release`, 22/10/2026 |
+| Instalador gráfico e manifesto | Aprovada: 15 verificações, sem instalação real | `dotnet run --project Nexo.Setup.Checks -c Release`, 22/10/2026 |
+| Catálogo para RTX 5060 Ti/Windows 11 | Oferta oficial 621.01 localizada em consulta HTTPS | API de busca e detalhes da NVIDIA, ID 282412, 22/10/2026 |
+| Download completo e instalação real do driver | Pendente de laboratório | Requer autorização no Nexo e UAC; pode afetar vídeo e exigir reinicialização |
+| Pacotes novos publicados na Oracle | Aprovado: SHA-256 público igual ao local | `nexo-app.zip` `A5D025DD163E3E2EA45DAFC69B3576C53C3A0B0304C9A547D8B3567BDE467038`; `NexoSetup.exe` `463F8C26C35253ED5691763F20E223595E3DAF4FB6B3A8A1CB58494471DD3748` |
+
+O instalador da 1.6.3 é uma janela guiada por etapas. A opção para todos os usuários está desabilitada, pois o Ollama e os blobs do modelo desta distribuição são instalados por perfil. A versão publicada pode reutilizar os pacotes imutáveis de modelo e runtime da 1.6.2; o novo ZIP do aplicativo e seus hashes ficam no manifesto assinado.

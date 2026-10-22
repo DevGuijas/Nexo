@@ -93,7 +93,7 @@ public sealed class InvestigationEvidence
         {
             (@"(?<!nao )\b(limpei)\b|\b(cache dns|fila de impressao)\s+(foi\s+)?limp[oa]\b", ["flush_dns", "clear_print_queue"]),
             (@"(?<!nao )\breiniciei\b|\bservico\s+(foi\s+)?reiniciado\b", ["restart_service", "restart_device"]),
-            (@"(?<!nao )\b(instalei|atualizei)\b|\bdriver\s+(foi\s+)?instalado\b", ["install_driver_update"]),
+            (@"(?<!nao )\b(instalei|atualizei)\b|\bdriver\s+(foi\s+)?instalado\b", ["install_driver_update", "install_official_nvidia_driver"]),
             (@"(?<!nao )\bconfigurei\b", ["set_dns", "set_ipv4"]),
             (@"(?<!nao )\b(ativei|habilitei)\b", ["enable_network_adapter", "enable_camera", "enable_device", "allow_camera"]),
             (@"(?<!nao )\bdesativei\b", []),

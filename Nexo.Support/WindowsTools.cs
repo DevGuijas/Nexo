@@ -8,7 +8,7 @@ using System.Text.RegularExpressions;
 
 namespace Nexo.Support;
 
-public sealed record ChangeRequest(string Title, string Details, bool KeepNetwork = false);
+public sealed record ChangeRequest(string Title, string Details, bool KeepNetwork = false, string? LicenseUrl = null);
 public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, Action<string>? inform = null) : IAgentTools
 {
     private readonly SupportService support = new(store);
@@ -23,6 +23,8 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private DateTimeOffset? observedDevicesAt;
     private DateTimeOffset? observedPrintersAt;
     private DateTimeOffset? observedUpdatesAt;
+    private OfficialDriverSource.DriverOffer? observedNvidiaDriver;
+    private DateTimeOffset? observedNvidiaDriverAt;
     private static readonly IReadOnlyDictionary<string, JsonElement> toolSchemas = ToolCatalog.ForScope(false)
         .Select(tool => JsonSerializer.SerializeToElement(tool))
         .ToDictionary(tool => tool.GetProperty("function").GetProperty("name").GetString()!, tool => tool.GetProperty("function").GetProperty("parameters").Clone(), StringComparer.Ordinal);
@@ -187,6 +189,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 return Ok(watchResult);
             case "diagnose_device":
                 var topic = Value(args, "topic");
+                observedNvidiaDriver = null; observedNvidiaDriverAt = null;
                 observedDevices.Clear();
                 observedDevicesAt = null;
                 if (topic == "system") return Ok((await support.Diagnose(actor, topic, progress, token)).Summary);
@@ -199,6 +202,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 return Ok(new { count = devices.Count, devices, privacy = extra, note = devices.Count == 0 ? "Nenhum dispositivo desta categoria foi encontrado. Não existe dispositivo identificado para habilitar. Pode estar ausente, desconectado ou sem reconhecimento; não afirme que está desabilitado sem evidência." : "Code 22 = desabilitado; Code 0 = sem erro de PnP, não comprova funcionamento no aplicativo." });
             case "get_hardware_inventory":
                 var category = Value(args, "category");
+                observedNvidiaDriver = null; observedNvidiaDriverAt = null;
                 var filter = HardwareFilter(category);
                 observedDevices.Clear();
                 observedDevicesAt = null;
@@ -300,6 +304,47 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 }
                 observedUpdatesAt = DateTimeOffset.UtcNow;
                 return Ok(JsonSerializer.Serialize(matchingUpdates));
+            case "find_official_nvidia_driver":
+                if (!Fresh(observedDevicesAt) || observedDevices.Count != 1 || !OfficialDriverSource.IsNvidiaDisplay(observedDevices.Values.Single().Device))
+                    throw new InvalidOperationException("Identifique uma única placa de vídeo NVIDIA presente antes da consulta oficial.");
+                observedNvidiaDriver = null;
+                observedNvidiaDriverAt = null;
+                progress.Report("Consultando o catálogo oficial da NVIDIA para o modelo e Windows detectados…");
+                var candidate = await OfficialDriverSource.FindNvidiaDriver(observedDevices.Values.Single().Device, token);
+                observedNvidiaDriver = candidate;
+                observedNvidiaDriverAt = DateTimeOffset.UtcNow;
+                return Ok(candidate == null ? new { Available = false, Source = "NVIDIA" } : (object)new
+                {
+                    Available = true, DriverId = candidate.Id, Version = candidate.Version, Target = candidate.DeviceName,
+                    InstalledVersion = candidate.InstalledVersion, Source = "NVIDIA", DownloadUrl = candidate.Url.ToString()
+                });
+            case "install_official_nvidia_driver":
+                var vendorId = Value(args, "driver_id");
+                if (!Fresh(observedNvidiaDriverAt) || observedNvidiaDriver == null || observedNvidiaDriver.Id != vendorId
+                    || !Fresh(observedDevicesAt) || observedDevices.Count != 1 || !OfficialDriverSource.IsNvidiaDisplay(observedDevices.Values.Single().Device)
+                    || observedDevices.Values.Single().Device.Id.Length == 0)
+                    throw new InvalidOperationException("Consulte novamente o hardware e a oferta oficial antes de instalar.");
+                var official = observedNvidiaDriver;
+                var nvidiaDevice = observedDevices.Values.Single().Device;
+                if (!string.Equals(nvidiaDevice.Name, official.DeviceName, StringComparison.OrdinalIgnoreCase)
+                    || nvidiaDevice.DriverVersion != official.InstalledVersion)
+                    throw new InvalidOperationException("O dispositivo mudou desde a consulta; instalação bloqueada.");
+                var freshDetails = await OfficialDriverSource.GetNvidiaDetails(vendorId, token);
+                var checkedOffer = OfficialDriverSource.ParseNvidiaDriverDetails(freshDetails, vendorId, nvidiaDevice.Name, nvidiaDevice.DriverVersion,
+                    OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000));
+                if (checkedOffer == null || checkedOffer.Url != official.Url || checkedOffer.Version != official.Version)
+                    throw new InvalidOperationException("A oferta oficial mudou desde a consulta; instalação bloqueada.");
+                if (!await Approve(new ChangeRequest("Instalar driver NVIDIA " + official.Version,
+                    "Placa: " + nvidiaDevice.Name + "\nVersão atual: " + nvidiaDevice.DriverVersion + "\nNova versão: " + official.Version
+                    + "\nFonte: " + official.Url + "\nO download tem cerca de 1 GB. A tela pode piscar; talvez seja necessário reiniciar."
+                    + "\nO Nexo não reiniciará o computador. Leia e aceite a licença da NVIDIA para autorizar o download e a instalação.",
+                    LicenseUrl: OfficialDriverSource.NvidiaLicense), token)) return Denied();
+                token.ThrowIfCancellationRequested();
+                progress.Report("Baixando o driver completo da NVIDIA e validando a assinatura digital…");
+                var driverFile = await OfficialDriverSource.DownloadNvidiaDriver(official, token);
+                token.ThrowIfCancellationRequested();
+                progress.Report("Solicitando permissão do Windows e instalando o driver NVIDIA…");
+                return VerifyDriverInstallationResult(await Elevated(NvidiaDriverInstallationScript(driverFile, official, nvidiaDevice.Id, nvidiaDevice.DriverVersion), token));
             case "download_nvidia_app":
                 if (!Fresh(observedDevicesAt) || observedDevices.Count != 1 || !OfficialDriverSource.IsNvidiaDisplay(observedDevices.Values.Single().Device))
                     throw new InvalidOperationException("O aplicativo NVIDIA só pode ser baixado após identificar uma única placa NVIDIA PCI presente.");
@@ -331,6 +376,26 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         if (matches.Length != 1) throw new InvalidOperationException("O driver não corresponde a um único dispositivo diagnosticado. Consulte o dispositivo e avalie a atualização manualmente.");
         return matches[0];
     }
+    private static string NvidiaDriverInstallationScript(string path, OfficialDriverSource.DriverOffer offer, string deviceId, string beforeVersion) => $$"""
+        $targetId={{Quote(deviceId)}}
+        $installer={{Quote(path)}}
+        $expectedVersion={{Quote(beforeVersion)}}
+        $before=@(Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object {$_.PNPDeviceID -eq $targetId -and $_.Present -eq $true})
+        if($before.Count -ne 1 -or $before[0].PNPClass -ne 'Display'){throw 'A placa NVIDIA não foi encontrada de forma única antes da instalação'}
+        $signed=@(Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop | Where-Object {$_.DeviceID -eq $targetId})
+        if($signed.Count -ne 1 -or [string]$signed[0].DriverVersion -ne $expectedVersion){throw 'A versão do driver mudou antes da instalação; operação bloqueada'}
+        $signature=Get-AuthenticodeSignature -LiteralPath $installer
+        if($signature.Status -ne 'Valid' -or [string]$signature.SignerCertificate.Subject -notmatch 'NVIDIA'){throw 'A assinatura do instalador NVIDIA não foi validada'}
+        $process=Start-Process -FilePath $installer -ArgumentList @('-s','-n','Display.Driver') -PassThru -ErrorAction Stop
+        if(-not $process.WaitForExit(1800000)){throw 'O instalador NVIDIA excedeu 30 minutos; o estado da instalação não foi confirmado'}
+        if($process.ExitCode -notin @(0,1)){throw ('O instalador NVIDIA terminou com código '+$process.ExitCode)}
+        Start-Sleep -Seconds 3
+        $after=@(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object {$_.PNPDeviceID -eq $targetId -and $_.Present -eq $true})
+        $afterDriver=@(Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | Where-Object {$_.DeviceID -eq $targetId})
+        $afterVersion=if($afterDriver.Count -eq 1){[string]$afterDriver[0].DriverVersion}else{''}
+        $verification=if($process.ExitCode -eq 1){'pending_restart'}elseif($after.Count -eq 1 -and [int]$after[0].ConfigManagerErrorCode -eq 0 -and $afterVersion -and $afterVersion -ne $expectedVersion){'version_changed'}else{'unconfirmed'}
+        [pscustomobject]@{Driver='NVIDIA '+{{Quote(offer.Version)}};Target=[string]$before[0].Name;BeforeVersion=$expectedVersion;AfterVersion=$afterVersion;DeviceCodeAfter=$(if($after.Count -eq 1){[int]$after[0].ConfigManagerErrorCode}else{-1});RebootRequired=($process.ExitCode -eq 1);Verification=$verification;Source='NVIDIA';InstallerExitCode=[int]$process.ExitCode}
+        """;
     private static string DriverInstallationScript(string updateId, string title, string hardwareId, int revision, string deviceId) => DriverSearchScript + "\n" + $$"""
         $targetId={{Quote(deviceId)}}
         $hardwareId={{Quote(hardwareId)}}

@@ -26,6 +26,16 @@ try
         && !OfficialDriverSource.AllowedNvidiaDownload(new Uri("https://us.download.nvidia.com.evil.example/nvapp/client/11.0.9.565/NVIDIA_app_v11.0.9.565.exe"))
         && !OfficialDriverSource.AllowedNvidiaDownload(new Uri("http://us.download.nvidia.com/nvapp/client/11.0.9.565/NVIDIA_app_v11.0.9.565.exe")),
         "Download NVIDIA aceita apenas domínio oficial, HTTPS e caminho com versão consistente");
+    Assert(OfficialDriverSource.AllowedNvidiaDriver(new Uri("https://us.download.nvidia.com/Windows/621.01/621.01-desktop-win10-win11-64bit-international-dch-whql.exe"), "621.01")
+        && !OfficialDriverSource.AllowedNvidiaDriver(new Uri("https://us.download.nvidia.com.evil.example/Windows/621.01/621.01-desktop-win10-win11-64bit-international-dch-whql.exe"), "621.01")
+        && !OfficialDriverSource.AllowedNvidiaDriver(new Uri("https://us.download.nvidia.com/Windows/621.01/620.01-desktop-win10-win11-64bit-international-dch-whql.exe"), "621.01")
+        && OfficialDriverSource.InstalledMarketingVersion("32.0.16.1714") == new Version(617, 14),
+        "Driver NVIDIA exige domínio oficial, versão consistente e compara versão instalada");
+    var officialDetails = "{\"driverDetails\":{\"IDS\":[{\"downloadInfo\":{\"Success\":\"1\",\"ID\":\"282412\",\"IsWHQL\":\"1\",\"Is64Bit\":\"1\",\"Version\":\"621.01\",\"DownloadURL\":\"https://us.download.nvidia.com/Windows/621.01/621.01-desktop-win10-win11-64bit-international-dch-whql.exe\",\"OSList\":[{\"OSName\":\"Windows%2011\"}],\"series\":[{\"products\":[{\"productName\":\"NVIDIA%20GeForce%20RTX%205060%20Ti\"}]}]}}]}}";
+    Assert(OfficialDriverSource.ParseNvidiaDriverDetails(officialDetails, "282412", "NVIDIA GeForce RTX 5060 Ti", "32.0.16.1714", true)?.Version == "621.01"
+        && OfficialDriverSource.ParseNvidiaDriverDetails(officialDetails, "282412", "NVIDIA GeForce RTX 5070", "32.0.16.1714", true) == null
+        && OfficialDriverSource.ParseNvidiaDriverDetails(officialDetails, "282412", "NVIDIA GeForce RTX 5060 Ti", "32.0.16.2101", true) == null,
+        "Oferta oficial exige produto exato e versão mais recente");
 
     var migrationRoot = Path.Combine(root, "direct-migration");
     var previousStore = new Store(migrationRoot);

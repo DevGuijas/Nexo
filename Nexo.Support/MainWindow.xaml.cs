@@ -23,7 +23,7 @@ public partial class MainWindow : Window
     private WrapPanel? quickReplyPanel;
     public MainWindow(Store store)
     {
-        InitializeComponent(); Title = "Nexo 1.6.2 • Suporte inteligente"; this.store = store; support = new SupportService(store);
+        InitializeComponent(); Title = "Nexo 1.6.3 • Suporte inteligente"; this.store = store; support = new SupportService(store);
         user = store.GetLocalSession();
         RefreshIdentity();
         NewConversation();
@@ -338,8 +338,22 @@ public partial class MainWindow : Window
         var title = Text(request.Title, 23); title.Margin = new Thickness(0, 0, 0, 18); DockPanel.SetDock(title, Dock.Top); panel.Children.Add(title);
         var buttons = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 20, 0, 0) }; DockPanel.SetDock(buttons, Dock.Bottom);
         buttons.Children.Add(Action(request.KeepNetwork ? "Restaurar configuração anterior" : "Cancelar ação", (_, _) => dialog.DialogResult = false));
-        buttons.Children.Add(Action(request.KeepNetwork ? "Manter configuração" : "Autorizar e executar", (_, _) => dialog.DialogResult = true, true)); panel.Children.Add(buttons);
+        var authorize = Action(request.KeepNetwork ? "Manter configuração" : "Autorizar e executar", (_, _) => dialog.DialogResult = true, true);
+        authorize.IsEnabled = request.LicenseUrl == null;
+        buttons.Children.Add(authorize); panel.Children.Add(buttons);
         var countdown = Text("", 12, "#E9C28B"); DockPanel.SetDock(countdown, Dock.Bottom); panel.Children.Add(countdown);
+        if (request.LicenseUrl != null)
+        {
+            var license = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
+            license.Children.Add(Text("Licença do fornecedor: " + request.LicenseUrl, 12));
+            var openLicense = Action("Abrir licença no navegador", (_, _) => Process.Start(new ProcessStartInfo(request.LicenseUrl) { UseShellExecute = true }));
+            license.Children.Add(openLicense);
+            var agreement = new CheckBox { Content = "Li e aceito os termos da licença da NVIDIA para este download e instalação.", Margin = new Thickness(0, 10, 0, 0) };
+            agreement.Checked += (_, _) => authorize.IsEnabled = true;
+            agreement.Unchecked += (_, _) => authorize.IsEnabled = false;
+            license.Children.Add(agreement);
+            DockPanel.SetDock(license, Dock.Bottom); panel.Children.Add(license);
+        }
         panel.Children.Add(new TextBox { Text = request.Details, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, BorderThickness = new Thickness(0), Background = Brushes.Transparent });
         dialog.Content = panel;
         var seconds = 45;

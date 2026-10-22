@@ -45,6 +45,13 @@ public static class ToolResultPresentation
 
             if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object)
             {
+                if (label.Contains("drivers oficiais da NVIDIA", StringComparison.OrdinalIgnoreCase))
+                {
+                    var available = data.TryGetProperty("Available", out var found) && found.ValueKind == JsonValueKind.True;
+                    return available
+                        ? ("Driver oficial encontrado", "A NVIDIA oferece a versão " + Text(data, "Version", "não informada") + " para " + Text(data, "Target", "a placa detectada") + ". O download e a instalação dependem da sua autorização.", false)
+                        : ("Nenhuma versão nova encontrada", "O catálogo oficial da NVIDIA não ofereceu um driver mais recente compatível com a placa e o Windows detectados.", false);
+                }
                 if (label.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase) && Text(data, "Signature", "") == "Valid")
                     return ("Download verificado", "O instalador do NVIDIA App foi baixado do domínio oficial e sua assinatura digital foi validada. O driver ainda precisa ser escolhido, instalado e testado.", false);
                 var verification = Text(data, "Verification", "");
