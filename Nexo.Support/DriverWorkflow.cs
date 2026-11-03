@@ -60,6 +60,19 @@ public static class DriverWorkflow
             return "Identifiquei " + (targetName.Length > 0 ? targetName : "o dispositivo") + ", mas o Windows não forneceu IDs suficientes para associar uma oferta de driver com segurança. Nenhum driver foi alterado; encaminhe o caso à TI.";
 
         var observed = "Identifiquei " + targetName + (version.Length > 0 ? " (driver " + version + (provider.Length > 0 ? ", provedor " + provider : "") + ")" : "");
+        if (Regex.IsMatch(Normalize(request), @"\b(inf|pacote|repositorio)\b"))
+        {
+            try
+            {
+                var installed = await execute("get_driver_store", new { device_id = targetId });
+                var data = installed.TryGetProperty("data", out var payload) ? payload : default;
+                var package = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("package", out var found) ? found : default;
+                var inf = package.ValueKind == JsonValueKind.Object ? Field(package, "InfName") : "";
+                observed += inf.Length > 0 ? "; INF instalado: " + inf : "; INF instalado não confirmado";
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception) { observed += "; consulta do INF indisponível"; }
+        }
         var scan = await execute("scan_driver_updates", new { });
         if (!Succeeded(scan)) return observed + ". A busca online não terminou: " + Error(scan) + " Nenhum driver foi alterado; tente novamente mais tarde ou encaminhe à TI.";
         if (!scan.TryGetProperty("data", out var raw) || raw.ValueKind != JsonValueKind.String)

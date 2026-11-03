@@ -22,12 +22,26 @@ public partial class MainWindow : Window
     private string page = "chat";
     private WindowsTools? conversationTools;
     private WrapPanel? quickReplyPanel;
+    private OperationalStore? healthStore;
+    private MonitoringEngine? healthMonitor;
+    private HealthSettings healthSettings = new();
+    private string? healthError;
+    private List<string> eventWarnings = [];
+    private DateTimeOffset lastEventScan = DateTimeOffset.MinValue;
+    private DateTimeOffset lastPrune = DateTimeOffset.MinValue;
+    private int eventScanRunning;
     public MainWindow(Store store)
     {
         InitializeComponent(); Title = "Nexo 1.6.3 • Suporte inteligente"; this.store = store; support = new SupportService(store);
         user = store.GetLocalSession();
         RefreshIdentity();
         NewConversation();
+        try { healthSettings = HealthSettings.Load(store.Root); }
+        catch (Exception ex) { healthError = "Preferências inválidas; usando valores padrão. " + ex.Message; }
+        try { healthStore = new OperationalStore(store.Root); }
+        catch (Exception ex) { healthError = "Histórico operacional indisponível. " + ex.Message; }
+        Loaded += (_, _) => StartHealthMonitoring();
+        Closed += async (_, _) => { if (healthMonitor != null) { await healthMonitor.StopAsync(); healthMonitor.Dispose(); } healthStore?.Dispose(); };
         Closing += (_, e) =>
         {
             if (!busy) return;
@@ -40,6 +54,11 @@ public partial class MainWindow : Window
     }
     private static TextBlock Text(string text, double size = 14, string color = "#E9EDF5") => new() { Text = text, FontSize = size, Foreground = Brush(color), TextWrapping = TextWrapping.Wrap };
     private static SolidColorBrush Brush(string hex) => new((Color)ColorConverter.ConvertFromString(hex));
+    private string OfflineHealthReport()
+    {
+        try { using var local = new OperationalStore(store.Root); return HealthReportPresentation.FromStore(local); }
+        catch (Exception ex) { return "O relatório de saúde local também está indisponível: " + ex.Message + ". O histórico de conversas permanece separado."; }
+    }
     private static string AnswerPresentation(string answer)
     {
         var normalized = AgentProtocol.Normalize(answer);
@@ -107,7 +126,7 @@ public partial class MainWindow : Window
         foreach (var button in Navigation.Children.OfType<Button>()) button.Background = Brush((string?)button.Tag == target ? "#22324D" : "#101318");
         if (target == "chat") return;
         PageContent.Children.Clear();
-        switch (target) { case "profile": Profile(); break; case "users": Users(); break; case "history": History(); break; case "tickets": Tickets(); break; case "settings": Settings(); break; case "audit": Audits(); break; }
+        switch (target) { case "profile": Profile(); break; case "users": Users(); break; case "history": History(); break; case "tickets": Tickets(); break; case "health": Health(); break; case "settings": Settings(); break; case "audit": Audits(); break; }
         PageScroll.ScrollToTop();
     }
     private void RefreshChatActions()
@@ -121,6 +140,79 @@ public partial class MainWindow : Window
     {
         PageContent.Children.Add(new TextBlock { Text = title, FontFamily = new FontFamily("Georgia"), FontSize = 30 });
         var subtitle = Text(description, 14, "#939CAA"); subtitle.Margin = new Thickness(0, 10, 0, 28); PageContent.Children.Add(subtitle);
+    }
+    private void StartHealthMonitoring()
+    {
+        if (healthStore == null || healthMonitor != null) return;
+        healthMonitor = new MonitoringEngine(new WindowsHealthSampler(), healthStore,
+            TimeSpan.FromSeconds(healthSettings.IntervalSeconds), healthSettings.Thresholds());
+        healthMonitor.Updated += OnHealthUpdated;
+        healthMonitor.Start();
+    }
+    private async void OnHealthUpdated(HealthSnapshot snapshot, IReadOnlyList<HealthFinding> findings)
+    {
+        try
+        {
+            var now = DateTimeOffset.UtcNow;
+            if (healthStore != null && now - lastPrune > TimeSpan.FromDays(1))
+            {
+                healthStore.Prune(TimeSpan.FromDays(healthSettings.RetentionDays)); lastPrune = now;
+            }
+            if (healthStore != null && now - lastEventScan > TimeSpan.FromMinutes(5) && Interlocked.Exchange(ref eventScanRunning, 1) == 0)
+            {
+                try
+                {
+                    var batch = await new WindowsEventCollector().Collect(TimeSpan.FromDays(1), 20, CancellationToken.None);
+                    healthStore.SaveEvents(batch.Events); eventWarnings = batch.Warnings; lastEventScan = DateTimeOffset.UtcNow;
+                }
+                finally { Interlocked.Exchange(ref eventScanRunning, 0); }
+            }
+            await Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (page != "health" || busy) return;
+                var position = PageScroll.VerticalOffset;
+                ShowPage("health"); PageScroll.ScrollToVerticalOffset(position);
+            }));
+        }
+        catch (Exception ex) { healthError = ex.Message; }
+    }
+    private void Health()
+    {
+        Heading("Saúde do computador", "Leituras locais enquanto o Nexo está aberto. Achados são hipóteses até a função ser testada.");
+        if (healthStore == null) { PageContent.Children.Add(Card(Text("Histórico operacional indisponível: " + healthError, 14, "#F2CB8B"))); return; }
+        if (healthError != null) PageContent.Children.Add(Card(Text("Última falha de coleta: " + healthError, 13, "#F2CB8B")));
+        if (healthMonitor?.LastError != null) PageContent.Children.Add(Card(Text("Monitoramento: " + healthMonitor.LastError, 13, "#F2CB8B")));
+        try
+        {
+            var latest = healthStore.RecentSnapshots(DateTimeOffset.UtcNow.AddDays(-1), 1).FirstOrDefault();
+            if (latest == null) PageContent.Children.Add(Card(Text("Aguardando a primeira amostra. A coleta começa quando esta janela abre.", 14)));
+            else
+            {
+                var overview = new StackPanel();
+                overview.Children.Add(Text("Estado observado · " + latest.Time.ToLocalTime().ToString("g"), 18));
+                overview.Children.Add(Text($"CPU {latest.CpuPercent?.ToString("F0") ?? "indisponível"}%   ·   Memória {latest.MemoryUsedPercent?.ToString("F0") ?? "indisponível"}%   ·   Rede local {latest.Connectivity}", 16, "#92D7BA"));
+                overview.Children.Add(Text("Temperatura: " + (latest.CpuTemperatureC?.ToString("F0") ?? "indisponível") + "  ·  SMART: " + latest.StorageHealth + "  ·  Coleta: " + latest.CollectionStatus, 12, "#939CAA"));
+                foreach (var disk in latest.Disks.Take(6)) overview.Children.Add(Text($"{disk.Name}: {(disk.TotalBytes > 0 ? 100.0 * disk.FreeBytes / disk.TotalBytes : 0):F1}% livre", 13));
+                PageContent.Children.Add(Card(overview));
+            }
+            var alerts = healthStore.RecentFindings(20);
+            PageContent.Children.Add(Text("Ocorrências preventivas", 19));
+            if (alerts.Count == 0) PageContent.Children.Add(Card(Text("Nenhuma ocorrência persistente registrada.", 13, "#939CAA")));
+            foreach (var finding in alerts) PageContent.Children.Add(Card(Text($"{finding.Time.ToLocalTime():g} · {finding.Severity} · {finding.Problem}\n{finding.Evidence}\nHipótese: {finding.Cause}\nPróximo passo: {finding.Recommendation}", 13)));
+            PageContent.Children.Add(Text("Eventos do Windows", 19));
+            foreach (var warning in eventWarnings) PageContent.Children.Add(Card(Text(warning, 12, "#F2CB8B")));
+            var events = healthStore.RecentEvents(12);
+            if (events.Count == 0) PageContent.Children.Add(Card(Text("Nenhum evento registrado nesta coleta. Consulte os avisos de canal antes de interpretar a ausência.", 13, "#939CAA")));
+            foreach (var item in events) PageContent.Children.Add(Card(Text($"{item.Time.ToLocalTime():g} · {item.Log} · ID {item.EventId} · nível {item.Level}\n{item.Provider}", 12)));
+            PageContent.Children.Add(Text("Recuperação assistida", 19));
+            var interventions = healthStore.RecentInterventions(12);
+            if (interventions.Count == 0) PageContent.Children.Add(Card(Text("Nenhuma intervenção registrada.", 13, "#939CAA")));
+            foreach (var item in interventions) PageContent.Children.Add(Card(Text($"{item.Time.ToLocalTime():g} · {item.Action} · {item.State}\nAutorizada: {(item.Authorized ? "sim" : "não")} · {item.Summary}", 12)));
+            PageContent.Children.Add(Text("Drivers instalados", 19));
+            PageContent.Children.Add(Card(Text("O assistente consulta o INF e a versão do driver associados a um dispositivo identificado. A busca online e a instalação exigem um alvo observado e autorização específica.", 13, "#939CAA")));
+            PageContent.Children.Add(Action("Investigar um driver no assistente", async (_, _) => await GuardAsync(async () => { ShowPage("chat"); await Send("Verifique o driver do dispositivo com problema. Consulte o inventário e o INF instalado antes de sugerir qualquer alteração."); })));
+        }
+        catch (Exception ex) { PageContent.Children.Add(Card(Text("Não foi possível ler o histórico operacional: " + ex.Message, 13, "#F2CB8B"))); }
     }
     private static TextBox Field(Panel parent, string label, string value = "")
     {
@@ -288,8 +380,7 @@ public partial class MainWindow : Window
                     try { await LocalModel.EnsureRunning(token); }
                     catch (Exception ex) when (ex is IOException or HttpRequestException or InvalidOperationException or TimeoutException)
                     {
-                        using var local = new OperationalStore(store.Root);
-                        AddEntry("assistant", "O agente Ollama está indisponível: " + ex.Message + "\n\n" + HealthReportPresentation.FromStore(local), "result", turnClock.ElapsedMilliseconds);
+                        AddEntry("assistant", "O agente Ollama está indisponível: " + ex.Message + "\n\n" + OfflineHealthReport(), "result", turnClock.ElapsedMilliseconds);
                         return;
                     }
                 }
@@ -300,8 +391,7 @@ public partial class MainWindow : Window
                 try { answer = await agent.Run(user, conversation!, events, (label, result) => AddEntry("tool", label + "\n" + result), token); }
                 catch (Exception ex) when (ex is HttpRequestException or TimeoutException)
                 {
-                    using var local = new OperationalStore(store.Root);
-                    AddEntry("assistant", "O agente Ollama ficou indisponível: " + ex.Message + "\n\n" + HealthReportPresentation.FromStore(local), "result", turnClock.ElapsedMilliseconds);
+                    AddEntry("assistant", "O agente Ollama ficou indisponível: " + ex.Message + "\n\n" + OfflineHealthReport(), "result", turnClock.ElapsedMilliseconds);
                     return;
                 }
                 AddEntry("assistant", answer, AnswerPresentation(answer), turnClock.ElapsedMilliseconds);
@@ -466,6 +556,24 @@ public partial class MainWindow : Window
             }
             catch (Exception ex) { connectionStatus.Text = "Não foi possível verificar: " + ex.Message; }
         })); panel.Children.Add(connectionStatus); PageContent.Children.Add(Card(panel));
+        var healthPanel = new StackPanel(); healthPanel.Children.Add(Text("Monitoramento local", 18));
+        healthPanel.Children.Add(Text("A coleta funciona enquanto a janela está aberta. Temperatura e SMART podem permanecer indisponíveis.", 12, "#939CAA"));
+        var interval = Field(healthPanel, "Intervalo entre amostras (segundos: 10–3600)", healthSettings.IntervalSeconds.ToString());
+        var cpu = Field(healthPanel, "Alerta de CPU persistente (%)", healthSettings.CpuHighPercent.ToString("F0"));
+        var disk = Field(healthPanel, "Alerta de espaço livre abaixo de (%)", healthSettings.DiskLowFreePercent.ToString("F0"));
+        var retention = Field(healthPanel, "Retenção do histórico operacional (dias: 1–365)", healthSettings.RetentionDays.ToString());
+        healthPanel.Children.Add(Action("Salvar monitoramento", async (_, _) => await GuardAsync(async () =>
+        {
+            if (!int.TryParse(interval.Text, out var intervalValue) || !double.TryParse(cpu.Text, out var cpuValue)
+                || !double.TryParse(disk.Text, out var diskValue) || !int.TryParse(retention.Text, out var retentionValue))
+                throw new InvalidOperationException("Informe números válidos para as preferências de saúde.");
+            var next = new HealthSettings { IntervalSeconds = intervalValue, CpuHighPercent = cpuValue, DiskLowFreePercent = diskValue, RetentionDays = retentionValue };
+            next.Save(store.Root);
+            if (healthMonitor != null) { await healthMonitor.StopAsync(); healthMonitor.Dispose(); healthMonitor = null; }
+            healthSettings = next; healthStore?.Prune(TimeSpan.FromDays(next.RetentionDays)); StartHealthMonitoring();
+            MessageBox.Show(this, "Preferências do monitoramento salvas.", "Nexo");
+        }), true));
+        PageContent.Children.Add(Card(healthPanel));
         PageContent.Children.Add(Card(Text("Atendimentos e registros ficam neste perfil do Windows. A administração central de vários computadores e a integração com uma ferramenta de chamados são próximas etapas do produto.", 13, "#939CAA")));
     }
     private void Audits()
@@ -496,6 +604,13 @@ public partial class MainWindow : Window
         {
         if (Shell.Visibility != Visibility.Visible || !Messages.Children.OfType<StackPanel>().Any()) throw new InvalidOperationException("Falha na abertura direta do aplicativo.");
         ShowPage("chat"); await Capture("nexo-preview.png");
+        ShowPage("health");
+        if (!PageContent.Children.OfType<TextBlock>().Any(t => t.Text == "Saúde do computador")) throw new InvalidOperationException("Painel de saúde não abriu.");
+        await Capture("nexo-health.png");
+        ShowPage("settings");
+        if (!PageContent.Children.OfType<Border>().Any(b => b.Child is StackPanel s && s.Children.OfType<TextBlock>().Any(t => t.Text == "Monitoramento local"))) throw new InvalidOperationException("Controles de monitoramento não abriram.");
+        await Capture("nexo-health-settings.png");
+        ShowPage("chat");
         store.Data.AiEnabled = false;
         NewConversation(); ShowPage("chat"); await Send("Olá, preciso de ajuda");
         if (conversation?.Entries.Count != 2 || busy) throw new InvalidOperationException("Falha no fluxo de conversa local.");
@@ -564,7 +679,7 @@ public partial class MainWindow : Window
         AddEntry("tool", ToolCatalog.Label("scan_driver_updates") + "\n" + WindowsTools.Ok("[]"));
         AddEntry("assistant", "Identifiquei GPU de exemplo (driver 1.0). A fonte de atualizações configurada no Windows não ofereceu driver compatível agora. Nenhuma alteração foi feita.", "result", 14300);
         await Capture("nexo-driver-result.png");
-        File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "ui-checks.txt"), "Abertura direta e navegação, envio e resposta local: aprovados.\nNovo atendimento na lateral; resolução e encaminhamento acima do compositor: aprovados em 1380x900 e 1060x720.\nAtalhos Sim/Não, rascunho e bloqueio de resposta antiga: aprovados.\nEnter livre para quebra de linha e manipulador Shift + Enter envia mensagem multilinha: aprovados.\n70 etapas com rolagem ao início/fim, controles acessíveis e rótulos alinhados. Nenhuma ação no Windows executada.");
+        File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "ui-checks.txt"), "Abertura direta e navegação, envio e resposta local: aprovados.\nPainel de saúde e controles de monitoramento renderizados.\nNovo atendimento na lateral; resolução e encaminhamento acima do compositor: aprovados em 1380x900 e 1060x720.\nAtalhos Sim/Não, rascunho e bloqueio de resposta antiga: aprovados.\nEnter livre para quebra de linha e manipulador Shift + Enter envia mensagem multilinha: aprovados.\n70 etapas com rolagem ao início/fim, controles acessíveis e rótulos alinhados. Nenhuma ação no Windows executada.");
         Application.Current.Shutdown();
         }
         catch (Exception ex)

@@ -39,6 +39,22 @@ public sealed class WindowsHealthSampler : IHealthSampler
         catch (Exception ex) { result.Warnings.Add("Adaptadores: " + ex.Message); }
         try
         {
+            var raw = await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Select-Object -First 80 @{N='Id';E={[string]$_.InterfaceGuid}},Name,@{N='Status';E={[string]$_.Status}})", token, 20);
+            using var adapters = JsonDocument.Parse(raw);
+            foreach (var item in adapters.RootElement.EnumerateArray())
+            {
+                var id = item.GetProperty("Id").GetString() ?? "";
+                var status = item.GetProperty("Status").GetString() ?? "unknown";
+                var name = item.GetProperty("Name").GetString() ?? "";
+                var existing = result.Adapters.FindIndex(a => a.Id.Trim('{', '}').Equals(id.Trim('{', '}'), StringComparison.OrdinalIgnoreCase));
+                var observed = new AdapterHealth(id, name, status, status != "Disabled");
+                if (existing >= 0) result.Adapters[existing] = observed; else result.Adapters.Add(observed);
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (Exception ex) { result.Warnings.Add("Estado administrativo dos adaptadores indisponível: " + ex.Message); }
+        try
+        {
             const string script = "$os=Get-CimInstance Win32_OperatingSystem; $cpu=Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average; $svc=@(Get-CimInstance Win32_Service | Where-Object { $_.StartMode -eq 'Auto' } | Select-Object -First 80 Name,State,StartMode); [pscustomobject]@{Cpu=$cpu.Average; TotalKb=$os.TotalVisibleMemorySize; FreeKb=$os.FreePhysicalMemory; Services=$svc} | ConvertTo-Json -Compress -Depth 4";
             using var doc = JsonDocument.Parse(await SupportService.Powershell(script, token, 20));
             var root = doc.RootElement;

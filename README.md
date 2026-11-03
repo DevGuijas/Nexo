@@ -2,6 +2,10 @@
 
 Aplicativo C# / WPF com IA local que escolhe ferramentas do Windows, executa ações autorizadas, recebe os resultados e continua a investigação. O aplicativo abre direto no atendimento e usa a sessão atual do Windows.
 
+## Saúde do computador (ramo de desenvolvimento)
+
+A página **Saúde do PC** mostra leituras locais, ocorrências persistentes, eventos do Windows e intervenções registradas enquanto o aplicativo está aberto. **Configurações** permite ajustar intervalo, limiares de CPU/disco e retenção. O banco operacional SQLite fica separado das conversas. O agente local pode consultar `get_health_report`; sem Ollama, o aplicativo apresenta o relatório determinístico disponível. Um processo elevado sem resultado no prazo fica em estado **desconhecido**, nunca como correção concluída. O INF instalado pode ser consultado após identificar o dispositivo. Consulte o [protocolo de avaliação](docs/AVALIACAO-SISTEMA-IMUNOLOGICO.md) para os sete cenários e os limites da validação.
+
 ## Abrir
 
 Para executar a compilação local, rode `dotnet run --project Nexo.Support -c Release`. Para instalar o aplicativo com o modelo local, baixe [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe). Ele consulta a versão publicada na Oracle ao ser executado; veja [o procedimento de instalação e publicação](docs/INSTALADOR-NUVEM.md).

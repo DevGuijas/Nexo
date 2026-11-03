@@ -54,6 +54,12 @@ public static class HealthRules
         }
 
         var network = Tail(thresholds.NetworkSamples);
+        if (other.Length == thresholds.OtherSamples && Continuous(other) && other.All(s => s.Connectivity == "none"))
+        {
+            foreach (var adapter in latest.Adapters.Where(a => a.Status.Equals("Disabled", StringComparison.OrdinalIgnoreCase)))
+                if (other.All(s => s.Adapters.Any(a => a.Id == adapter.Id && a.Status.Equals("Disabled", StringComparison.OrdinalIgnoreCase))))
+                    findings.Add(Finding("adapter-disabled:" + adapter.Id, "network", "Adaptador desativado sem conectividade local", adapter.Name + " desativado em " + other.Length + " leituras", "Pode ser desativação intencional; relação com o sintoma ainda não confirmada", "warning", "Esta interface não pode conectar enquanto desativada", "Verifique se esta é a interface usada antes de propor ativação", 0.75));
+        }
         if (network.Length == thresholds.NetworkSamples && Continuous(network) && network.All(s => s.Connectivity == "none"))
             findings.Add(Finding("network-none", "network", "Conectividade local ausente de forma recorrente", $"{network.Length} leituras sem conectividade informada pelo Windows", "Adaptador, cabo, Wi-Fi ou configuração ainda não identificados", "warning", "Recursos de rede podem ficar indisponíveis", "Execute o diagnóstico de interfaces antes de alterar configurações", 0.7));
 

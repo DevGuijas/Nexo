@@ -15,6 +15,21 @@ internal static class RecoveryChecks
         check(interrupted == OperationState.Unknown, "Cancelamento após lançamento não simula reversão");
         check(DriverStoreInventory.MatchesObserved("PCI\\VEN_1234", "PCI\\VEN_1234", "oem4.inf") && !DriverStoreInventory.MatchesObserved("PCI\\VEN_1234", "PCI\\VEN_5678", "oem4.inf"), "Inventário de driver exige dispositivo exato");
         check(!DriverStoreInventory.MatchesObserved("PCI\\VEN_1234", "PCI\\VEN_1234", ""), "INF ausente é limitação explícita");
+        var calls = new List<string>();
+        var driverAnswer = DriverWorkflow.Run("Apenas verifique o INF do driver da placa de vídeo", true, (name, _) =>
+        {
+            calls.Add(name);
+            var response = name switch
+            {
+                "get_hardware_inventory" => WindowsTools.Ok(new { Truncated = false, Devices = new[] { new Device("GPU", "PCI\\GPU1", 0, "OK") { HardwareIds = ["PCI\\VEN_1234"], DriverVersion = "1.0" } } }),
+                "get_driver_store" => WindowsTools.Ok(new { available = true, package = new { DeviceId = "PCI\\GPU1", InfName = "oem4.inf", Version = "1.0", Provider = "Vendor" } }),
+                "scan_driver_updates" => WindowsTools.Ok("[]"),
+                _ => throw new Exception("Ferramenta inesperada")
+            };
+            using var json = System.Text.Json.JsonDocument.Parse(response);
+            return Task.FromResult(json.RootElement.Clone());
+        }, CancellationToken.None).GetAwaiter().GetResult();
+        check(calls.SequenceEqual(["get_hardware_inventory", "get_driver_store", "scan_driver_updates"]) && driverAnswer.Contains("oem4.inf"), "Pedido de INF expõe pacote instalado antes da busca online");
         var root = Path.Combine(Path.GetTempPath(), "nexo-recovery-" + Guid.NewGuid().ToString("N"));
         try
         {
