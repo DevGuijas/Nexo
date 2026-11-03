@@ -232,6 +232,8 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 return Ok(await SupportService.Powershell("$log=& \"$env:WINDIR\\System32\\wevtutil.exe\" qe System '/q:*[System[(Level=2) and TimeCreated[timediff(@SystemTime) <= 86400000]]]' /c:12 /rd:true /f:text; if($LASTEXITCODE -ne 0){throw 'Não foi possível ler os eventos do sistema'}; $text=$log -join \"`n\"; if($text.Length -gt 7000){$text.Substring(0,7000)}else{$text}", token));
             case "get_processes":
                 return Ok(await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 12 Name,Id,@{N='MemoryMB';E={[math]::Round($_.WorkingSet64/1MB)}},Responding)", token));
+            case "get_health_report":
+                using (var operational = new OperationalStore(store.Root)) return Ok(HealthReportPresentation.FromStore(operational));
             case "set_dns":
             case "set_ipv4":
                 var index = Number(args, "interface_index");

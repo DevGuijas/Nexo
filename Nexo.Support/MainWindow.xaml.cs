@@ -1,6 +1,7 @@
 using Microsoft.Win32;
 using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation;
@@ -282,11 +283,27 @@ public partial class MainWindow : Window
             if (store.Data.AiEnabled)
             {
                 UpdateProgress("Conectando o agente ao executor do Windows…");
-                if (!DriverWorkflow.Matches(prompt) && (!user.Repair || AgentProtocol.RequestsReadOnly(prompt) || !NetworkWorkflow.Matches(prompt))) await LocalModel.EnsureRunning(token);
+                if (!DriverWorkflow.Matches(prompt) && (!user.Repair || AgentProtocol.RequestsReadOnly(prompt) || !NetworkWorkflow.Matches(prompt)))
+                {
+                    try { await LocalModel.EnsureRunning(token); }
+                    catch (Exception ex) when (ex is IOException or HttpRequestException or InvalidOperationException or TimeoutException)
+                    {
+                        using var local = new OperationalStore(store.Root);
+                        AddEntry("assistant", "O agente Ollama está indisponível: " + ex.Message + "\n\n" + HealthReportPresentation.FromStore(local), "result", turnClock.ElapsedMilliseconds);
+                        return;
+                    }
+                }
                 var events = new Progress<string>(UpdateProgress);
                 var executor = conversationTools ??= new WindowsTools(store, user, ConfirmChange, events, text => AddEntry("assistant", text));
                 var agent = new AgentService(store, executor);
-                var answer = await agent.Run(user, conversation!, events, (label, result) => AddEntry("tool", label + "\n" + result), token);
+                string answer;
+                try { answer = await agent.Run(user, conversation!, events, (label, result) => AddEntry("tool", label + "\n" + result), token); }
+                catch (Exception ex) when (ex is HttpRequestException or TimeoutException)
+                {
+                    using var local = new OperationalStore(store.Root);
+                    AddEntry("assistant", "O agente Ollama ficou indisponível: " + ex.Message + "\n\n" + HealthReportPresentation.FromStore(local), "result", turnClock.ElapsedMilliseconds);
+                    return;
+                }
                 AddEntry("assistant", answer, AnswerPresentation(answer), turnClock.ElapsedMilliseconds);
                 return;
             }

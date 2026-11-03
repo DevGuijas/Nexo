@@ -16,7 +16,7 @@ public static class EventAnalyzer
                     Time = last.Time,
                     Category = "event",
                     Problem = "Evento recorrente do Windows",
-                    Evidence = $"{group.Count()} ocorrências em {group.Key.Log}, provedor {group.Key.Provider}, ID {group.Key.EventId}; última em {last.Time:O}",
+                    Evidence = $"{group.Count()} ocorrências em {group.Key.Log}, ID {group.Key.EventId}; última em {last.Time:O}",
                     Cause = "O evento indica uma falha ou aviso recorrente; causa específica ainda não confirmada",
                     Severity = group.Any(e => e.Level <= 2) ? "warning" : "info",
                     Impact = "A função associada pode estar degradada",
