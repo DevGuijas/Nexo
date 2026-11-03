@@ -33,9 +33,9 @@
 
 **Interfaces:** `UiIcons.Create(string name, double size)` retorna `Viewbox`; paleta usa chaves de recursos em `App.xaml`.
 
-- [ ] Adicionar uma verificação de prévia que exija recursos de paleta, estilos reutilizáveis e ícones vetoriais; executar e observar a falha esperada.
-- [ ] Criar recursos e ícones para marca, navegação, categorias e ações; trocar os helpers de cor por chaves semânticas.
-- [ ] Compilar e executar a prévia até a verificação passar.
+- [x] Adicionar uma verificação de prévia que exija recursos de paleta, estilos reutilizáveis e ícones vetoriais; executar e observar a falha esperada.
+- [x] Criar recursos e ícones para marca, navegação, categorias e ações; trocar os helpers de cor por chaves semânticas.
+- [x] Compilar e executar a prévia até a verificação passar.
 
 ### Task 2: Shell e assistente
 
@@ -43,9 +43,9 @@
 
 **Interfaces:** navegação mantém `Tag`, eventos e nomes de automação; cartões e ações usam estilos compartilhados.
 
-- [ ] Ampliar a prévia para conferir layout nas duas resoluções e presença dos seis atalhos com ícones; observar falha antes da mudança.
-- [ ] Redesenhar barra lateral, cabeçalho do chat, saudação, atalhos, mensagens, progresso, respostas e compositor.
-- [ ] Renderizar capturas de início, conversa e progresso; corrigir cortes, alinhamento e foco.
+- [x] Ampliar a prévia para conferir layout nas duas resoluções e presença dos seis atalhos com ícones; observar falha antes da mudança.
+- [x] Redesenhar barra lateral, cabeçalho do chat, saudação, atalhos, mensagens, progresso, respostas e compositor.
+- [x] Renderizar capturas de início, conversa e progresso; corrigir cortes, alinhamento e foco.
 
 ### Task 3: Páginas e diálogo
 
@@ -53,15 +53,15 @@
 
 **Interfaces:** manter `Heading`, `Card`, `Action`, `Field`, `Secret`, `Check` como pontos únicos de construção visual.
 
-- [ ] Adicionar capturas isoladas de saúde, histórico, encaminhamentos, configurações, auditoria e conta à prévia; verificar que os arquivos ainda não existem.
-- [ ] Aplicar tipografia, estados, cartões e formulários consistentes a todas as páginas e ao diálogo de autorização.
-- [ ] Inspecionar as capturas, inclusive textos longos e estado vazio; ajustar visualmente.
+- [x] Adicionar capturas isoladas de saúde, histórico, encaminhamentos, configurações, auditoria e conta à prévia; verificar que os arquivos ainda não existem.
+- [x] Aplicar tipografia, estados, cartões e formulários consistentes a todas as páginas e ao diálogo de autorização.
+- [x] Inspecionar as capturas, inclusive textos longos e estado vazio; ajustar visualmente.
 
 ### Task 4: Regressão e entrega
 
 **Files:** `docs/superpowers/specs/2026-11-03-nexo-clean-ui-design.md`, `docs/superpowers/plans/2026-11-03-nexo-clean-ui.md`; artefatos ignorados pelo Git.
 
-- [ ] Executar `dotnet run --project Nexo.Checks -c Release` e `dotnet run --project Nexo.Setup.Checks -c Release`.
-- [ ] Publicar `Nexo.Support` para win-x64 self-contained single-file, executar `--screenshot` e inspecionar todas as capturas.
-- [ ] Confirmar diff sem binários/segredos, criar commits em português, enviar branch e abrir PR para `development` vinculado à #24.
-- [ ] Substituir o executável da Área de Trabalho, comparar SHA-256 e verificar assinatura/status; fechar a #24 após a entrega.
+- [x] Executar `dotnet run --project Nexo.Checks -c Release` e `dotnet run --project Nexo.Setup.Checks -c Release`.
+- [x] Publicar `Nexo.Support` para win-x64 self-contained single-file, executar `--screenshot` e inspecionar todas as capturas.
+- [x] Confirmar diff sem binários/segredos, criar commits em português, enviar branch e abrir PR para `development` vinculado à #24.
+- [x] Substituir o executável da Área de Trabalho, comparar SHA-256 e verificar assinatura/status; fechar a #24 após a entrega.
