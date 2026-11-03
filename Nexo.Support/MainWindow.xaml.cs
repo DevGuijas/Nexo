@@ -86,11 +86,43 @@ public partial class MainWindow : Window
     }
     private Button Action(string label, RoutedEventHandler handler, bool primary = false)
     {
-        var b = new Button { Content = label, Margin = new Thickness(0, 0, 10, 8), HorizontalContentAlignment = HorizontalAlignment.Center };
+        var b = new Button { Content = label, Margin = new Thickness(0, 0, 10, 8), HorizontalContentAlignment = HorizontalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Left, MinHeight = 38 };
         if (primary) b.Style = (Style)FindResource("Primary");
         b.Click += handler; return b;
     }
     private Border Card(UIElement content) => new() { Style = (Style)FindResource("Card"), Child = content, Margin = new Thickness(0, 0, 0, 14) };
+    private static StackPanel SectionHeading(string icon, string title)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 13, 0, 12) };
+        row.Children.Add(UiIcons.Create(icon, 19));
+        row.Children.Add(new TextBlock { Text = title, Foreground = Brush("Ink"), FontSize = 18,
+            FontWeight = FontWeights.SemiBold, Margin = new Thickness(10, 0, 0, 0) });
+        return row;
+    }
+    private static Border MetricTile(string label, string value, string icon)
+    {
+        var panel = new StackPanel();
+        var top = new StackPanel { Orientation = Orientation.Horizontal };
+        top.Children.Add(UiIcons.Create(icon, 16));
+        top.Children.Add(new TextBlock { Text = label, Foreground = Brush("Secondary"), FontSize = 12,
+            Margin = new Thickness(8, 0, 0, 0) });
+        panel.Children.Add(top);
+        panel.Children.Add(new TextBlock { Text = value, Foreground = Brush("Ink"), FontFamily = new FontFamily("Segoe UI Variable Display, Segoe UI"),
+            FontSize = 23, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 9, 0, 0) });
+        return new Border { Background = Brush("SurfaceMuted"), CornerRadius = new CornerRadius(10),
+            Padding = new Thickness(16), Margin = new Thickness(0, 0, 10, 0), Child = panel };
+    }
+    private Border EmptyState(string icon, string title, string description)
+    {
+        var content = new StackPanel { Margin = new Thickness(0, 7, 0, 7) };
+        content.Children.Add(new Border { Width = 40, Height = 40, CornerRadius = new CornerRadius(11),
+            Background = Brush("AccentSoft"), HorizontalAlignment = HorizontalAlignment.Left, Child = UiIcons.Create(icon, 20) });
+        var heading = Text(title, 16); heading.FontWeight = FontWeights.SemiBold;
+        heading.Margin = new Thickness(0, 14, 0, 6); content.Children.Add(heading);
+        content.Children.Add(Text(description, 13, "Secondary"));
+        return Card(content);
+    }
     private void Guard(Action action) { try { action(); } catch (Exception ex) { MessageBox.Show(this, ex.Message, "Nexo", MessageBoxButton.OK, MessageBoxImage.Information); } }
     private async Task GuardAsync(Func<Task> action)
     {
@@ -232,30 +264,48 @@ public partial class MainWindow : Window
         try
         {
             var latest = healthStore.RecentSnapshots(DateTimeOffset.UtcNow.AddDays(-1), 1).FirstOrDefault();
-            if (latest == null) PageContent.Children.Add(Card(Text("Aguardando a primeira amostra. A coleta começa quando esta janela abre.", 14)));
+            if (latest == null) PageContent.Children.Add(EmptyState("performance", "Aguardando a primeira leitura",
+                "A coleta começa quando esta janela abre. Os indicadores aparecem quando houver dados disponíveis."));
             else
             {
                 var overview = new StackPanel();
-                overview.Children.Add(Text("Estado observado · " + latest.Time.ToLocalTime().ToString("g"), 18));
-                overview.Children.Add(Text($"CPU {MetricPercent(latest.CpuPercent)}   ·   Memória {MetricPercent(latest.MemoryUsedPercent)}   ·   Rede local {latest.Connectivity}", 16, "Success"));
-                overview.Children.Add(Text("Temperatura: " + (latest.CpuTemperatureC?.ToString("F0") ?? "indisponível") + "  ·  SMART: " + latest.StorageHealth + "  ·  Coleta: " + latest.CollectionStatus, 12, "Secondary"));
-                foreach (var disk in latest.Disks.Take(6)) overview.Children.Add(Text($"{disk.Name}: {(disk.TotalBytes > 0 ? 100.0 * disk.FreeBytes / disk.TotalBytes : 0):F1}% livre", 13));
+                overview.Children.Add(Text("Última leitura · " + latest.Time.ToLocalTime().ToString("g"), 12, "Secondary"));
+                var metrics = new System.Windows.Controls.Primitives.UniformGrid { Columns = 3, Margin = new Thickness(0, 15, 0, 14) };
+                metrics.Children.Add(MetricTile("CPU", MetricPercent(latest.CpuPercent), "performance"));
+                metrics.Children.Add(MetricTile("Memória", MetricPercent(latest.MemoryUsedPercent), "health"));
+                metrics.Children.Add(MetricTile("Rede local", latest.Connectivity switch { "local" => "Interface ativa", "none" => "Sem interface", _ => "Indisponível" }, "network"));
+                overview.Children.Add(metrics);
+                var storageStatus = latest.StorageHealth == "unavailable" ? "indisponível" : latest.StorageHealth;
+                var collectionStatus = latest.CollectionStatus switch { "complete" => "completa", "partial" => "parcial", _ => latest.CollectionStatus };
+                overview.Children.Add(Text("Temperatura: " + (latest.CpuTemperatureC?.ToString("F0") ?? "indisponível") + "  ·  SMART: " + storageStatus + "  ·  Coleta: " + collectionStatus, 12, "Secondary"));
+                foreach (var disk in latest.Disks.Take(6))
+                {
+                    var diskText = Text($"{disk.Name}: {(disk.TotalBytes > 0 ? 100.0 * disk.FreeBytes / disk.TotalBytes : 0):F1}% livre", 13, "Secondary");
+                    diskText.Margin = new Thickness(0, 7, 0, 0); overview.Children.Add(diskText);
+                }
                 PageContent.Children.Add(Card(overview));
             }
             var alerts = healthStore.RecentFindings(20);
-            PageContent.Children.Add(Text("Ocorrências preventivas", 19));
+            PageContent.Children.Add(SectionHeading("health", "Ocorrências preventivas"));
             if (alerts.Count == 0) PageContent.Children.Add(Card(Text("Nenhuma ocorrência persistente registrada.", 13, "Secondary")));
-            foreach (var finding in alerts) PageContent.Children.Add(Card(Text($"{finding.Time.ToLocalTime():g} · {finding.Severity} · {finding.Problem}\n{finding.Evidence}\nHipótese: {finding.Cause}\nPróximo passo: {finding.Recommendation}", 13)));
-            PageContent.Children.Add(Text("Eventos do Windows", 19));
+            foreach (var finding in alerts)
+            {
+                var detail = new StackPanel();
+                detail.Children.Add(Text($"{finding.Time.ToLocalTime():g}  ·  {finding.Severity}", 11, finding.Severity == "critical" ? "Danger" : "Warning"));
+                var problem = Text(finding.Problem, 15); problem.FontWeight = FontWeights.SemiBold; problem.Margin = new Thickness(0, 7, 0, 7); detail.Children.Add(problem);
+                detail.Children.Add(Text($"{finding.Evidence}\nHipótese: {finding.Cause}\nPróximo passo: {finding.Recommendation}", 13, "Secondary"));
+                PageContent.Children.Add(Card(detail));
+            }
+            PageContent.Children.Add(SectionHeading("audit", "Eventos do Windows"));
             foreach (var warning in eventWarnings) PageContent.Children.Add(Card(Text(warning, 12, "Warning")));
             var events = healthStore.RecentEvents(12);
             if (events.Count == 0) PageContent.Children.Add(Card(Text(lastEventScan == DateTimeOffset.MinValue ? "Aguardando a primeira consulta de eventos." : "Nenhum evento registrado nesta coleta. Consulte os avisos de canal antes de interpretar a ausência.", 13, "Secondary")));
             foreach (var item in events) PageContent.Children.Add(Card(Text($"{item.Time.ToLocalTime():g} · {item.Log} · ID {item.EventId} · nível {item.Level}\n{item.Provider}", 12)));
-            PageContent.Children.Add(Text("Recuperação assistida", 19));
+            PageContent.Children.Add(SectionHeading("shield", "Recuperação assistida"));
             var interventions = healthStore.RecentInterventions(12);
             if (interventions.Count == 0) PageContent.Children.Add(Card(Text("Nenhuma intervenção registrada.", 13, "Secondary")));
             foreach (var item in interventions) PageContent.Children.Add(Card(Text($"{item.Time.ToLocalTime():g} · {item.Action} · {item.State}\nAutorizada: {(item.Authorized ? "sim" : "não")} · {item.Summary}", 12)));
-            PageContent.Children.Add(Text("Drivers instalados", 19));
+            PageContent.Children.Add(SectionHeading("settings", "Drivers instalados"));
             PageContent.Children.Add(Card(Text("O assistente consulta o INF e a versão do driver associados a um dispositivo identificado. A busca online e a instalação exigem um alvo observado e autorização específica.", 13, "Secondary")));
             PageContent.Children.Add(Action("Investigar um driver no assistente", async (_, _) => await GuardAsync(async () => { ShowPage("chat"); await Send("Verifique o driver do dispositivo com problema. Consulte o inventário e o INF instalado antes de sugerir qualquer alteração."); })));
         }
@@ -263,12 +313,17 @@ public partial class MainWindow : Window
     }
     private static TextBox Field(Panel parent, string label, string value = "")
     {
-        parent.Children.Add(new TextBlock { Text = label, Margin = new Thickness(0, 12, 0, 8) });
-        var input = new TextBox { Text = value, MaxLength = 240 }; AutomationProperties.SetName(input, label); parent.Children.Add(input); return input;
+        parent.Children.Add(new TextBlock { Text = label, Foreground = Brush("Secondary"), FontSize = 12,
+            FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 17, 0, 7) });
+        var input = new TextBox { Text = value, MaxLength = 240, MinHeight = 42, VerticalContentAlignment = VerticalAlignment.Center };
+        AutomationProperties.SetName(input, label); parent.Children.Add(input); return input;
     }
     private static PasswordBox Secret(Panel parent, string label)
     {
-        parent.Children.Add(new TextBlock { Text = label, Margin = new Thickness(0, 12, 0, 8) }); var input = new PasswordBox { MaxLength = 128 }; AutomationProperties.SetName(input, label); parent.Children.Add(input); return input;
+        parent.Children.Add(new TextBlock { Text = label, Foreground = Brush("Secondary"), FontSize = 12,
+            FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 17, 0, 7) });
+        var input = new PasswordBox { MaxLength = 128, MinHeight = 42, VerticalContentAlignment = VerticalAlignment.Center };
+        AutomationProperties.SetName(input, label); parent.Children.Add(input); return input;
     }
     private static CheckBox Check(Panel parent, string label, bool value)
     {
@@ -292,7 +347,7 @@ public partial class MainWindow : Window
             var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap)); using var buffer = new MemoryStream(); encoder.Save(buffer); photo = Convert.ToBase64String(buffer.ToArray()); avatar.Child = null; ShowAvatar();
         })); upload.HorizontalAlignment = HorizontalAlignment.Left; upload.Margin = new Thickness(0, 12, 0, 8); form.Children.Add(upload);
         var name = Field(form, "Nome", user.Name); var email = Field(form, "E-mail", user.Email);
-        var login = Field(form, "Login", user.Login); login.IsReadOnly = true;
+        var login = Field(form, "Login", user.Login); login.IsReadOnly = true; login.Background = Brush("SurfaceMuted");
         var current = Secret(form, "Senha atual (para alterar a senha)"); var password = Secret(form, "Nova senha (mínimo de 8 caracteres)"); var confirm = Secret(form, "Confirme a nova senha");
         var save = Action("Salvar alterações", (_, _) => Guard(() => { if (password.Password != confirm.Password) throw new InvalidOperationException("As novas senhas não coincidem."); store.UpdateProfile(user, name.Text, email.Text, photo, current.Password, password.Password); RefreshIdentity(); ShowPage("profile"); MessageBox.Show(this, "Seu perfil foi atualizado.", "Tudo certo"); }), true);
         save.Margin = new Thickness(0, 24, 0, 0); form.Children.Add(save); PageContent.Children.Add(Card(form));
@@ -300,7 +355,7 @@ public partial class MainWindow : Window
     private void Users()
     {
         Heading("Usuários e acessos", "Gerencie contas e escolha o que cada pessoa pode fazer neste computador.");
-        PageContent.Children.Add(Action("＋  Criar usuário", (_, _) => AccountEditor(null), true));
+        PageContent.Children.Add(Action("Criar usuário", (_, _) => AccountEditor(null), true));
         foreach (var account in store.Data.Accounts.OrderBy(a => a.Name))
         {
             var row = new DockPanel(); var edit = Action("Editar acesso", (_, _) => AccountEditor(account)); DockPanel.SetDock(edit, Dock.Right); row.Children.Add(edit);
@@ -503,15 +558,23 @@ public partial class MainWindow : Window
     }
     private Task<bool> ConfirmChange(ChangeRequest request)
     {
-        var dialog = new Window { Owner = this, Title = request.Title, Width = 660, Height = 500, WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize, Style = (Style)FindResource(typeof(Window)) };
-        var panel = new DockPanel { Margin = new Thickness(26) };
-        var title = Text(request.Title, 23); title.Margin = new Thickness(0, 0, 0, 18); DockPanel.SetDock(title, Dock.Top); panel.Children.Add(title);
+        var dialog = new Window { Owner = this, Title = request.Title, Width = 700, Height = 520, WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize, Style = (Style)FindResource(typeof(Window)) };
+        var panel = new DockPanel { Margin = new Thickness(25) };
+        var header = new StackPanel { Margin = new Thickness(0, 0, 0, 19) };
+        var label = new StackPanel { Orientation = Orientation.Horizontal };
+        label.Children.Add(UiIcons.Create("shield", 18));
+        label.Children.Add(new TextBlock { Text = "CONFIRMAÇÃO DE AÇÃO", FontSize = 11, FontWeight = FontWeights.SemiBold,
+            Foreground = Brush("Accent"), Margin = new Thickness(8, 0, 0, 0) });
+        header.Children.Add(label);
+        var title = Text(request.Title, 23); title.FontWeight = FontWeights.SemiBold; title.Margin = new Thickness(0, 12, 0, 0);
+        header.Children.Add(title); DockPanel.SetDock(header, Dock.Top); panel.Children.Add(header);
         var buttons = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 20, 0, 0) }; DockPanel.SetDock(buttons, Dock.Bottom);
         buttons.Children.Add(Action(request.KeepNetwork ? "Restaurar configuração anterior" : "Cancelar ação", (_, _) => dialog.DialogResult = false));
         var authorize = Action(request.KeepNetwork ? "Manter configuração" : "Autorizar e executar", (_, _) => dialog.DialogResult = true, true);
         authorize.IsEnabled = request.LicenseUrl == null;
         buttons.Children.Add(authorize); panel.Children.Add(buttons);
-        var countdown = Text("", 12, "Warning"); DockPanel.SetDock(countdown, Dock.Bottom); panel.Children.Add(countdown);
+        var countdown = Text("", 12, "Warning"); countdown.Margin = new Thickness(0, 9, 0, 0);
+        DockPanel.SetDock(countdown, Dock.Bottom); panel.Children.Add(countdown);
         if (request.LicenseUrl != null)
         {
             var license = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
@@ -524,8 +587,12 @@ public partial class MainWindow : Window
             license.Children.Add(agreement);
             DockPanel.SetDock(license, Dock.Bottom); panel.Children.Add(license);
         }
-        panel.Children.Add(new TextBox { Text = request.Details, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, BorderThickness = new Thickness(0), Background = Brushes.Transparent });
-        dialog.Content = panel;
+        var details = new TextBox { Text = request.Details, IsReadOnly = true, TextWrapping = TextWrapping.Wrap,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto, BorderThickness = new Thickness(0), Background = Brushes.Transparent, Padding = new Thickness(0) };
+        panel.Children.Add(new Border { Background = Brush("SurfaceMuted"), BorderBrush = Brush("Stroke"), BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(10), Padding = new Thickness(16), Child = details });
+        dialog.Content = new Border { Background = Brush("Surface"), BorderBrush = Brush("Stroke"), BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(14), Margin = new Thickness(16), Child = panel };
         var seconds = 45;
         var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         timer.Tick += (_, _) => { countdown.Text = $"Restauração automática em {--seconds} segundos."; if (seconds <= 0) { timer.Stop(); dialog.DialogResult = false; } };
@@ -578,21 +645,27 @@ public partial class MainWindow : Window
     {
         Heading("Atendimentos", "Suas conversas, diagnósticos e resultados em um só lugar.");
         var items = store.Data.Conversations.Where(c => c.UserId == user.Id).OrderByDescending(c => c.Created).ToList();
-        if (items.Count == 0) { PageContent.Children.Add(Card(Text("Você ainda não iniciou um atendimento. Seu histórico aparecerá aqui."))); return; }
+        if (items.Count == 0) { PageContent.Children.Add(EmptyState("history", "Seu histórico começa aqui",
+            "Quando você iniciar um atendimento, a conversa e os resultados aparecerão nesta página.")); return; }
         foreach (var item in items)
         {
-            var row = new StackPanel(); row.Children.Add(Text(item.Title, 17)); row.Children.Add(Text(item.Created.ToString("g") + "  ·  " + item.Status, 12, "Secondary"));
-            var open = Action("Abrir conversa →", (_, _) => { conversation = item; conversationTools = null; Messages.Children.Clear(); foreach (var entry in item.Entries) RenderEntry(entry); ProgressPanel.Visibility = Visibility.Collapsed; ProgressText.Text = ""; RefreshChatActions(); ShowPage("chat"); }); open.Margin = new Thickness(0, 18, 0, 0); open.HorizontalAlignment = HorizontalAlignment.Left; row.Children.Add(open); PageContent.Children.Add(Card(row));
+            var row = new StackPanel();
+            var title = Text(item.Title, 17); title.FontWeight = FontWeights.SemiBold; row.Children.Add(title);
+            row.Children.Add(Text(item.Created.ToString("g") + "  ·  " + item.Status, 12, "Secondary"));
+            var open = Action("Abrir conversa", (_, _) => { conversation = item; conversationTools = null; Messages.Children.Clear(); foreach (var entry in item.Entries) RenderEntry(entry); ProgressPanel.Visibility = Visibility.Collapsed; ProgressText.Text = ""; RefreshChatActions(); ShowPage("chat"); }); open.Margin = new Thickness(0, 17, 0, 0); row.Children.Add(open); PageContent.Children.Add(Card(row));
         }
     }
     private void Tickets()
     {
         Heading("Encaminhamentos", "Relatórios locais prontos para compartilhar com a TI. Nenhum chamado é enviado automaticamente.");
         var items = store.Data.Tickets.Where(t => user.Admin || t.UserId == user.Id).OrderByDescending(t => t.Created).ToList();
-        if (items.Count == 0) PageContent.Children.Add(Card(Text("Nenhum encaminhamento. Se o problema persistir após o atendimento, prepare um relatório pelo chat.")));
+        if (items.Count == 0) PageContent.Children.Add(EmptyState("tickets", "Nenhum encaminhamento preparado",
+            "Se o problema persistir após o atendimento, você pode preparar um relatório pelo chat."));
         foreach (var ticket in items)
         {
-            var panel = new StackPanel(); panel.Children.Add(Text(ticket.Id + "  ·  Preparado para envio", 11, "Warning")); panel.Children.Add(Text(ticket.Title, 18)); panel.Children.Add(Text(ticket.Created.ToString("g"), 12, "Secondary"));
+            var panel = new StackPanel(); panel.Children.Add(Text(ticket.Id + "  ·  Preparado para envio", 11, "Warning"));
+            var title = Text(ticket.Title, 18); title.FontWeight = FontWeights.SemiBold; title.Margin = new Thickness(0, 7, 0, 4); panel.Children.Add(title);
+            panel.Children.Add(Text(ticket.Created.ToString("g"), 12, "Secondary"));
             var detail = new TextBox { Text = ticket.Report, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, MaxHeight = 280, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
             panel.Children.Add(new Expander { Header = "Revisar relatório", Content = detail, Foreground = Brush("Secondary"), Margin = new Thickness(0, 18, 0, 18) });
             panel.Children.Add(Action("Exportar relatório .txt", (_, _) => Guard(() => { var dialog = new SaveFileDialog { FileName = ticket.Id + ".txt", Filter = "Relatório de texto|*.txt" }; if (dialog.ShowDialog(this) == true) { File.WriteAllText(dialog.FileName, ticket.Report); store.Log(user, "Relatório exportado: " + ticket.Id); MessageBox.Show(this, "Relatório exportado. Anexe-o ao canal de atendimento da sua TI."); } }))); PageContent.Children.Add(Card(panel));
@@ -601,7 +674,8 @@ public partial class MainWindow : Window
     private void Settings()
     {
         Heading("Configurações", "Um agente local conectado às ferramentas deste computador.");
-        var panel = new StackPanel(); panel.Children.Add(Text("Agente de suporte · Ollama", 18)); panel.Children.Add(Text("A IA escolhe ferramentas, consulta o Windows, solicita as alterações necessárias e verifica os resultados. O modelo recebe o histórico recente e as saídas das ferramentas no serviço local 127.0.0.1:11434.", 14, "Secondary"));
+        var panel = new StackPanel(); var agentHeading = SectionHeading("chat", "Agente de suporte · Ollama"); agentHeading.Margin = new Thickness(0, 0, 0, 8); panel.Children.Add(agentHeading);
+        panel.Children.Add(Text("A IA escolhe ferramentas, consulta o Windows, solicita as alterações necessárias e verifica os resultados. O modelo recebe o histórico recente e as saídas das ferramentas no serviço local 127.0.0.1:11434.", 14, "Secondary"));
         var enabled = Check(panel, "Usar agente IA para conduzir os atendimentos", store.Data.AiEnabled); var model = Field(panel, "Modelo com suporte a ferramentas", store.Data.Model);
         panel.Children.Add(Text("Dispositivos, Bluetooth, áudio, câmera, impressoras, IP, DNS, serviços, processos, logs e drivers do Windows Update. Alterações no Windows continuam exigindo autorização; operações elevadas também passam pelo UAC.", 12, "Secondary"));
         var save = Action("Salvar configuração", (_, _) => Guard(() => { store.Require(user, a => a.Id == user.Id); if (enabled.IsChecked == true && string.IsNullOrWhiteSpace(model.Text)) throw new InvalidOperationException("Informe o nome do modelo instalado."); var previous = (store.Data.Model, store.Data.AiEnabled); store.Commit(user, "Configuração de IA atualizada", () => { store.Data.Model = model.Text.Trim(); store.Data.AiEnabled = enabled.IsChecked == true; }, () => { store.Data.Model = previous.Model; store.Data.AiEnabled = previous.AiEnabled; }); RefreshIdentity(); MessageBox.Show(this, "Configuração salva. O agente será utilizado no próximo atendimento."); }), true); save.Margin = new Thickness(0, 22, 0, 0); panel.Children.Add(save);
@@ -619,7 +693,7 @@ public partial class MainWindow : Window
             }
             catch (Exception ex) { connectionStatus.Text = "Não foi possível verificar: " + ex.Message; }
         })); panel.Children.Add(connectionStatus); PageContent.Children.Add(Card(panel));
-        var healthPanel = new StackPanel(); healthPanel.Children.Add(Text("Monitoramento local", 18));
+        var healthPanel = new StackPanel(); var monitorHeading = SectionHeading("health", "Monitoramento local"); monitorHeading.Margin = new Thickness(0, 0, 0, 8); healthPanel.Children.Add(monitorHeading);
         healthPanel.Children.Add(Text("A coleta funciona enquanto a janela está aberta. Temperatura e SMART podem permanecer indisponíveis.", 12, "Secondary"));
         var interval = Field(healthPanel, "Intervalo entre amostras (segundos: 10–3600)", healthSettings.IntervalSeconds.ToString());
         var cpu = Field(healthPanel, "Alerta de CPU persistente (%)", healthSettings.CpuHighPercent.ToString("F0"));
@@ -646,10 +720,13 @@ public partial class MainWindow : Window
         var summary = metrics.Closed == 0
             ? "Nenhum atendimento encerrado ainda. As taxas aparecem após o usuário confirmar resolução ou preparar um encaminhamento."
             : $"Encerrados: {metrics.Closed}  ·  resolvidos pelo usuário: {metrics.Resolved} ({metrics.ResolutionRate:P0})  ·  encaminhados: {metrics.Escalated} ({metrics.EscalationRate:P0})\nTempo médio até o encerramento: {metrics.AverageClosureMinutes:F1} min  ·  em andamento: {metrics.Open}";
-        PageContent.Children.Add(Card(new StackPanel { Children = { Text("Métricas dos atendimentos locais", 17), Text(summary, 13, "Secondary") } }));
+        var metricsPanel = new StackPanel(); var metricsHeading = SectionHeading("performance", "Métricas dos atendimentos locais");
+        metricsHeading.Margin = new Thickness(0, 0, 0, 10); metricsPanel.Children.Add(metricsHeading);
+        metricsPanel.Children.Add(Text(summary, 13, "Secondary")); PageContent.Children.Add(Card(metricsPanel));
         foreach (var audit in store.Data.Audit.OrderByDescending(a => a.Time).Take(200))
         {
-            var panel = new StackPanel(); panel.Children.Add(Text(audit.Action)); panel.Children.Add(Text(audit.Time.ToString("g") + "  ·  " + audit.Actor, 11, "Secondary")); PageContent.Children.Add(Card(panel));
+            var panel = new StackPanel(); var action = Text(audit.Action); action.FontWeight = FontWeights.SemiBold; panel.Children.Add(action);
+            panel.Children.Add(Text(audit.Time.ToString("g") + "  ·  " + audit.Actor, 11, "Secondary")); PageContent.Children.Add(Card(panel));
         }
     }
     public async void CapturePreview()
@@ -685,15 +762,36 @@ public partial class MainWindow : Window
         Width = 1380; Height = 900; UpdateLayout();
         ShowPage("health");
         if (!PageContent.Children.OfType<TextBlock>().Any(t => t.Text == "Saúde do computador")) throw new InvalidOperationException("Painel de saúde não abriu.");
+        if (!PageContent.Children.OfType<StackPanel>().Any(section => section.Children.OfType<TextBlock>().Any(t => t.Text == "Ocorrências preventivas")
+            && section.Children.OfType<Viewbox>().Any()))
+            throw new InvalidOperationException("As seções de saúde precisam de cabeçalhos com ícones vetoriais.");
         await Capture("nexo-health.png");
+        if (healthStore != null)
+        {
+            healthStore.SaveSnapshot(new HealthSnapshot { CpuPercent = 37, MemoryUsedPercent = 54, Connectivity = "local",
+                CollectionStatus = "complete", Disks = [new DiskHealth("C:\\", 80, 200)] });
+            ShowPage("health"); await Capture("nexo-health-data.png");
+            Width = 1060; Height = 720; UpdateLayout(); await Capture("nexo-health-data-small.png");
+            Width = 1380; Height = 900; UpdateLayout();
+        }
         ShowPage("settings");
-        if (!PageContent.Children.OfType<Border>().Any(b => b.Child is StackPanel s && s.Children.OfType<TextBlock>().Any(t => t.Text == "Monitoramento local"))) throw new InvalidOperationException("Controles de monitoramento não abriram.");
+        if (!PageContent.Children.OfType<Border>().Any(b => b.Child is StackPanel s && s.Children.OfType<StackPanel>().Any(h => h.Children.OfType<TextBlock>().Any(t => t.Text == "Monitoramento local")))) throw new InvalidOperationException("Controles de monitoramento não abriram.");
         await Capture("nexo-health-settings.png");
+        Width = 1060; Height = 720; UpdateLayout(); await Capture("nexo-health-settings-small.png");
+        Width = 1380; Height = 900; UpdateLayout();
+        foreach (var (target, file) in new[] { ("history", "nexo-history-empty.png"), ("tickets", "nexo-tickets.png"),
+            ("audit", "nexo-audit.png"), ("profile", "nexo-profile.png") })
+        {
+            ShowPage(target);
+            if (PageContent.Children.Count == 0) throw new InvalidOperationException("A página " + target + " está vazia.");
+            await Capture(file);
+        }
         ShowPage("chat");
         store.Data.AiEnabled = false;
         NewConversation(); ShowPage("chat"); await Send("Olá, preciso de ajuda");
         if (conversation?.Entries.Count != 2 || busy) throw new InvalidOperationException("Falha no fluxo de conversa local.");
         await Capture("nexo-conversation.png");
+        ShowPage("history"); await Capture("nexo-history.png"); ShowPage("chat");
         AddEntry("assistant", "Deseja que eu ative a conexão?");
         if (quickReplyPanel?.Children.Count != 2) throw new InvalidOperationException("Atalhos não apareceram na pergunta de confirmação.");
         Composer.Text = "Meu rascunho";
