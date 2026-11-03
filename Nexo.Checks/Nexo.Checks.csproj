@@ -12,4 +12,5 @@
 <ItemGroup><Compile Include="../Nexo.Support/MonitoringEngine.cs" Link="MonitoringEngine.cs"/><Compile Include="../Nexo.Support/WindowsHealthSampler.cs" Link="WindowsHealthSampler.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/WindowsEventCollector.cs" Link="WindowsEventCollector.cs"/><Compile Include="../Nexo.Support/EventAnalyzer.cs" Link="EventAnalyzer.cs"/><Compile Include="../Nexo.Support/DiagnosticEngine.cs" Link="DiagnosticEngine.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/HealthReportPresentation.cs" Link="HealthReportPresentation.cs"/></ItemGroup>
+<ItemGroup><Compile Include="../Nexo.Support/OperationSupervisor.cs" Link="OperationSupervisor.cs"/><Compile Include="../Nexo.Support/DriverStoreInventory.cs" Link="DriverStoreInventory.cs"/></ItemGroup>
 </Project>

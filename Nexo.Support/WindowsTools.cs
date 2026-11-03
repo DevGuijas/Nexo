@@ -25,6 +25,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private DateTimeOffset? observedUpdatesAt;
     private OfficialDriverSource.DriverOffer? observedNvidiaDriver;
     private DateTimeOffset? observedNvidiaDriverAt;
+    private bool? lastApproval;
     private static readonly IReadOnlyDictionary<string, JsonElement> toolSchemas = ToolCatalog.ForScope(false)
         .Select(tool => JsonSerializer.SerializeToElement(tool))
         .ToDictionary(tool => tool.GetProperty("function").GetProperty("name").GetString()!, tool => tool.GetProperty("function").GetProperty("parameters").Clone(), StringComparer.Ordinal);
@@ -114,6 +115,45 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     }
 
     public async Task<string> Execute(string name, JsonElement args, CancellationToken token)
+    {
+        if (!ToolCatalog.IsMutation(name)) return await ExecuteCore(name, args, token);
+        lastApproval = null;
+        string? output = null;
+        try { return output = await ExecuteCore(name, args, token); }
+        finally
+        {
+            var state = "unknown";
+            if (output != null)
+            {
+                try
+                {
+                    using var result = JsonDocument.Parse(output);
+                    var root = result.RootElement;
+                    state = root.TryGetProperty("state", out var reportedState) && reportedState.ValueKind == JsonValueKind.String && reportedState.GetString() == "unknown" ? "unknown"
+                        : root.TryGetProperty("denied", out var denied) && denied.ValueKind == JsonValueKind.True ? "denied"
+                        : root.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True ? "reported"
+                        : "failed";
+                }
+                catch (JsonException) { state = "unknown"; }
+            }
+            try
+            {
+                using var operational = new OperationalStore(store.Root);
+                operational.SaveIntervention(new InterventionRecord
+                {
+                    Action = name, Target = args.GetRawText()[..Math.Min(args.GetRawText().Length, 300)],
+                    State = state, Risk = name.Contains("driver") || name is "set_dns" or "set_ipv4" ? "high" : "medium",
+                    Before = "Consulte as observações anteriores no histórico do atendimento.",
+                    After = output == null ? "Sem resultado confirmado" : output[..Math.Min(output.Length, 1500)],
+                    Summary = state == "reported" ? "Executor relatou conclusão; funcionamento depende de verificação." : "Resultado não confirmado ou recusado.",
+                    CommandTemplate = name, Authorized = lastApproval == true
+                });
+            }
+            catch (Exception ex) { store.Log(actor, "Falha ao registrar intervenção operacional: " + ex.Message); }
+        }
+    }
+
+    private async Task<string> ExecuteCore(string name, JsonElement args, CancellationToken token)
     {
         store.Require(actor, a => a.Diagnose);
         ValidateArguments(name, args);
@@ -234,6 +274,11 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 return Ok(await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 12 Name,Id,@{N='MemoryMB';E={[math]::Round($_.WorkingSet64/1MB)}},Responding)", token));
             case "get_health_report":
                 using (var operational = new OperationalStore(store.Root)) return Ok(HealthReportPresentation.FromStore(operational));
+            case "get_driver_store":
+                var observedId = Value(args, "device_id");
+                if (!Fresh(observedDevicesAt) || !observedDevices.ContainsKey(observedId)) throw new InvalidOperationException("Consulte get_hardware_inventory e escolha um ID exato antes de consultar o INF.");
+                var package = await DriverStoreInventory.Read(observedId, token);
+                return Ok(package == null ? new { available = false, note = "O Windows não retornou INF instalado para este dispositivo. O histórico de pacotes não foi confirmado." } : (object)new { available = true, package, note = "Este é o pacote associado ao dispositivo observado, não um catálogo completo de drivers." });
             case "set_dns":
             case "set_ipv4":
                 var index = Number(args, "interface_index");
@@ -448,6 +493,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         try
         {
             var result = await confirm(request);
+            lastApproval = result;
             token.ThrowIfCancellationRequested();
             store.Require(actor, a => a.Repair);
             store.Log(actor, (result ? "Autorizado: " : "Recusado: ") + request.Title);
@@ -478,18 +524,20 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         var dir = Path.Combine(store.Root, "operations", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
         var output = Path.Combine(dir, "result.json");
         var wrapped = "$ErrorActionPreference='Stop'; try { $data=& { " + script + " }; $result=@{success=$true;data=$data} } catch { $result=@{success=$false;error=$_.Exception.Message} }; $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath " + Quote(output) + " -Encoding UTF8";
+        var finished = false;
         try
         {
             token.ThrowIfCancellationRequested();
             using var process = StartElevated(wrapped);
-            // Do not kill an in-flight device/driver operation on UI cancellation; report its actual final state.
-            await process.WaitForExitAsync();
-            if (!File.Exists(output)) return JsonSerializer.Serialize(new { success = false, error = "O processo elevado não retornou resultado. Estado não confirmado." });
+            var state = await OperationSupervisor.Wait(async () => { await process.WaitForExitAsync(); return process.ExitCode; }, TimeSpan.FromMinutes(15), token);
+            finished = process.HasExited;
+            if (state == OperationState.Unknown) return JsonSerializer.Serialize(new { success = false, state = "unknown", error = "O processo elevado não confirmou o término no prazo ou a espera foi cancelada. A ação pode continuar em segundo plano; confira o estado antes de repetir." });
+            if (state == OperationState.Failed || !File.Exists(output)) return JsonSerializer.Serialize(new { success = false, state = "unknown", error = "O processo elevado não retornou resultado válido. Estado não confirmado." });
             return await File.ReadAllTextAsync(output, CancellationToken.None);
         }
         finally
         {
-            try { if (File.Exists(output)) File.Delete(output); Directory.Delete(dir); }
+            try { if (finished) { if (File.Exists(output)) File.Delete(output); Directory.Delete(dir); } }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
         }

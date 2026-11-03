@@ -11,6 +11,7 @@ try
     MonitoringChecks.Run(Assert);
 DiagnosticChecks.Run(Assert);
 HealthAgentChecks.Run(Assert);
+RecoveryChecks.Run(Assert);
     var freshDirectRoot = Path.Combine(root, "direct-fresh");
     var freshDirectStore = new Store(freshDirectRoot, directAccess: true);
     var directSession = freshDirectStore.GetLocalSession();
