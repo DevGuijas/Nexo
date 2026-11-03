@@ -8,6 +8,7 @@ void Reject(Action action, string title) { try { action(); } catch (InvalidOpera
 try
 {
     HealthDataChecks.Run(Path.Combine(root, "operational"), Assert);
+    MonitoringChecks.Run(Assert);
     var freshDirectRoot = Path.Combine(root, "direct-fresh");
     var freshDirectStore = new Store(freshDirectRoot, directAccess: true);
     var directSession = freshDirectStore.GetLocalSession();
