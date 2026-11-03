@@ -14,6 +14,9 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private readonly SupportService support = new(store);
     private readonly Dictionary<int, string> observedInterfaces = [];
     private readonly Dictionary<int, ObservedAdapter> observedAdapters = [];
+    private readonly Dictionary<int, JsonElement> observedNetworkDetails = [];
+    private readonly Dictionary<string, JsonElement> observedServiceDetails = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, JsonElement> observedPrinterDetails = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<int, bool> configurableInterfaces = [];
     private readonly HashSet<int> physicalInterfaces = [];
     private readonly Dictionary<string, (string Topic, Device Device)> observedDevices = new(StringComparer.OrdinalIgnoreCase);
@@ -26,6 +29,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private OfficialDriverSource.DriverOffer? observedNvidiaDriver;
     private DateTimeOffset? observedNvidiaDriverAt;
     private bool? lastApproval;
+    private InterventionRecord? currentIntervention;
     private static readonly IReadOnlyDictionary<string, JsonElement> toolSchemas = ToolCatalog.ForScope(false)
         .Select(tool => JsonSerializer.SerializeToElement(tool))
         .ToDictionary(tool => tool.GetProperty("function").GetProperty("name").GetString()!, tool => tool.GetProperty("function").GetProperty("parameters").Clone(), StringComparer.Ordinal);
@@ -118,6 +122,13 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     {
         if (!ToolCatalog.IsMutation(name)) return await ExecuteCore(name, args, token);
         lastApproval = null;
+        currentIntervention = new InterventionRecord
+        {
+            Action = name, Target = args.ValueKind == JsonValueKind.Object ? args.GetRawText() : "{}",
+            Risk = name.Contains("driver") || name is "set_dns" or "set_ipv4" ? "high" : "medium",
+            Before = CaptureObservedBefore(args), CommandTemplate = name
+        };
+        MoveIntervention("proposed", "Ação proposta; ainda não autorizada nem executada.");
         string? output = null;
         try { return output = await ExecuteCore(name, args, token); }
         finally
@@ -138,19 +149,44 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             }
             try
             {
-                using var operational = new OperationalStore(store.Root);
-                operational.SaveIntervention(new InterventionRecord
-                {
-                    Action = name, Target = args.GetRawText()[..Math.Min(args.GetRawText().Length, 300)],
-                    State = state, Risk = name.Contains("driver") || name is "set_dns" or "set_ipv4" ? "high" : "medium",
-                    Before = "Consulte as observações anteriores no histórico do atendimento.",
-                    After = output == null ? "Sem resultado confirmado" : output[..Math.Min(output.Length, 1500)],
-                    Summary = state == "reported" ? "Executor relatou conclusão; funcionamento depende de verificação." : "Resultado não confirmado ou recusado.",
-                    CommandTemplate = name, Authorized = lastApproval == true
-                });
+                currentIntervention!.After = output ?? JsonSerializer.Serialize(new { status = "unavailable", reason = "A execução terminou sem resultado retornado." });
+                currentIntervention.Summary = state == "reported" ? "Executor relatou conclusão; funcionamento depende de verificação." : "Resultado não confirmado ou recusado.";
+                MoveIntervention(state, currentIntervention.Summary);
             }
-            catch (Exception ex) { store.Log(actor, "Falha ao registrar intervenção operacional: " + ex.Message); }
+            catch (Exception ex) { try { store.Log(actor, "Falha ao registrar intervenção operacional: " + ex.Message); } catch { /* Preserve the original action result. */ } }
+            finally { currentIntervention = null; }
         }
+    }
+
+    private string CaptureObservedBefore(JsonElement args)
+    {
+        if (args.ValueKind == JsonValueKind.Object)
+        {
+            if (args.TryGetProperty("device_id", out var device) && device.ValueKind == JsonValueKind.String
+                && observedDevices.TryGetValue(device.GetString() ?? "", out var found))
+                return JsonSerializer.Serialize(new { status = "observed", source = "device_inventory", device = found.Device });
+            if (args.TryGetProperty("interface_index", out var index) && index.TryGetInt32(out var number)
+                && observedNetworkDetails.TryGetValue(number, out var adapter))
+                return JsonSerializer.Serialize(new { status = "observed", source = "network_inventory", adapter });
+            if (args.TryGetProperty("service", out var service) && service.ValueKind == JsonValueKind.String
+                && observedServiceDetails.TryGetValue(service.GetString() ?? "", out var serviceDetail))
+                return JsonSerializer.Serialize(new { status = "observed", source = "service_inventory", service = serviceDetail });
+            if (args.TryGetProperty("printer_name", out var printer) && printer.ValueKind == JsonValueKind.String
+                && observedPrinterDetails.TryGetValue(printer.GetString() ?? "", out var printerDetail))
+                return JsonSerializer.Serialize(new { status = "observed", source = "printer_inventory", printer = printerDetail });
+        }
+        return JsonSerializer.Serialize(new { status = "unavailable", reason = "Nenhuma leitura anterior estruturada para este alvo foi registrada pelo executor." });
+    }
+
+    private void MoveIntervention(string state, string details)
+    {
+        if (currentIntervention == null) return;
+        if (currentIntervention.Transitions.LastOrDefault()?.State != state)
+            currentIntervention.Transitions.Add(new InterventionTransition(DateTimeOffset.UtcNow, state, details));
+        currentIntervention.State = state;
+        currentIntervention.Authorized = lastApproval == true;
+        using var operational = new OperationalStore(store.Root);
+        operational.SaveIntervention(currentIntervention);
     }
 
     private async Task<string> ExecuteCore(string name, JsonElement args, CancellationToken token)
@@ -161,7 +197,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         switch (name)
         {
             case "get_network":
-                observedInterfaces.Clear(); observedAdapters.Clear(); configurableInterfaces.Clear(); physicalInterfaces.Clear();
+                observedInterfaces.Clear(); observedAdapters.Clear(); observedNetworkDetails.Clear(); configurableInterfaces.Clear(); physicalInterfaces.Clear();
                 observedNetworkAt = null;
                 var network = await SupportService.Powershell(NetworkQuery, token);
                 using (var document = JsonDocument.Parse(network))
@@ -170,6 +206,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                     {
                         var observed = new ObservedAdapter(adapter.GetProperty("Index").GetInt32(), adapter.GetProperty("Guid").GetString()!, adapter.GetProperty("Name").GetString()!, adapter.GetProperty("Status").GetString()!, adapter.GetProperty("Disabled").GetBoolean());
                         observedInterfaces[observed.Index] = observed.Name; observedAdapters[observed.Index] = observed;
+                        observedNetworkDetails[observed.Index] = adapter.Clone();
                         configurableInterfaces[observed.Index] = NetworkAssessment.CanConfigure(adapter);
                         if (adapter.GetProperty("Hardware").GetBoolean() && !adapter.GetProperty("Virtual").GetBoolean() && adapter.GetProperty("InterfaceType").GetInt32() == 6) physicalInterfaces.Add(observed.Index);
                     }
@@ -259,21 +296,31 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                     return Ok(inventory.RootElement.Clone());
                 }
             case "get_printers":
-                observedPrinters.Clear();
+                observedPrinters.Clear(); observedPrinterDetails.Clear();
                 observedPrintersAt = null;
                 var printers = await SupportService.Powershell("ConvertTo-Json -Depth 5 -Compress -InputObject @(Get-Printer | ForEach-Object { $p=$_; [pscustomobject]@{Name=$p.Name;Status=[string]$p.PrinterStatus;Driver=$p.DriverName;Port=$p.PortName;Jobs=@(Get-PrintJob -PrinterName $p.Name -ErrorAction SilentlyContinue | Select-Object ID,JobStatus)} })", token);
                 using (var printerDoc = JsonDocument.Parse(printers)) foreach (var entry in printerDoc.RootElement.EnumerateArray())
-                    if (entry.TryGetProperty("Name", out var printerName) && printerName.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(printerName.GetString())) observedPrinters.Add(printerName.GetString()!);
+                    if (entry.TryGetProperty("Name", out var printerName) && printerName.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(printerName.GetString()))
+                    { observedPrinters.Add(printerName.GetString()!); observedPrinterDetails[printerName.GetString()!] = entry.Clone(); }
                 observedPrintersAt = DateTimeOffset.UtcNow;
                 return Ok(printers);
             case "get_services":
-                return Ok(await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Service -Name Audiosrv,AudioEndpointBuilder,Spooler,bthserv,WlanSvc | Select-Object Name,@{N='Status';E={[string]$_.Status}},@{N='StartType';E={[string]$_.StartType}})", token));
+                var serviceRaw = await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Service -Name Audiosrv,AudioEndpointBuilder,Spooler,bthserv,WlanSvc | Select-Object Name,@{N='Status';E={[string]$_.Status}},@{N='StartType';E={[string]$_.StartType}})", token);
+                observedServiceDetails.Clear();
+                using (var serviceDoc = JsonDocument.Parse(serviceRaw)) foreach (var entry in serviceDoc.RootElement.EnumerateArray())
+                    if (entry.TryGetProperty("Name", out var serviceName) && serviceName.ValueKind == JsonValueKind.String) observedServiceDetails[serviceName.GetString() ?? ""] = entry.Clone();
+                return Ok(serviceRaw);
             case "get_recent_errors":
                 return Ok(await SupportService.Powershell("$log=& \"$env:WINDIR\\System32\\wevtutil.exe\" qe System '/q:*[System[(Level=2) and TimeCreated[timediff(@SystemTime) <= 86400000]]]' /c:12 /rd:true /f:text; if($LASTEXITCODE -ne 0){throw 'Não foi possível ler os eventos do sistema'}; $text=$log -join \"`n\"; if($text.Length -gt 7000){$text.Substring(0,7000)}else{$text}", token));
             case "get_processes":
                 return Ok(await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 12 Name,Id,@{N='MemoryMB';E={[math]::Round($_.WorkingSet64/1MB)}},Responding)", token));
             case "get_health_report":
-                using (var operational = new OperationalStore(store.Root)) return Ok(HealthReportPresentation.FromStore(operational));
+                using (var operational = new OperationalStore(store.Root))
+                {
+                    HealthThresholds limits;
+                    try { limits = HealthSettings.Load(store.Root).Thresholds(); } catch { limits = new HealthThresholds(); }
+                    return Ok(HealthReportPresentation.FromStore(operational, limits));
+                }
             case "get_driver_store":
                 var observedId = Value(args, "device_id");
                 if (!Fresh(observedDevicesAt) || !observedDevices.ContainsKey(observedId)) throw new InvalidOperationException("Consulte get_hardware_inventory e escolha um ID exato antes de consultar o INF.");
@@ -384,8 +431,10 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 if (!await Approve(new ChangeRequest("Instalar driver NVIDIA " + official.Version,
                     "Placa: " + nvidiaDevice.Name + "\nVersão atual: " + nvidiaDevice.DriverVersion + "\nNova versão: " + official.Version
                     + "\nFonte: " + official.Url + "\nO download tem cerca de 1 GB. A tela pode piscar; talvez seja necessário reiniciar."
-                    + "\nO Nexo não reiniciará o computador. Leia e aceite a licença da NVIDIA para autorizar o download e a instalação.",
+                    + "\nO Nexo não reiniciará o computador. Leia e aceite a licença da NVIDIA para autorizar o download e a instalação. Antes de instalar, o Nexo tentará criar e confirmar um ponto de restauração; se indisponível, a instalação será interrompida.",
                     LicenseUrl: OfficialDriverSource.NvidiaLicense), token)) return Denied();
+                var vendorRecovery = await PrepareDriverRecovery(token);
+                if (vendorRecovery != null) return vendorRecovery;
                 token.ThrowIfCancellationRequested();
                 progress.Report("Baixando o driver completo da NVIDIA e validando a assinatura digital…");
                 var driverFile = await OfficialDriverSource.DownloadNvidiaDriver(official, token);
@@ -404,7 +453,9 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 if (!Fresh(observedUpdatesAt) || !observedUpdates.TryGetValue(updateId, out var selectedUpdate) || !Guid.TryParse(updateId, out _)) throw new InvalidOperationException("Consulte os drivers disponíveis e use um Id retornado nesta etapa.");
                 if (!Fresh(observedDevicesAt)) throw new InvalidOperationException("Faça um novo diagnóstico do dispositivo antes de instalar o driver.");
                 var driverTarget = MatchDriverTarget(selectedUpdate.HardwareId, observedDevices.Values.Select(item => item.Device));
-                if (!await Approve(new ChangeRequest("Instalar driver pela fonte do Windows", "Baixar e instalar: " + selectedUpdate.Title + " (" + updateId + ", revisão " + selectedUpdate.Revision + ") para “" + driverTarget.Name + "”. Origem: fonte de atualizações configurada no Windows. Pode interromper o dispositivo e exigir reinicialização. A instalação inclui aceitar os termos do fornecedor. O Nexo não reiniciará o PC automaticamente."), token)) return Denied();
+                if (!await Approve(new ChangeRequest("Instalar driver pela fonte do Windows", "Baixar e instalar: " + selectedUpdate.Title + " (" + updateId + ", revisão " + selectedUpdate.Revision + ") para “" + driverTarget.Name + "”. Origem: fonte de atualizações configurada no Windows. Pode interromper o dispositivo e exigir reinicialização. A instalação inclui aceitar os termos do fornecedor. O Nexo não reiniciará o PC automaticamente. Antes da instalação, o Nexo tentará criar e confirmar um ponto de restauração; se indisponível, a instalação será interrompida."), token)) return Denied();
+                var updateRecovery = await PrepareDriverRecovery(token);
+                if (updateRecovery != null) return updateRecovery;
                 return VerifyDriverInstallationResult(await Elevated(DriverInstallationScript(updateId, selectedUpdate.Title, selectedUpdate.HardwareId, selectedUpdate.Revision, driverTarget.Id), token));
             default: throw new InvalidOperationException("Ferramenta não permitida: " + name);
         }
@@ -497,6 +548,8 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             token.ThrowIfCancellationRequested();
             store.Require(actor, a => a.Repair);
             store.Log(actor, (result ? "Autorizado: " : "Recusado: ") + request.Title);
+            MoveIntervention(result ? "authorized" : "denied", request.Title);
+            if (result) MoveIntervention("executing", "Autorização registrada; execução pode começar.");
             return result;
         }
         catch (OperationCanceledException)
@@ -504,6 +557,19 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             store.Log(actor, "Cancelado: " + request.Title);
             throw;
         }
+    }
+    private async Task<string?> PrepareDriverRecovery(CancellationToken token)
+    {
+        progress.Report("Criando e confirmando um ponto de restauração antes do driver…");
+        var result = await RestorePointProtection.Prepare(Elevated, token);
+        if (!result.Ready)
+        {
+            MoveIntervention("protection_unavailable", result.Reason);
+            return JsonSerializer.Serialize(new { success = false, recoveryProtectionUnavailable = true, error = "A proteção de restauração não foi confirmada; o driver não foi instalado. " + result.Reason });
+        }
+        currentIntervention!.RecoveryPointSequence = result.SequenceNumber;
+        MoveIntervention("protected", "Ponto de restauração " + result.SequenceNumber + " confirmado antes da instalação.");
+        return null;
     }
     private static string Denied() => JsonSerializer.Serialize(new { success = false, denied = true, message = "Ação recusada pelo usuário. Não executar nem repetir." });
     public static string Ok(object data) => JsonSerializer.Serialize(new { success = true, data });

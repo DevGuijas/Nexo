@@ -57,6 +57,19 @@ internal static class MonitoringChecks
             check(sampler.Count == count, "Cancelamento impede nova coleta");
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+        var slowRoot = Path.Combine(Path.GetTempPath(), "nexo-monitor-slow-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var slowStore = new OperationalStore(slowRoot);
+            var current = At(-7200, 95);
+            var slowSettings = new HealthSettings { IntervalSeconds = 3600 };
+            using var engine = new MonitoringEngine(new FakeSampler(() => current), slowStore, TimeSpan.FromSeconds(slowSettings.IntervalSeconds), slowSettings.Thresholds());
+            engine.RunOnceAsync(CancellationToken.None).GetAwaiter().GetResult();
+            current = At(-3600, 95); engine.RunOnceAsync(CancellationToken.None).GetAwaiter().GetResult();
+            current = At(0, 95); engine.RunOnceAsync(CancellationToken.None).GetAwaiter().GetResult();
+            check(slowStore.RecentFindings(10).Any(f => f.Category == "cpu"), "Intervalo configurável de uma hora ainda permite alerta persistente");
+        }
+        finally { if (Directory.Exists(slowRoot)) Directory.Delete(slowRoot, true); }
         if (Environment.GetEnvironmentVariable("NEXO_LIVE_SAMPLE") == "1")
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));

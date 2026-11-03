@@ -10,7 +10,8 @@ public sealed class HealthSettings
     public double DiskLowFreePercent { get; set; } = 10;
     public int RetentionDays { get; set; } = 30;
 
-    public HealthThresholds Thresholds() => new() { CpuHighPercent = CpuHighPercent, DiskLowFreePercent = DiskLowFreePercent };
+    public HealthThresholds Thresholds() => new() { CpuHighPercent = CpuHighPercent, DiskLowFreePercent = DiskLowFreePercent,
+        MaxSampleGap = TimeSpan.FromSeconds(Math.Max(90, IntervalSeconds * 1.5)) };
     public void Validate()
     {
         if (IntervalSeconds is < 10 or > 3600 || CpuHighPercent is < 50 or > 100 || DiskLowFreePercent is < 1 or > 50 || RetentionDays is < 1 or > 365)

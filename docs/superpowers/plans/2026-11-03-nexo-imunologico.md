@@ -1,6 +1,6 @@
 # Nexo Imunológico Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Add local, evidence-based monitoring, diagnosis, prevention and assisted recovery to the existing Nexo.
 
@@ -35,11 +35,11 @@
 
 **Interfaces:** Produce `HealthSnapshot`, `HealthFinding`, `SystemEvent`, `InterventionRecord`; `OperationalStore(string root)` with `SaveSnapshot`, `SaveFindings`, `SaveEvents`, `SaveIntervention`, `RecentSnapshots`, `RecentFindings`, `RecentEvents`, `Prune(TimeSpan)`.
 
-- [ ] Write `HealthDataChecks` with a temporary profile: round trip snapshots/findings/events/interventions; retention deletes only old operational rows; legacy `data.json` stays byte-for-byte intact; unavailable/corrupt database returns a typed error.
-- [ ] Run `dotnet run --project Nexo.Checks -c Release`; expected RED because the operational types/behavior do not exist.
-- [ ] Implement SQLite schema/versioning and parameterized operations, no raw chat text in metric rows.
-- [ ] Run `dotnet run --project Nexo.Checks -c Release`; expected full suite green.
-- [ ] Commit Task 1.
+- [x] Write `HealthDataChecks` with a temporary profile: round trip snapshots/findings/events/interventions; retention deletes only old operational rows; legacy `data.json` stays byte-for-byte intact; unavailable/corrupt database returns a typed error.
+- [x] Run `dotnet run --project Nexo.Checks -c Release`; expected RED because the operational types/behavior do not exist.
+- [x] Implement SQLite schema/versioning and parameterized operations, no raw chat text in metric rows.
+- [x] Run `dotnet run --project Nexo.Checks -c Release`; expected full suite green.
+- [x] Commit Task 1.
 
 ### Task 2: Continuous sampler and preventive rules
 
@@ -47,11 +47,11 @@
 
 **Interfaces:** Consume `HealthSnapshot`/`OperationalStore`; produce `IHealthSampler.Sample(CancellationToken)`, `MonitoringEngine.Start/Stop`, `HealthRules.Evaluate(IReadOnlyList<HealthSnapshot>, HealthThresholds)`.
 
-- [ ] Write tests for sustained CPU, memory growth, low disk, stopped automatic service, network failures, missing samples, duplicate suppression and cancellation. Use a fake sampler only at the Windows boundary.
-- [ ] Run Checks; expected RED for missing monitoring behavior.
-- [ ] Implement bounded Windows read-only collection and serialized periodic scheduling. Sensor readings not available from the OS remain unavailable.
-- [ ] Run Checks and a read-only live sample; expected green, bounded output and no mutation.
-- [ ] Commit Task 2.
+- [x] Write tests for sustained CPU, memory growth, low disk, stopped automatic service, network failures, missing samples, duplicate suppression and cancellation. Use a fake sampler only at the Windows boundary.
+- [x] Run Checks; expected RED for missing monitoring behavior.
+- [x] Implement bounded Windows read-only collection and serialized periodic scheduling. Sensor readings not available from the OS remain unavailable.
+- [x] Run Checks and a read-only live sample; expected green, bounded output and no mutation.
+- [x] Commit Task 2.
 
 ### Task 3: Structured Windows events and deterministic report
 
@@ -59,11 +59,11 @@
 
 **Interfaces:** Consume snapshots/events/findings; produce `WindowsEventCollector.Collect(maxAge,maxPerLog,token)`, `EventAnalyzer.Analyze`, `DiagnosticEngine.BuildReport` with evidence, cause hypothesis, severity, impact, recommendation and bounded confidence.
 
-- [ ] Write tests for recurrence, mixed log sources, partial failures, event timestamp, unsupported sensor and no-evidence conclusions.
-- [ ] Run Checks; expected RED.
-- [ ] Implement bounded System/Application/Setup collection; retain metadata rather than full event messages; generate typed reports through deterministic rules.
-- [ ] Run Checks and optional read-only live event query; expected green.
-- [ ] Commit Task 3.
+- [x] Write tests for recurrence, mixed log sources, partial failures, event timestamp, unsupported sensor and no-evidence conclusions.
+- [x] Run Checks; expected RED.
+- [x] Implement bounded System/Application/Setup collection; retain metadata rather than full event messages; generate typed reports through deterministic rules.
+- [x] Run Checks and optional read-only live event query; expected green.
+- [x] Commit Task 3.
 
 ### Task 4: Integrate reports with local AI and offline fallback
 
@@ -71,11 +71,11 @@
 
 **Interfaces:** Consume `DiagnosticReport`; expose `get_health_report` as read-only tool; model receives structured, size-limited evidence; deterministic report is available if Ollama fails.
 
-- [ ] Write tests for a report tool, malformed/missing report, read-only scope, prompt injection in event/provider names and unavailable Ollama fallback.
-- [ ] Run Checks; expected RED.
-- [ ] Implement controller/executor integration without a generic command pathway.
-- [ ] Run Checks and existing agent evaluations; expected green and no new mutation.
-- [ ] Commit Task 4.
+- [x] Write tests for a report tool, malformed/missing report, read-only scope, prompt injection in event/provider names and unavailable Ollama fallback.
+- [x] Run Checks; expected RED.
+- [x] Implement controller/executor integration without a generic command pathway.
+- [x] Run Checks and existing agent evaluations; expected green and no new mutation.
+- [x] Commit Task 4.
 
 ### Task 5: Supervised recovery and driver store visibility
 
@@ -83,11 +83,11 @@
 
 **Interfaces:** Consume `OperationalStore`; produce bounded `OperationSupervisor.Wait` state `completed/failed/unknown`, action ledger with before/after/authorization; read-only driver package inventory tied to observed device. Existing action whitelist and confirmations remain.
 
-- [ ] Write tests for timed-out elevated operation, cancellation after launch, refusal, observed device mismatch, offline driver inventory and result not confirmed.
-- [ ] Run Checks; expected RED.
-- [ ] Integrate supervision and intervention records; expose installed driver package/INF details and report when recovery protection is unavailable. Do not run real driver installation in tests.
-- [ ] Run Checks plus network/driver regressions; expected green.
-- [ ] Commit Task 5.
+- [x] Write tests for timed-out elevated operation, cancellation after launch, refusal, observed device mismatch, offline driver inventory and result not confirmed.
+- [x] Run Checks; expected RED.
+- [x] Integrate supervision and intervention records; expose installed driver package/INF details and report when recovery protection is unavailable. Do not run real driver installation in tests.
+- [x] Run Checks plus network/driver regressions; expected green.
+- [x] Commit Task 5.
 
 ### Task 6: Dashboard, scenario harness and TCC evidence
 
@@ -95,11 +95,11 @@
 
 **Interfaces:** Consume `OperationalStore`, monitoring and diagnostic report; produce live health dashboard, occurrences/events/recovery/driver sections, controls for interval/threshold/retention, seven controlled scenario fixtures and an experimental protocol.
 
-- [ ] Write scenario tests for the seven required faults with expected detection, false positive and validation status; create UI state tests around view-model/presentation data rather than source text.
-- [ ] Run Checks; expected RED.
-- [ ] Implement WPF navigation/views with the existing visual system and real data. Document lab instructions and mark unexecuted real results pending.
-- [ ] Run build, Checks, setup checks, simulated PowerShell regressions, offline local smoke test and WPF preview; expected green with limitations recorded.
-- [ ] Commit Task 6.
+- [x] Write scenario tests for the seven required faults with expected detection, false positive and validation status; create UI state tests around view-model/presentation data rather than source text.
+- [x] Run Checks; expected RED.
+- [x] Implement WPF navigation/views with the existing visual system and real data. Document lab instructions and mark unexecuted real results pending.
+- [x] Run build, Checks, setup checks, simulated PowerShell regressions, offline local smoke test and WPF preview; expected green with limitations recorded.
+- [x] Commit Task 6.
 
 ## Completion gate
 

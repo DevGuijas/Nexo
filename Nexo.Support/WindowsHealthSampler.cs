@@ -33,6 +33,7 @@ public sealed class WindowsHealthSampler : IHealthSampler
         try
         {
             result.Adapters = NetworkInterface.GetAllNetworkInterfaces()
+                .Where(n => n.NetworkInterfaceType is not (NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel))
                 .Select(n => new AdapterHealth(n.Id, n.Name, n.OperationalStatus.ToString(), n.OperationalStatus == OperationalStatus.Up)).ToList();
             result.Connectivity = result.Adapters.Any(a => a.Enabled) ? "local" : "none";
         }

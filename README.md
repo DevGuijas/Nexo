@@ -4,7 +4,7 @@ Aplicativo C# / WPF com IA local que escolhe ferramentas do Windows, executa aç
 
 ## Saúde do computador (ramo de desenvolvimento)
 
-A página **Saúde do PC** mostra leituras locais, ocorrências persistentes, eventos do Windows e intervenções registradas enquanto o aplicativo está aberto. **Configurações** permite ajustar intervalo, limiares de CPU/disco e retenção. O banco operacional SQLite fica separado das conversas. O agente local pode consultar `get_health_report`; sem Ollama, o aplicativo apresenta o relatório determinístico disponível. Um processo elevado sem resultado no prazo fica em estado **desconhecido**, nunca como correção concluída. O INF instalado pode ser consultado após identificar o dispositivo. Consulte o [protocolo de avaliação](docs/AVALIACAO-SISTEMA-IMUNOLOGICO.md) para os sete cenários e os limites da validação.
+A página **Saúde do PC** mostra leituras locais, ocorrências persistentes, eventos do Windows e intervenções registradas enquanto o aplicativo está aberto. **Configurações** permite ajustar intervalo, limiares de CPU/disco e retenção. O banco operacional SQLite fica separado das conversas. O agente local pode consultar `get_health_report`; sem Ollama, o aplicativo apresenta o relatório determinístico disponível. Um processo elevado sem resultado no prazo fica em estado **desconhecido**, nunca como correção concluída. O INF instalado pode ser consultado após identificar o dispositivo, sem busca online quando o pedido se limita ao INF. Antes de instalar um driver, o Nexo exige um ponto de restauração confirmado; se o Windows não puder criá-lo, a instalação é interrompida. Consulte o [protocolo de avaliação](docs/AVALIACAO-SISTEMA-IMUNOLOGICO.md) para os sete cenários e os limites da validação.
 
 ## Abrir
 

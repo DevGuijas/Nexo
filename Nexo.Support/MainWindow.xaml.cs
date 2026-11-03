@@ -53,10 +53,11 @@ public partial class MainWindow : Window
         };
     }
     private static TextBlock Text(string text, double size = 14, string color = "#E9EDF5") => new() { Text = text, FontSize = size, Foreground = Brush(color), TextWrapping = TextWrapping.Wrap };
+    private static string MetricPercent(double? value) => value.HasValue ? value.Value.ToString("F0") + "%" : "indisponível";
     private static SolidColorBrush Brush(string hex) => new((Color)ColorConverter.ConvertFromString(hex));
     private string OfflineHealthReport()
     {
-        try { using var local = new OperationalStore(store.Root); return HealthReportPresentation.FromStore(local); }
+        try { using var local = new OperationalStore(store.Root); return HealthReportPresentation.FromStore(local, healthSettings.Thresholds()); }
         catch (Exception ex) { return "O relatório de saúde local também está indisponível: " + ex.Message + ". O histórico de conversas permanece separado."; }
     }
     private static string AnswerPresentation(string answer)
@@ -190,7 +191,7 @@ public partial class MainWindow : Window
             {
                 var overview = new StackPanel();
                 overview.Children.Add(Text("Estado observado · " + latest.Time.ToLocalTime().ToString("g"), 18));
-                overview.Children.Add(Text($"CPU {latest.CpuPercent?.ToString("F0") ?? "indisponível"}%   ·   Memória {latest.MemoryUsedPercent?.ToString("F0") ?? "indisponível"}%   ·   Rede local {latest.Connectivity}", 16, "#92D7BA"));
+                overview.Children.Add(Text($"CPU {MetricPercent(latest.CpuPercent)}   ·   Memória {MetricPercent(latest.MemoryUsedPercent)}   ·   Rede local {latest.Connectivity}", 16, "#92D7BA"));
                 overview.Children.Add(Text("Temperatura: " + (latest.CpuTemperatureC?.ToString("F0") ?? "indisponível") + "  ·  SMART: " + latest.StorageHealth + "  ·  Coleta: " + latest.CollectionStatus, 12, "#939CAA"));
                 foreach (var disk in latest.Disks.Take(6)) overview.Children.Add(Text($"{disk.Name}: {(disk.TotalBytes > 0 ? 100.0 * disk.FreeBytes / disk.TotalBytes : 0):F1}% livre", 13));
                 PageContent.Children.Add(Card(overview));
@@ -202,7 +203,7 @@ public partial class MainWindow : Window
             PageContent.Children.Add(Text("Eventos do Windows", 19));
             foreach (var warning in eventWarnings) PageContent.Children.Add(Card(Text(warning, 12, "#F2CB8B")));
             var events = healthStore.RecentEvents(12);
-            if (events.Count == 0) PageContent.Children.Add(Card(Text("Nenhum evento registrado nesta coleta. Consulte os avisos de canal antes de interpretar a ausência.", 13, "#939CAA")));
+            if (events.Count == 0) PageContent.Children.Add(Card(Text(lastEventScan == DateTimeOffset.MinValue ? "Aguardando a primeira consulta de eventos." : "Nenhum evento registrado nesta coleta. Consulte os avisos de canal antes de interpretar a ausência.", 13, "#939CAA")));
             foreach (var item in events) PageContent.Children.Add(Card(Text($"{item.Time.ToLocalTime():g} · {item.Log} · ID {item.EventId} · nível {item.Level}\n{item.Provider}", 12)));
             PageContent.Children.Add(Text("Recuperação assistida", 19));
             var interventions = healthStore.RecentInterventions(12);

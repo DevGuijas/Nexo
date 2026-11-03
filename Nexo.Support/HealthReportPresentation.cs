@@ -4,12 +4,14 @@ namespace Nexo.Support;
 
 public static class HealthReportPresentation
 {
-    public static string FromStore(OperationalStore store)
+    public static string FromStore(OperationalStore store, HealthThresholds? thresholds = null)
     {
         var since = DateTimeOffset.UtcNow.AddDays(-1);
         var latest = store.RecentSnapshots(since, 1).FirstOrDefault();
         if (latest == null) return "Nenhuma amostra de saúde foi coletada nas últimas 24 horas. O monitoramento funciona enquanto o Nexo está aberto. Nenhum problema ou reparo pode ser confirmado com esses dados.";
         var known = store.RecentFindings(40).Where(f => f.Time >= since).ToArray();
+        var active = HealthRules.Evaluate(store.RecentSnapshots(latest.Time.AddHours(-6), 20).OrderBy(s => s.Time).ToArray(), thresholds ?? new())
+            .Select(f => f.Id).ToHashSet();
         var events = new EventBatch { Events = store.RecentEvents(100).Where(e => e.Time >= since).ToList() };
         var report = DiagnosticEngine.BuildReport(latest, known, events, DateTimeOffset.UtcNow);
         var text = new StringBuilder();
@@ -20,7 +22,11 @@ public static class HealthReportPresentation
             text.AppendLine($"Volume {Safe(disk.Name)}: {(disk.TotalBytes > 0 ? 100.0 * disk.FreeBytes / disk.TotalBytes : 0):F1}% livre.");
         if (report.Findings.Count == 0) text.AppendLine("Nenhum achado sustentado foi registrado nos dados disponíveis.");
         foreach (var finding in report.Findings.OrderByDescending(f => f.Time).Take(10))
-            text.AppendLine($"Achado {Safe(finding.Category)} ({Safe(finding.Severity)}): {Safe(finding.Problem)}. Evidência: {Safe(finding.Evidence)}. Causa: hipótese, {Safe(finding.Cause)}. Recomendação: {Safe(finding.Recommendation)}. Confiança {Math.Clamp(finding.Confidence, 0, 1):P0}; confirmado: não.");
+        {
+            var baseId = finding.Id.Contains(':') ? finding.Id[..finding.Id.LastIndexOf(':')] : finding.Id;
+            var current = finding.Source == "rules" && active.Contains(baseId);
+            text.AppendLine($"Achado {Safe(finding.Category)} ({Safe(finding.Severity)}), {finding.Time:yyyy-MM-dd HH:mm zzz}, {(current ? "persiste nas leituras atuais" : "ocorrência histórica; estado atual não confirmado")}: {Safe(finding.Problem)}. Evidência: {Safe(finding.Evidence)}. Causa: hipótese, {Safe(finding.Cause)}. Recomendação: {Safe(finding.Recommendation)}. Confiança {Math.Clamp(finding.Confidence, 0, 1):P0}; confirmado: não.");
+        }
         foreach (var limitation in report.Limitations.Take(10)) text.AppendLine("Limitação: " + Safe(limitation));
         text.AppendLine("Nenhuma alteração foi executada por este relatório. Confirme a função afetada antes de declarar recuperação.");
         return text.ToString()[..Math.Min(text.Length, 7000)];

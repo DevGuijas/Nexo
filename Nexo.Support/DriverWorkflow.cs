@@ -60,7 +60,8 @@ public static class DriverWorkflow
             return "Identifiquei " + (targetName.Length > 0 ? targetName : "o dispositivo") + ", mas o Windows não forneceu IDs suficientes para associar uma oferta de driver com segurança. Nenhum driver foi alterado; encaminhe o caso à TI.";
 
         var observed = "Identifiquei " + targetName + (version.Length > 0 ? " (driver " + version + (provider.Length > 0 ? ", provedor " + provider : "") + ")" : "");
-        if (Regex.IsMatch(Normalize(request), @"\b(inf|pacote|repositorio)\b"))
+        var inspectPackage = Regex.IsMatch(Normalize(request), @"\b(inf|pacote|repositorio)\b");
+        if (inspectPackage)
         {
             try
             {
@@ -73,6 +74,8 @@ public static class DriverWorkflow
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
             catch (Exception) { observed += "; consulta do INF indisponível"; }
         }
+        if (inspectPackage && !Regex.IsMatch(Normalize(request), @"\b(atualiz\w*|instal\w*|busc\w*|procur\w*|ofertas?|versao nova)\b"))
+            return observed + ". Consulta local concluída; não procurei ofertas online nem alterei drivers.";
         var scan = await execute("scan_driver_updates", new { });
         if (!Succeeded(scan)) return observed + ". A busca online não terminou: " + Error(scan) + " Nenhum driver foi alterado; tente novamente mais tarde ou encaminhe à TI.";
         if (!scan.TryGetProperty("data", out var raw) || raw.ValueKind != JsonValueKind.String)

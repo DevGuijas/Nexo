@@ -33,7 +33,8 @@ public sealed class MonitoringEngine : IDisposable
             token.ThrowIfCancellationRequested();
             var snapshot = await sampler.Sample(token);
             store.SaveSnapshot(snapshot);
-            var history = store.RecentSnapshots(snapshot.Time.AddMinutes(-10), 20).OrderBy(s => s.Time).ToArray();
+            var window = TimeSpan.FromSeconds(Math.Max(600, interval.TotalSeconds * 5));
+            var history = store.RecentSnapshots(snapshot.Time - window, 20).OrderBy(s => s.Time).ToArray();
             var current = HealthRules.Evaluate(history, thresholds);
             var keys = current.Select(f => f.Id).ToHashSet();
             active.IntersectWith(keys);

@@ -64,7 +64,11 @@ public sealed class InterventionRecord
     public string CommandTemplate { get; set; } = "";
     public bool Authorized { get; set; }
     public bool RebootRequired { get; set; }
+    public int? RecoveryPointSequence { get; set; }
+    public List<InterventionTransition> Transitions { get; set; } = [];
 }
+
+public sealed record InterventionTransition(DateTimeOffset Time, string State, string Details);
 
 public sealed class DiagnosticReport
 {
