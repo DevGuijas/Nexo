@@ -33,6 +33,7 @@ public partial class MainWindow : Window
     public MainWindow(Store store)
     {
         InitializeComponent(); Title = "Nexo 1.6.3 • Suporte inteligente"; this.store = store; support = new SupportService(store);
+        ApplyNavigationIcons();
         user = store.GetLocalSession();
         RefreshIdentity();
         NewConversation();
@@ -52,9 +53,22 @@ public partial class MainWindow : Window
             MessageBox.Show(this, message, "Atendimento em andamento");
         };
     }
-    private static TextBlock Text(string text, double size = 14, string color = "#E9EDF5") => new() { Text = text, FontSize = size, Foreground = Brush(color), TextWrapping = TextWrapping.Wrap };
+    private static TextBlock Text(string text, double size = 14, string color = "Ink") => new() { Text = text, FontSize = size, Foreground = Brush(color), TextWrapping = TextWrapping.Wrap };
     private static string MetricPercent(double? value) => value.HasValue ? value.Value.ToString("F0") + "%" : "indisponível";
-    private static SolidColorBrush Brush(string hex) => new((Color)ColorConverter.ConvertFromString(hex));
+    private static Brush Brush(string color) => color.StartsWith('#') ? new SolidColorBrush((Color)ColorConverter.ConvertFromString(color)) : (Brush)Application.Current.FindResource(color);
+    private void ApplyNavigationIcons()
+    {
+        foreach (var button in Navigation.Children.OfType<Button>())
+        {
+            if (button.Tag is not string section || button.Content is not StackPanel previous) continue;
+            var label = previous.Children.OfType<TextBlock>().Last().Text;
+            var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            row.Children.Add(UiIcons.Create(section switch { "chat" => "chat", "health" => "health", "history" => "history", "tickets" => "tickets", "users" => "users", "settings" => "settings", "audit" => "audit", _ => "brand" }, 19));
+            row.Children.Add(new TextBlock { Text = label, Margin = new Thickness(12, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center });
+            button.Content = row;
+            button.Style = (Style)FindResource("NavigationButton");
+        }
+    }
     private string OfflineHealthReport()
     {
         try { using var local = new OperationalStore(store.Root); return HealthReportPresentation.FromStore(local, healthSettings.Thresholds()); }
@@ -593,6 +607,13 @@ public partial class MainWindow : Window
     public async void CapturePreview()
     {
         // Use only the isolated preview store selected by App; never authenticate against production data.
+        static bool HasVectorIcon(DependencyObject root)
+        {
+            if (root is System.Windows.Shapes.Path) return true;
+            for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+                if (HasVectorIcon(VisualTreeHelper.GetChild(root, i))) return true;
+            return false;
+        }
         async Task Capture(string name)
         {
             await Task.Delay(200); UpdateLayout();
@@ -603,6 +624,9 @@ public partial class MainWindow : Window
         }
         try
         {
+        if (((Grid)Content).Background is not SolidColorBrush shellBrush || shellBrush.Color.R < 230 || shellBrush.Color.G < 230 || shellBrush.Color.B < 230)
+            throw new InvalidOperationException("O tema claro não foi aplicado à janela principal.");
+        if (!HasVectorIcon(ChatNav)) throw new InvalidOperationException("A navegação não usa ícones vetoriais.");
         if (Shell.Visibility != Visibility.Visible || !Messages.Children.OfType<StackPanel>().Any()) throw new InvalidOperationException("Falha na abertura direta do aplicativo.");
         ShowPage("chat"); await Capture("nexo-preview.png");
         ShowPage("health");
