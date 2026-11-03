@@ -422,11 +422,14 @@ public partial class MainWindow : Window
         }
         else
         {
-            var byline = new StackPanel { Orientation = Orientation.Horizontal };
+            var byline = new Grid();
+            byline.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            byline.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             if (entry.Role != "user") byline.Children.Add(UiIcons.Create("brand", 12));
-            byline.Children.Add(new TextBlock { Text = (entry.Role == "user" ? user.Name : "Nexo") + "  ·  " + entry.Time.ToString("HH:mm"),
+            var bylineText = new TextBlock { Text = (entry.Role == "user" ? user.Name : "Nexo") + "  ·  " + entry.Time.ToString("HH:mm"),
                 FontSize = 11, Foreground = Brush(entry.Role == "user" ? "Secondary" : "Accent"),
-                Margin = new Thickness(entry.Role == "user" ? 0 : 7, 0, 0, 0) });
+                TextWrapping = TextWrapping.Wrap, Margin = new Thickness(entry.Role == "user" ? 0 : 7, 0, 0, 0) };
+            Grid.SetColumn(bylineText, 1); byline.Children.Add(bylineText);
             body.Children.Add(byline);
         }
         var text = new TextBox { Text = entry.Text, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, BorderThickness = new Thickness(0), Background = Brushes.Transparent, Padding = new Thickness(0), Margin = new Thickness(0, 12, 0, 0), FontSize = 14, IsReadOnlyCaretVisible = false };
@@ -556,7 +559,8 @@ public partial class MainWindow : Window
         operation.Cancel();
         UpdateProgress("Cancelamento solicitado. Etapas ainda não iniciadas serão interrompidas. Se uma alteração do Windows já começou, aguarde o resultado registrado no chat para confirmar seu estado.");
     }
-    private Task<bool> ConfirmChange(ChangeRequest request)
+    private Task<bool> ConfirmChange(ChangeRequest request) => ConfirmChange(request, null);
+    private Task<bool> ConfirmChange(ChangeRequest request, Action<Window>? onRendered)
     {
         var dialog = new Window { Owner = this, Title = request.Title, Width = 700, Height = 520, WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize, Style = (Style)FindResource(typeof(Window)) };
         var panel = new DockPanel { Margin = new Thickness(25) };
@@ -597,7 +601,16 @@ public partial class MainWindow : Window
         var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         timer.Tick += (_, _) => { countdown.Text = $"Restauração automática em {--seconds} segundos."; if (seconds <= 0) { timer.Stop(); dialog.DialogResult = false; } };
         if (request.KeepNetwork) { countdown.Text = "Restauração automática em 45 segundos."; timer.Start(); }
-        var accepted = dialog.ShowDialog() == true; timer.Stop(); return Task.FromResult(accepted);
+        Exception? previewFailure = null;
+        if (onRendered != null) dialog.ContentRendered += (_, _) =>
+        {
+            try { onRendered(dialog); }
+            catch (Exception ex) { previewFailure = ex; }
+            finally { dialog.DialogResult = false; }
+        };
+        var accepted = dialog.ShowDialog() == true; timer.Stop();
+        if (previewFailure != null) throw new InvalidOperationException("Falha na prévia do diálogo de autorização.", previewFailure);
+        return Task.FromResult(accepted);
     }
     private void RenderActions(Diagnostic diagnostic)
     {
@@ -856,7 +869,75 @@ public partial class MainWindow : Window
         AddEntry("tool", ToolCatalog.Label("scan_driver_updates") + "\n" + WindowsTools.Ok("[]"));
         AddEntry("assistant", "Identifiquei GPU de exemplo (driver 1.0). A fonte de atualizações configurada no Windows não ofereceu driver compatível agora. Nenhuma alteração foi feita.", "result", 14300);
         await Capture("nexo-driver-result.png");
-        File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "ui-checks.txt"), "Abertura direta e navegação, envio e resposta local: aprovados.\nPainel de saúde e controles de monitoramento renderizados.\nNovo atendimento na lateral; resolução e encaminhamento acima do compositor: aprovados em 1380x900 e 1060x720.\nAtalhos Sim/Não, rascunho e bloqueio de resposta antiga: aprovados.\nEnter livre para quebra de linha e manipulador Shift + Enter envia mensagem multilinha: aprovados.\n70 etapas com rolagem ao início/fim, controles acessíveis e rótulos alinhados. Nenhuma ação no Windows executada.");
+        var originalName = user.Name;
+        try
+        {
+            user.Name = string.Join(' ', Enumerable.Repeat("NomeExtensoDeExemplo", 12));
+            NewConversation(); Messages.Children.Clear();
+            AddEntry("user", "Conferir alinhamento do cabeçalho com um nome longo.");
+            Width = 1060; Height = 720; UpdateLayout();
+            var longCard = Messages.Children.OfType<Border>().Last();
+            var longByline = ((StackPanel)longCard.Child).Children[0] as FrameworkElement;
+            if (longByline == null || longByline.ActualWidth > longCard.ActualWidth - 24)
+                throw new InvalidOperationException("Nome longo ultrapassou o cartão da conversa.");
+            await Capture("nexo-long-name-small.png");
+            conversation!.Title = string.Join(' ', Enumerable.Repeat("DiagnósticoDeExemplo", 10));
+            store.Data.Conversations.Add(conversation);
+            ShowPage("history"); UpdateLayout();
+            var historyCard = PageContent.Children.OfType<Border>().FirstOrDefault(card => card.Child is StackPanel row
+                && row.Children.OfType<TextBlock>().Any(title => title.Text == conversation.Title));
+            var historyButton = ((StackPanel?)historyCard?.Child)?.Children.OfType<Button>().FirstOrDefault();
+            if (historyCard == null || historyButton == null || historyButton.TranslatePoint(new Point(historyButton.ActualWidth, historyButton.ActualHeight), historyCard).X > historyCard.ActualWidth)
+                throw new InvalidOperationException("Título longo cortou a ação do atendimento.");
+            await Capture("nexo-long-history-small.png");
+            ShowPage("chat");
+            AddEntry("assistant", string.Join(' ', Enumerable.Repeat("Resultado de exemplo com explicação detalhada.", 25)), "result");
+            UpdateLayout();
+            if (TicketButton.ActualHeight < 30 || TicketButton.TranslatePoint(new Point(TicketButton.ActualWidth, 0), ChatView).X > ChatView.ActualWidth)
+                throw new InvalidOperationException("Resultado longo cortou as ações da conversa.");
+            await Capture("nexo-long-result-small.png");
+        }
+        finally { user.Name = originalName; }
+        Width = 1380; Height = 900; UpdateLayout();
+        foreach (var (request, file) in new[]
+        {
+            (new ChangeRequest("Confirmar ação de exemplo", string.Join('\n', Enumerable.Repeat("Detalhe de autorização para leitura e rolagem.", 24))), "nexo-confirmation.png"),
+            (new ChangeRequest("Instalar driver com licença do fornecedor", "Leia a licença antes de autorizar.", LicenseUrl: "https://example.com/license"), "nexo-confirmation-license.png"),
+            (new ChangeRequest("Manter a configuração de rede após a verificação", "Teste a conexão e confirme a escolha.", KeepNetwork: true), "nexo-confirmation-network.png")
+        })
+        {
+            var accepted = await ConfirmChange(request, dialog =>
+            {
+                var panel = (DockPanel)((Border)dialog.Content).Child;
+                var buttons = panel.Children.OfType<WrapPanel>().Single();
+                var options = buttons.Children.OfType<Button>().ToArray();
+                var details = panel.Children.OfType<Border>().Single();
+                var visual = (FrameworkElement)dialog.Content;
+                if (options.Length != 2 || options.Any(button => button.ActualHeight < 30
+                    || button.TranslatePoint(new Point(button.ActualWidth, button.ActualHeight), dialog).X > dialog.ActualWidth
+                    || button.TranslatePoint(new Point(button.ActualWidth, button.ActualHeight), visual).Y > visual.ActualHeight - 8)
+                    || details.ActualHeight < 100)
+                    throw new InvalidOperationException("Ações ou detalhes do diálogo de autorização estão inacessíveis.");
+                var license = panel.Children.OfType<StackPanel>().SelectMany(section => section.Children.OfType<CheckBox>()).SingleOrDefault();
+                if (request.LicenseUrl != null)
+                {
+                    if (license == null || options[1].IsEnabled) throw new InvalidOperationException("Licença não bloqueou a autorização.");
+                    license.IsChecked = true;
+                    if (!options[1].IsEnabled) throw new InvalidOperationException("Aceite da licença não habilitou a autorização.");
+                    license.IsChecked = false;
+                    if (options[1].IsEnabled) throw new InvalidOperationException("Revogação da licença não bloqueou a autorização.");
+                    license.IsChecked = true;
+                }
+                else if (license != null || !options[1].IsEnabled) throw new InvalidOperationException("A autorização comum ficou indisponível.");
+                visual.UpdateLayout();
+                var bitmap = new RenderTargetBitmap((int)visual.ActualWidth, (int)visual.ActualHeight, 96, 96, PixelFormats.Pbgra32);
+                bitmap.Render(visual);
+                var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
+                using var output = File.Create(Path.Combine(AppContext.BaseDirectory, file)); encoder.Save(output);
+            });
+            if (accepted) throw new InvalidOperationException("A prévia não cancelou o diálogo de autorização.");
+        }
+        File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "ui-checks.txt"), "Abertura direta e navegação, envio e resposta local: aprovados.\nPainel de saúde e controles de monitoramento renderizados.\nNovo atendimento na lateral; resolução e encaminhamento acima do compositor: aprovados em 1380x900 e 1060x720.\nAtalhos Sim/Não, rascunho e bloqueio de resposta antiga: aprovados.\nEnter livre para quebra de linha e manipulador Shift + Enter envia mensagem multilinha: aprovados.\nNomes, títulos e resultados longos verificados em 1060x720.\nDiálogos de autorização, licença e restauração de rede renderizados e cancelados sem mudanças no Windows.\n70 etapas com rolagem ao início/fim, controles acessíveis e rótulos alinhados. Nenhuma ação no Windows executada.");
         Application.Current.Shutdown();
         }
         catch (Exception ex)
