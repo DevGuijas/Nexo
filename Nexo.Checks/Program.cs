@@ -1,4 +1,5 @@
 using Nexo.Support;
+using Nexo.Checks;
 
 var root = Path.Combine(Path.GetTempPath(), "NexoChecks-" + Guid.NewGuid().ToString("N"));
 var count = 0;
@@ -6,6 +7,7 @@ void Assert(bool condition, string title) { if (!condition) throw new Exception(
 void Reject(Action action, string title) { try { action(); } catch (InvalidOperationException) { Assert(true, title); return; } throw new Exception("FAIL: " + title); }
 try
 {
+    HealthDataChecks.Run(Path.Combine(root, "operational"), Assert);
     var freshDirectRoot = Path.Combine(root, "direct-fresh");
     var freshDirectStore = new Store(freshDirectRoot, directAccess: true);
     var directSession = freshDirectStore.GetLocalSession();
