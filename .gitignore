@@ -5,3 +5,24 @@ artifacts/
 *.user
 .vs/
 .runtime/
+# Dependências e ambientes locais
+**/node_modules/
+**/modules/
+**/.venv/
+**/venv/
+.env
+.env.*
+!.env.example
+**/secrets/
+*.pfx
+*.pem
+*.key
+
+# Estado gerado por execução e testes
+**/.preview-data/
+**/TestResults/
+/.superpowers/sdd/
+**/operations.db*
+*.log
+*.tmp
+coverage/
