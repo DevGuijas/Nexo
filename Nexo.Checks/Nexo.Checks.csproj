@@ -10,4 +10,5 @@
 <ItemGroup><Compile Include="../Nexo.Support/HealthModels.cs" Link="HealthModels.cs"/><Compile Include="../Nexo.Support/OperationalStore.cs" Link="OperationalStore.cs"/><PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.33" /></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/HealthRules.cs" Link="HealthRules.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/MonitoringEngine.cs" Link="MonitoringEngine.cs"/><Compile Include="../Nexo.Support/WindowsHealthSampler.cs" Link="WindowsHealthSampler.cs"/></ItemGroup>
+<ItemGroup><Compile Include="../Nexo.Support/WindowsEventCollector.cs" Link="WindowsEventCollector.cs"/><Compile Include="../Nexo.Support/EventAnalyzer.cs" Link="EventAnalyzer.cs"/><Compile Include="../Nexo.Support/DiagnosticEngine.cs" Link="DiagnosticEngine.cs"/></ItemGroup>
 </Project>
