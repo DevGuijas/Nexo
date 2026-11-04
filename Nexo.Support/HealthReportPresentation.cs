@@ -31,6 +31,13 @@ public static class HealthReportPresentation
         text.AppendLine("Nenhuma alteração foi executada por este relatório. Confirme a função afetada antes de declarar recuperação.");
         return text.ToString()[..Math.Min(text.Length, 7000)];
     }
+    public static string InterventionState(InterventionRecord intervention) => intervention.State switch
+    {
+        "unknown" when PendingOperations.IsWaiting(intervention) => "em andamento ou incerto, aguardando o resultado do Windows",
+        "unknown" => "incerto, sem resultado verificável",
+        _ => intervention.State
+    };
+
     private static string Percent(double? value) => value.HasValue ? value.Value.ToString("F0") + "%" : "indisponível";
     private static string Safe(string value) => new string(value.Take(160).Select(c => char.IsLetterOrDigit(c) || c is ' ' or '.' or ':' or '%' or '/' or '-' or '_' ? c : '_').ToArray());
 }

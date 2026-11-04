@@ -11,6 +11,10 @@ namespace Nexo.Support;
 public sealed record ChangeRequest(string Title, string Details, bool KeepNetwork = false, string? LicenseUrl = null);
 public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, Action<string>? inform = null) : IAgentTools
 {
+    internal static readonly TimeSpan ElevatedTimeout = TimeSpan.FromMinutes(15);
+    internal static readonly TimeSpan NvidiaInstallerTimeout = TimeSpan.FromMinutes(30);
+    internal static readonly TimeSpan NvidiaSupervisionTimeout = NvidiaInstallerTimeout + TimeSpan.FromMinutes(5);
+
     private readonly SupportService support = new(store);
     private readonly Dictionary<int, string> observedInterfaces = [];
     private readonly Dictionary<int, ObservedAdapter> observedAdapters = [];
@@ -133,29 +137,42 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         try { return output = await ExecuteCore(name, args, token); }
         finally
         {
-            var state = "unknown";
-            if (output != null)
-            {
-                try
-                {
-                    using var result = JsonDocument.Parse(output);
-                    var root = result.RootElement;
-                    state = root.TryGetProperty("state", out var reportedState) && reportedState.ValueKind == JsonValueKind.String && reportedState.GetString() == "unknown" ? "unknown"
-                        : root.TryGetProperty("denied", out var denied) && denied.ValueKind == JsonValueKind.True ? "denied"
-                        : root.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True ? "reported"
-                        : "failed";
-                }
-                catch (JsonException) { state = "unknown"; }
-            }
+            var state = ResultState(output);
             try
             {
                 currentIntervention!.After = output ?? JsonSerializer.Serialize(new { status = "unavailable", reason = "A execução terminou sem resultado retornado." });
-                currentIntervention.Summary = state == "reported" ? "Executor relatou conclusão; funcionamento depende de verificação." : "Resultado não confirmado ou recusado.";
+                currentIntervention.Summary = InterventionSummary(state, currentIntervention.PendingOperation != "");
                 MoveIntervention(state, currentIntervention.Summary);
             }
             catch (Exception ex) { try { store.Log(actor, "Falha ao registrar intervenção operacional: " + ex.Message); } catch { /* Preserve the original action result. */ } }
             finally { currentIntervention = null; }
         }
+    }
+
+    internal static string ResultState(string? output)
+    {
+        if (output == null) return "unknown";
+        try
+        {
+            using var result = JsonDocument.Parse(output);
+            var root = result.RootElement;
+            if (root.TryGetProperty("state", out var reported) && reported.ValueKind == JsonValueKind.String && reported.GetString() == "unknown")
+                return "unknown";
+            if (root.TryGetProperty("denied", out var denied) && denied.ValueKind == JsonValueKind.True)
+                return "denied";
+            return root.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True ? "reported" : "failed";
+        }
+        catch (JsonException)
+        {
+            return "unknown";
+        }
+    }
+
+    internal static string InterventionSummary(string state, bool pending)
+    {
+        if (state == "reported") return "Executor relatou conclusão; funcionamento depende de verificação.";
+        if (state == "unknown" && pending) return "A operação continua em segundo plano; o Nexo conferirá o resultado quando o Windows concluir.";
+        return "Resultado não confirmado ou recusado.";
     }
 
     private string CaptureObservedBefore(JsonElement args)
@@ -439,8 +456,8 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 progress.Report("Baixando o driver completo da NVIDIA e validando a assinatura digital…");
                 var driverFile = await OfficialDriverSource.DownloadNvidiaDriver(official, token);
                 token.ThrowIfCancellationRequested();
-                progress.Report("Solicitando permissão do Windows e instalando o driver NVIDIA…");
-                return VerifyDriverInstallationResult(await Elevated(NvidiaDriverInstallationScript(driverFile, official, nvidiaDevice.Id, nvidiaDevice.DriverVersion), token));
+                progress.Report($"Solicitando permissão do Windows e instalando o driver NVIDIA. Pode levar até {NvidiaSupervisionTimeout.TotalMinutes:F0} minutos…");
+                return VerifyDriverInstallationResult(await Elevated(NvidiaDriverInstallationScript(driverFile, official, nvidiaDevice.Id, nvidiaDevice.DriverVersion), NvidiaSupervisionTimeout, token));
             case "download_nvidia_app":
                 if (!Fresh(observedDevicesAt) || observedDevices.Count != 1 || !OfficialDriverSource.IsNvidiaDisplay(observedDevices.Values.Single().Device))
                     throw new InvalidOperationException("O aplicativo NVIDIA só pode ser baixado após identificar uma única placa NVIDIA PCI presente.");
@@ -474,7 +491,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         if (matches.Length != 1) throw new InvalidOperationException("O driver não corresponde a um único dispositivo diagnosticado. Consulte o dispositivo e avalie a atualização manualmente.");
         return matches[0];
     }
-    private static string NvidiaDriverInstallationScript(string path, OfficialDriverSource.DriverOffer offer, string deviceId, string beforeVersion) => $$"""
+    internal static string NvidiaDriverInstallationScript(string path, OfficialDriverSource.DriverOffer offer, string deviceId, string beforeVersion) => $$"""
         $targetId={{Quote(deviceId)}}
         $installer={{Quote(path)}}
         $expectedVersion={{Quote(beforeVersion)}}
@@ -485,7 +502,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         $signature=Get-AuthenticodeSignature -LiteralPath $installer
         if($signature.Status -ne 'Valid' -or [string]$signature.SignerCertificate.Subject -notmatch 'NVIDIA'){throw 'A assinatura do instalador NVIDIA não foi validada'}
         $process=Start-Process -FilePath $installer -ArgumentList @('-s','-n','Display.Driver') -PassThru -ErrorAction Stop
-        if(-not $process.WaitForExit(1800000)){throw 'O instalador NVIDIA excedeu 30 minutos; o estado da instalação não foi confirmado'}
+        if(-not $process.WaitForExit({{(long)NvidiaInstallerTimeout.TotalMilliseconds}})){throw 'O instalador NVIDIA excedeu {{NvidiaInstallerTimeout.TotalMinutes:F0}} minutos; o estado da instalação não foi confirmado'}
         if($process.ExitCode -notin @(0,1)){throw ('O instalador NVIDIA terminou com código '+$process.ExitCode)}
         Start-Sleep -Seconds 3
         $after=@(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object {$_.PNPDeviceID -eq $targetId -and $_.Present -eq $true})
@@ -584,10 +601,13 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         try { await tcp.ConnectAsync(host, port, deadline.Token); return Ok(new { host, port, addresses, dnsResolved = true, tcpConnected = true, elapsedMs = clock.ElapsedMilliseconds }); }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException) { token.ThrowIfCancellationRequested(); return Ok(new { host, port, addresses, dnsResolved = true, tcpConnected = false, error = ex.Message }); }
     }
-    private async Task<string> Elevated(string script, CancellationToken token)
+    private Task<string> Elevated(string script, CancellationToken token) => Elevated(script, ElevatedTimeout, token);
+
+    private async Task<string> Elevated(string script, TimeSpan timeout, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var dir = Path.Combine(store.Root, "operations", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
+        var operationId = Guid.NewGuid().ToString("N");
+        var dir = PendingOperations.Folder(store.Root, operationId); Directory.CreateDirectory(dir);
         var output = Path.Combine(dir, "result.json");
         var wrapped = "$ErrorActionPreference='Stop'; try { $data=& { " + script + " }; $result=@{success=$true;data=$data} } catch { $result=@{success=$false;error=$_.Exception.Message} }; $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath " + Quote(output) + " -Encoding UTF8";
         var finished = false;
@@ -595,8 +615,10 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         {
             token.ThrowIfCancellationRequested();
             using var process = StartElevated(wrapped);
-            var state = await OperationSupervisor.Wait(async () => { await process.WaitForExitAsync(); return process.ExitCode; }, TimeSpan.FromMinutes(15), token);
+            var state = await OperationSupervisor.Wait(async () => { await process.WaitForExitAsync(); return process.ExitCode; }, timeout, token);
             finished = process.HasExited;
+            if (state == OperationState.Unknown && !finished && currentIntervention != null)
+                currentIntervention.PendingOperation = operationId;
             if (state == OperationState.Unknown) return JsonSerializer.Serialize(new { success = false, state = "unknown", error = "O processo elevado não confirmou o término no prazo ou a espera foi cancelada. A ação pode continuar em segundo plano; confira o estado antes de repetir." });
             if (state == OperationState.Failed || !File.Exists(output)) return JsonSerializer.Serialize(new { success = false, state = "unknown", error = "O processo elevado não retornou resultado válido. Estado não confirmado." });
             return await File.ReadAllTextAsync(output, CancellationToken.None);
