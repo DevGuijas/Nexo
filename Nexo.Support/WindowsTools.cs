@@ -578,7 +578,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private async Task<string?> PrepareDriverRecovery(CancellationToken token)
     {
         progress.Report("Criando e confirmando um ponto de restauração antes do driver…");
-        var result = await RestorePointProtection.Prepare(Elevated, token);
+        var result = await RestorePointProtection.Prepare(ElevatedPreparation, token);
         if (!result.Ready)
         {
             MoveIntervention("protection_unavailable", result.Reason);
@@ -603,7 +603,9 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     }
     private Task<string> Elevated(string script, CancellationToken token) => Elevated(script, ElevatedTimeout, token);
 
-    private async Task<string> Elevated(string script, TimeSpan timeout, CancellationToken token)
+    private Task<string> ElevatedPreparation(string script, CancellationToken token) => Elevated(script, ElevatedTimeout, token, tracksResult: false);
+
+    private async Task<string> Elevated(string script, TimeSpan timeout, CancellationToken token, bool tracksResult = true)
     {
         token.ThrowIfCancellationRequested();
         var operationId = Guid.NewGuid().ToString("N");
@@ -617,7 +619,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             using var process = StartElevated(wrapped);
             var state = await OperationSupervisor.Wait(async () => { await process.WaitForExitAsync(); return process.ExitCode; }, timeout, token);
             finished = process.HasExited;
-            if (state == OperationState.Unknown && !finished && currentIntervention != null)
+            if (tracksResult && state == OperationState.Unknown && !finished && currentIntervention != null)
                 currentIntervention.PendingOperation = operationId;
             if (state == OperationState.Unknown) return JsonSerializer.Serialize(new { success = false, state = "unknown", error = "O processo elevado não confirmou o término no prazo ou a espera foi cancelada. A ação pode continuar em segundo plano; confira o estado antes de repetir." });
             if (state == OperationState.Failed || !File.Exists(output)) return JsonSerializer.Serialize(new { success = false, state = "unknown", error = "O processo elevado não retornou resultado válido. Estado não confirmado." });
