@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Text.Json;
 using Nexo.Support;
 
 namespace Nexo.Checks;
@@ -70,6 +71,7 @@ internal static class MonitoringChecks
             check(slowStore.RecentFindings(10).Any(f => f.Category == "cpu"), "Intervalo configurável de uma hora ainda permite alerta persistente");
         }
         finally { if (Directory.Exists(slowRoot)) Directory.Delete(slowRoot, true); }
+        CheckServiceCollection(check);
         if (Environment.GetEnvironmentVariable("NEXO_LIVE_SAMPLE") == "1")
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
@@ -77,6 +79,49 @@ internal static class MonitoringChecks
             check(live.Disks.Count > 0 || live.Warnings.Count > 0, "Coleta real de leitura retorna discos ou limitação explícita");
             Console.WriteLine($"AMOSTRA: CPU={live.CpuPercent?.ToString("F0") ?? "indisponível"}, memória={live.MemoryUsedPercent?.ToString("F0") ?? "indisponível"}, discos={live.Disks.Count}, serviços={live.Services.Count}, estado={live.CollectionStatus}");
         }
+    }
+
+    private static void CheckServiceCollection(Action<bool, string> check)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var stoppedAtPosition230 = AutomaticServices(250, stoppedPosition: 230);
+        var previous = ReadServices(stoppedAtPosition230, now.AddSeconds(-30));
+        var latest = ReadServices(stoppedAtPosition230, now);
+
+        check(latest.Services.Count == WindowsHealthSampler.MaxServicesCollected
+            && latest.Services[0] is { Name: "Servico230", Status: "Stopped" }
+            && latest.Warnings.Single().Contains("200 de 250")
+            && latest.CollectionStatus == "partial",
+            "Coleta acima do limite mantém o serviço parado da posição 230, informa o corte e fica parcial");
+
+        var findings = HealthRules.Evaluate([previous, latest], new HealthThresholds());
+        check(findings.Any(f => f.Id == "service-stopped:Servico230"),
+            "Serviço automático parado depois da posição 80 gera alerta preventivo");
+
+        var report = DiagnosticEngine.BuildReport(latest, findings, new EventBatch(), now);
+        check(report.Limitations.Contains("A coleta de métricas foi parcial.")
+            && report.Limitations.Any(limitation => limitation.Contains("200 de 250")),
+            "Relatório de saúde não conclui ausência de falhas quando a coleta de serviços é parcial");
+
+        var complete = ReadServices(AutomaticServices(83, stoppedPosition: null), now);
+        check(complete.Services.Count == 83 && complete.Warnings.Count == 0 && complete.CollectionStatus == "complete",
+            "Coleta dentro do limite inclui todos os serviços automáticos e fica completa");
+    }
+
+    private static object[] AutomaticServices(int count, int? stoppedPosition)
+    {
+        return Enumerable.Range(1, count)
+            .Select(position => (object)new { Name = $"Servico{position:D3}", State = position == stoppedPosition ? "Stopped" : "Running" })
+            .ToArray();
+    }
+
+    private static HealthSnapshot ReadServices(object[] services, DateTimeOffset time)
+    {
+        var snapshot = new HealthSnapshot { Time = time };
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(new { Services = services }));
+        WindowsHealthSampler.ReadServices(document.RootElement, snapshot);
+        WindowsHealthSampler.ApplyCollectionStatus(snapshot);
+        return snapshot;
     }
 
     private sealed class FakeSampler(Func<HealthSnapshot> next) : IHealthSampler
