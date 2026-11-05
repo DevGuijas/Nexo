@@ -13,7 +13,7 @@ internal static class EventCollectionChecks
         var now = DateTimeOffset.UtcNow;
 
         var burst = Log(101, 145, now.AddMinutes(-4));
-        var burstBatch = Collect(Source(new() { ["System"] = burst }), new() { ["System"] = new EventCursor(100, now.AddMinutes(-5)) }, 200);
+        var burstBatch = Collect(Source(new() { ["System"] = [new Record(100, now.AddMinutes(-5), 2), .. burst] }), new() { ["System"] = new EventCursor(100, now.AddMinutes(-5)) }, 200);
         var burstIds = burstBatch.Events.Where(e => e.Log == "System").Select(e => e.RecordId).ToList();
         check(burstIds.SequenceEqual(Enumerable.Range(101, 45).Select(i => (long)i)) && burstBatch.Gaps.Count == 0 && burstBatch.Cursors["System"].RecordId == 145,
             "Eventos: rajada de 45 eventos entre consultas é coletada por completo a partir do RecordId");
@@ -35,7 +35,7 @@ internal static class EventCollectionChecks
             "Eventos: próxima consulta continua do cursor e recupera os registros pendentes");
 
         var mixed = Log(101, 160, now.AddMinutes(-3)).Select(r => r.Id % 3 == 0 ? r with { Level = 4 } : r).ToList();
-        var mixedBatch = Collect(Source(new() { ["System"] = mixed }), new() { ["System"] = new EventCursor(100, now.AddMinutes(-4)) }, 200);
+        var mixedBatch = Collect(Source(new() { ["System"] = [new Record(100, now.AddMinutes(-4), 2), .. mixed] }), new() { ["System"] = new EventCursor(100, now.AddMinutes(-4)) }, 200);
         check(mixedBatch.Events.Count == mixed.Count(r => r.Level <= 3) && mixedBatch.Events.All(e => e.Level <= 3) && mixedBatch.Gaps.Count == 0,
             "Eventos: registros informativos intercalados não são confundidos com lacuna");
 
@@ -56,6 +56,40 @@ internal static class EventCollectionChecks
         var emptied = Collect(Source(new() { ["System"] = [] }), new() { ["System"] = new EventCursor(500, now.AddHours(-1)) }, 200);
         check(emptied.Gaps.Any(g => g.Reason == "reset" && g.Log == "System") && !emptied.Cursors.ContainsKey("System"),
             "Eventos: log esvaziado remove o cursor antigo e registra a lacuna");
+
+        var oldLog = Log(1, 600, now.AddHours(-1));
+        var switchedLog = new Dictionary<string, List<Record>> { ["System"] = oldLog };
+        var pageCallsAfterBounds = 0;
+        var switchedSource = Source(switchedLog, () =>
+        {
+            if (++pageCallsAfterBounds == 1) switchedLog["System"] = Log(1, 600, now.AddMinutes(-30));
+        });
+        var switched = Collect(switchedSource, new() { ["System"] = new EventCursor(500, oldLog[499].Time) }, 200);
+        check(switched.Gaps.Any(g => g.Reason == "reset" && g.Log == "System")
+            && switched.Events.Count(e => e.Log == "System") == 200 && switched.Events.First(e => e.Log == "System").RecordId == 1,
+            "Eventos: reinício entre conferência do cursor e primeira página recomeça sem perder registros");
+
+        var midPageLog = new Dictionary<string, List<Record>> { ["System"] = oldLog };
+        var pageCalls = 0;
+        var midPageSource = Source(midPageLog, () =>
+        {
+            if (++pageCalls == 2) midPageLog["System"] = Log(1, 600, now.AddMinutes(-30));
+        });
+        var midPage = Collect(midPageSource, new() { ["System"] = new EventCursor(500, oldLog[499].Time) }, 200);
+        check(midPage.Gaps.Any(g => g.Reason == "reset" && g.Log == "System")
+            && midPage.Events.Count(e => e.Log == "System") == 200 && midPage.Events.First(e => e.Log == "System").RecordId == 1,
+            "Eventos: reinício no meio das páginas descarta a coleta mista e recomeça");
+
+        var freshPageLog = new Dictionary<string, List<Record>> { ["System"] = oldLog };
+        var freshPageCalls = 0;
+        var freshPageSource = Source(freshPageLog, () =>
+        {
+            if (++freshPageCalls == 2) freshPageLog["System"] = Log(1, 600, now.AddMinutes(-30));
+        });
+        var freshPage = Collect(freshPageSource, null, 200);
+        check(freshPage.Gaps.Any(g => g.Reason == "reset" && g.Log == "System")
+            && freshPage.Events.Count(e => e.Log == "System") == 200 && freshPage.Events.First(e => e.Log == "System").RecordId == 1,
+            "Eventos: primeira coleta reiniciada entre páginas não salva cursor de geração mista");
 
         var aged = Collect(Source(new() { ["System"] = [.. Log(1, 10, now.AddDays(-3)), .. Log(11, 15, now.AddHours(-1))] }), null, 200);
         check(aged.Events.Select(e => e.RecordId).SequenceEqual([11L, 12L, 13L, 14L, 15L]),
