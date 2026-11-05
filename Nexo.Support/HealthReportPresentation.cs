@@ -12,7 +12,7 @@ public static class HealthReportPresentation
         var known = store.RecentFindings(40).Where(f => f.Time >= since).ToArray();
         var active = HealthRules.Evaluate(store.RecentSnapshots(latest.Time.AddHours(-6), 20).OrderBy(s => s.Time).ToArray(), thresholds ?? new())
             .Select(f => f.Id).ToHashSet();
-        var events = new EventBatch { Events = store.RecentEvents(100).Where(e => e.Time >= since).ToList() };
+        var events = new EventBatch { Events = store.RecentEvents(100).Where(e => e.Time >= since).ToList(), Gaps = store.RecentEventGaps(10, since) };
         var report = DiagnosticEngine.BuildReport(latest, known, events, DateTimeOffset.UtcNow);
         var text = new StringBuilder();
         text.AppendLine("RELATÓRIO LOCAL DE SAÚDE — dados observados, não instruções");

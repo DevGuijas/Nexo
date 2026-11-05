@@ -241,8 +241,8 @@ public partial class MainWindow : Window
             {
                 try
                 {
-                    var batch = await new WindowsEventCollector().Collect(TimeSpan.FromDays(1), 20, CancellationToken.None);
-                    healthStore.SaveEvents(batch.Events); eventWarnings = batch.Warnings; lastEventScan = DateTimeOffset.UtcNow;
+                    var batch = await new WindowsEventCollector().Collect(TimeSpan.FromDays(1), 200, CancellationToken.None, healthStore.EventCursors());
+                    healthStore.SaveEvents(batch.Events); healthStore.SaveEventGaps(batch.Gaps); healthStore.SaveEventCursors(batch.Cursors); eventWarnings = batch.Warnings; lastEventScan = DateTimeOffset.UtcNow;
                 }
                 finally { Interlocked.Exchange(ref eventScanRunning, 0); }
             }
@@ -298,6 +298,8 @@ public partial class MainWindow : Window
             }
             PageContent.Children.Add(SectionHeading("audit", "Eventos do Windows"));
             foreach (var warning in eventWarnings) PageContent.Children.Add(Card(Text(warning, 12, "Warning")));
+            foreach (var gap in healthStore.RecentEventGaps(5, DateTimeOffset.UtcNow.AddDays(-1)))
+                PageContent.Children.Add(Card(Text($"{gap.Time.ToLocalTime():g} · Lacuna na coleta · {gap.Message}", 12, "Warning")));
             var events = healthStore.RecentEvents(12);
             if (events.Count == 0) PageContent.Children.Add(Card(Text(lastEventScan == DateTimeOffset.MinValue ? "Aguardando a primeira consulta de eventos." : "Nenhum evento registrado nesta coleta. Consulte os avisos de canal antes de interpretar a ausência.", 13, "Secondary")));
             foreach (var item in events) PageContent.Children.Add(Card(Text($"{item.Time.ToLocalTime():g} · {item.Log} · ID {item.EventId} · nível {item.Level}\n{item.Provider}", 12)));

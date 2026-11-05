@@ -50,6 +50,17 @@ public sealed class SystemEvent
     public long Level { get; set; }
 }
 
+public sealed class EventGap
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public DateTimeOffset Time { get; set; }
+    public string Log { get; set; } = "";
+    public string Reason { get; set; } = "";
+    public long FromRecordId { get; set; }
+    public long? ToRecordId { get; set; }
+    public string Message { get; set; } = "";
+}
+
 public sealed class InterventionRecord
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
