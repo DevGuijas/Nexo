@@ -7,9 +7,10 @@ public sealed class EventBatch
     public List<SystemEvent> Events { get; set; } = [];
     public List<string> Warnings { get; set; } = [];
     public List<EventGap> Gaps { get; set; } = [];
-    public Dictionary<string, long> Cursors { get; set; } = [];
+    public Dictionary<string, EventCursor> Cursors { get; set; } = [];
 }
 
+public sealed record EventCursor(long RecordId, DateTimeOffset? Time);
 public sealed record EventPageQuery(string Log, DateTimeOffset? Since, long AfterRecordId, int Limit);
 
 public sealed class WindowsEventCollector
@@ -18,15 +19,15 @@ public sealed class WindowsEventCollector
     public const int MaxBudgetPerLog = 1000;
     private static readonly string[] Logs = ["System", "Application", "Setup"];
     private readonly Func<EventPageQuery, CancellationToken, Task<string>> page;
-    private readonly Func<string, CancellationToken, Task<string>> bounds;
+    private readonly Func<string, long, CancellationToken, Task<string>> bounds;
 
-    public WindowsEventCollector(Func<EventPageQuery, CancellationToken, Task<string>>? page = null, Func<string, CancellationToken, Task<string>>? bounds = null)
+    public WindowsEventCollector(Func<EventPageQuery, CancellationToken, Task<string>>? page = null, Func<string, long, CancellationToken, Task<string>>? bounds = null)
     {
         this.page = page ?? QueryPage;
-        this.bounds = bounds ?? (page == null ? QueryBounds : (_, _) => Task.FromResult("{}"));
+        this.bounds = bounds ?? (page == null ? QueryBounds : (_, _, _) => Task.FromResult("{}"));
     }
 
-    public async Task<EventBatch> Collect(TimeSpan maxAge, int budgetPerLog, CancellationToken token, IReadOnlyDictionary<string, long>? cursors = null)
+    public async Task<EventBatch> Collect(TimeSpan maxAge, int budgetPerLog, CancellationToken token, IReadOnlyDictionary<string, EventCursor>? cursors = null)
     {
         if (maxAge <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(maxAge));
         if (budgetPerLog is < 1 or > MaxBudgetPerLog) throw new ArgumentOutOfRangeException(nameof(budgetPerLog));
@@ -35,9 +36,10 @@ public sealed class WindowsEventCollector
         foreach (var log in Logs)
         {
             token.ThrowIfCancellationRequested();
-            var cursor = cursors != null && cursors.TryGetValue(log, out var saved) && saved > 0 ? saved : 0;
-            if (cursor > 0) result.Cursors[log] = cursor;
-            try { cursor = await CheckBounds(log, cursor, now, result, token); }
+            var saved = cursors != null && cursors.TryGetValue(log, out var previous) && previous.RecordId > 0 ? previous : null;
+            var cursor = saved?.RecordId ?? 0;
+            if (saved != null) result.Cursors[log] = saved;
+            try { cursor = await CheckBounds(log, saved, now, result, token); }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
             catch (Exception ex) { result.Warnings.Add($"Canal {log}: não foi possível verificar se registros foram sobrescritos ({ex.Message})."); }
             try { await CollectLog(log, cursor, cursor > 0 ? null : now - maxAge, budgetPerLog, now, result, token); }
@@ -47,19 +49,24 @@ public sealed class WindowsEventCollector
         return result;
     }
 
-    private async Task<long> CheckBounds(string log, long cursor, DateTimeOffset now, EventBatch result, CancellationToken token)
+    private async Task<long> CheckBounds(string log, EventCursor? saved, DateTimeOffset now, EventBatch result, CancellationToken token)
     {
-        if (cursor == 0) return 0;
-        using var json = JsonDocument.Parse(await bounds(log, token));
+        if (saved == null) return 0;
+        var cursor = saved.RecordId;
+        using var json = JsonDocument.Parse(await bounds(log, cursor, token));
         if (json.RootElement.ValueKind != JsonValueKind.Object) throw new JsonException("Expected object");
         var oldest = Optional(json.RootElement, "Oldest");
         var newest = Optional(json.RootElement, "Newest");
-        if (newest is { } last && last < cursor)
+        var observedTime = OptionalTime(json.RootElement, "CursorTime");
+        var empty = oldest == null && newest == null;
+        var reused = oldest <= cursor && newest >= cursor && (saved.Time == null || observedTime == null
+            || saved.Time.Value.ToUniversalTime() != observedTime.Value.ToUniversalTime());
+        if (empty || newest < cursor || reused)
         {
             result.Gaps.Add(new EventGap
             {
-                Time = now, Log = log, Reason = "reset", FromRecordId = last, ToRecordId = cursor,
-                Message = $"Canal {log}: o log foi limpo ou reiniciado (último registro {last}, cursor anterior {cursor}). Eventos removidos antes da coleta não podem ser recuperados; a coleta recomeçou pela janela recente."
+                Time = now, Log = log, Reason = "reset", FromRecordId = 1, ToRecordId = cursor,
+                Message = $"Canal {log}: o log foi limpo, reiniciado ou a identidade do cursor anterior ({cursor}) mudou. Eventos removidos antes da coleta não podem ser recuperados; a coleta recomeçou pela janela recente."
             });
             result.Cursors.Remove(log);
             return 0;
@@ -87,7 +94,7 @@ public sealed class WindowsEventCollector
             if (rows.Count > 0 && fresh.Count == 0) throw new System.IO.InvalidDataException("a consulta retornou apenas registros já coletados");
             result.Events.AddRange(fresh);
             collected += fresh.Count;
-            if (fresh.Count > 0) { cursor = fresh[^1].RecordId; result.Cursors[log] = cursor; }
+            if (fresh.Count > 0) { cursor = fresh[^1].RecordId; result.Cursors[log] = new EventCursor(cursor, fresh[^1].Time); }
             if (fresh.Count < limit) return;
         }
         if (Parse(log, await page(new EventPageQuery(log, since, cursor, 1), token)).Any(e => e.RecordId > cursor))
@@ -122,6 +129,9 @@ public sealed class WindowsEventCollector
 
     private static long? Optional(JsonElement root, string name)
         => root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number ? value.GetInt64() : null;
+    private static DateTimeOffset? OptionalTime(JsonElement root, string name)
+        => root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            && DateTimeOffset.TryParse(value.GetString(), out var time) ? time : null;
 
     private const string ImportDiagnostics = "Import-Module ($env:SystemRoot+'\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Diagnostics\\Microsoft.PowerShell.Diagnostics.psd1') -ErrorAction Stop; ";
 
@@ -133,9 +143,11 @@ public sealed class WindowsEventCollector
         return SupportService.Powershell(script, token, 20);
     }
 
-    private static Task<string> QueryBounds(string log, CancellationToken token)
+    private static Task<string> QueryBounds(string log, long cursor, CancellationToken token)
     {
-        var script = ImportDiagnostics + "function Edge($oldest) { try { $item = if ($oldest) { Get-WinEvent -LogName '" + log + "' -Oldest -MaxEvents 1 -ErrorAction Stop } else { Get-WinEvent -LogName '" + log + "' -MaxEvents 1 -ErrorAction Stop }; [long]$item.RecordId } catch { if($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*'){ throw }; $null } }; ConvertTo-Json -Compress -InputObject ([pscustomobject]@{Oldest=(Edge $true);Newest=(Edge $false)})";
+        var script = ImportDiagnostics + "function Edge($oldest) { try { $item = if ($oldest) { Get-WinEvent -LogName '" + log + "' -Oldest -MaxEvents 1 -ErrorAction Stop } else { Get-WinEvent -LogName '" + log + "' -MaxEvents 1 -ErrorAction Stop }; [long]$item.RecordId } catch { if($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*'){ throw }; $null } }; "
+            + "function CursorTime { try { $item=Get-WinEvent -LogName '" + log + "' -FilterXPath '*[System[EventRecordID=" + cursor + "]]' -MaxEvents 1 -ErrorAction Stop; $item.TimeCreated.ToString('O') } catch { if($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound*'){ throw }; $null } }; "
+            + "ConvertTo-Json -Compress -InputObject ([pscustomobject]@{Oldest=(Edge $true);Newest=(Edge $false);CursorTime=(CursorTime)})";
         return SupportService.Powershell(script, token, 20);
     }
 }

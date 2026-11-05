@@ -34,7 +34,7 @@ internal static class DiagnosticChecks
             check(live.Events.Count <= 15 && live.Events.Count + live.Warnings.Count > 0, "Consulta real de eventos é limitada e relata canais indisponíveis");
             Console.WriteLine($"EVENTOS: {live.Events.Count}, avisos: {string.Join(" | ", live.Warnings)}, lacunas: {string.Join(" | ", live.Gaps.Select(g => g.Message))}");
             var next = new WindowsEventCollector().Collect(TimeSpan.FromDays(1), 5, timeout.Token, live.Cursors).GetAwaiter().GetResult();
-            check(next.Events.All(e => live.Cursors.TryGetValue(e.Log, out var cursor) && e.RecordId > cursor) && next.Gaps.All(g => g.Reason == "budget") && next.Warnings.Count <= live.Warnings.Count,
+            check(next.Events.All(e => live.Cursors.TryGetValue(e.Log, out var cursor) && e.RecordId > cursor.RecordId) && next.Gaps.All(g => g.Reason == "budget") && next.Warnings.Count <= live.Warnings.Count,
                 "Consulta real continua do cursor sem repetir registros e confere os limites do log");
             Console.WriteLine($"CURSORES: {string.Join(", ", live.Cursors.Select(c => c.Key + "=" + c.Value))}; próxima coleta: {next.Events.Count} eventos, avisos: {string.Join(" | ", next.Warnings)}");
         }
