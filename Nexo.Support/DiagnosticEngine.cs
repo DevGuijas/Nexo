@@ -12,6 +12,7 @@ public static class DiagnosticEngine
         if (snapshot.CollectionStatus != "complete") report.Limitations.Add("A coleta de métricas foi parcial.");
         report.Limitations.AddRange(snapshot.Warnings);
         report.Limitations.AddRange(events.Warnings);
+        report.Limitations.AddRange(events.Gaps.Select(g => g.Message));
         return report;
     }
 }

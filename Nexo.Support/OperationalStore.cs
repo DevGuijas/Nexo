@@ -31,6 +31,8 @@ public sealed class OperationalStore : IDisposable
                 CREATE INDEX IF NOT EXISTS findings_time ON findings(time);
                 CREATE TABLE IF NOT EXISTS events (log TEXT NOT NULL, record_id INTEGER NOT NULL, time TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(log,record_id));
                 CREATE INDEX IF NOT EXISTS events_time ON events(time);
+                CREATE TABLE IF NOT EXISTS event_gaps (id TEXT PRIMARY KEY, time TEXT NOT NULL, payload TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS event_gaps_time ON event_gaps(time);
                 CREATE TABLE IF NOT EXISTS interventions (id TEXT PRIMARY KEY, time TEXT NOT NULL, payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS interventions_time ON interventions(time);
                 """;
@@ -73,6 +75,55 @@ public sealed class OperationalStore : IDisposable
     { foreach (var item in items) Write("INSERT OR REPLACE INTO findings(id,time,payload) VALUES($id,$time,$payload)", item.Id, item.Time, item); }
     public void SaveEvents(IEnumerable<SystemEvent> items)
     { foreach (var item in items) Write("INSERT OR REPLACE INTO events(log,record_id,time,payload) VALUES($log,$record,$time,$payload)", "", item.Time, item, item.Log, item.RecordId); }
+    public void SaveEventGaps(IEnumerable<EventGap> items)
+    { foreach (var item in items) Write("INSERT OR REPLACE INTO event_gaps(id,time,payload) VALUES($id,$time,$payload)", item.Id, item.Time, item); }
+    public void SaveEventCursors(IReadOnlyDictionary<string, long> cursors)
+    {
+        lock (gate)
+        {
+            try
+            {
+                using var connection = Open();
+                using var transaction = connection.BeginTransaction();
+                using (var clear = connection.CreateCommand())
+                {
+                    clear.Transaction = transaction;
+                    clear.CommandText = "DELETE FROM metadata WHERE key LIKE 'event_cursor:%'";
+                    clear.ExecuteNonQuery();
+                }
+                foreach (var (log, recordId) in cursors)
+                {
+                    using var command = connection.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = "INSERT INTO metadata(key,value) VALUES($key,$value)";
+                    command.Parameters.AddWithValue("$key", "event_cursor:" + log);
+                    command.Parameters.AddWithValue("$value", recordId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                    command.ExecuteNonQuery();
+                }
+                transaction.Commit();
+            }
+            catch (SqliteException ex) { throw new OperationalStoreException("Falha ao gravar a posição da coleta de eventos.", ex); }
+        }
+    }
+    public Dictionary<string, long> EventCursors()
+    {
+        lock (gate)
+        {
+            try
+            {
+                using var connection = Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "SELECT key, value FROM metadata WHERE key LIKE 'event_cursor:%'";
+                using var reader = command.ExecuteReader();
+                var result = new Dictionary<string, long>();
+                while (reader.Read())
+                    if (long.TryParse(reader.GetString(1), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var recordId) && recordId > 0)
+                        result[reader.GetString(0)["event_cursor:".Length..]] = recordId;
+                return result;
+            }
+            catch (SqliteException ex) { throw new OperationalStoreException("Falha ao consultar a posição da coleta de eventos.", ex); }
+        }
+    }
     public void SaveIntervention(InterventionRecord item) => Write("INSERT OR REPLACE INTO interventions(id,time,payload) VALUES($id,$time,$payload)", item.Id, item.Time, item);
 
     private List<T> Read<T>(string table, int limit, DateTimeOffset? since = null)
@@ -99,6 +150,7 @@ public sealed class OperationalStore : IDisposable
     public List<HealthSnapshot> RecentSnapshots(DateTimeOffset since, int limit) => Read<HealthSnapshot>("snapshots", limit, since);
     public List<HealthFinding> RecentFindings(int limit) => Read<HealthFinding>("findings", limit);
     public List<SystemEvent> RecentEvents(int limit) => Read<SystemEvent>("events", limit);
+    public List<EventGap> RecentEventGaps(int limit, DateTimeOffset? since = null) => Read<EventGap>("event_gaps", limit, since);
     public List<InterventionRecord> RecentInterventions(int limit) => Read<InterventionRecord>("interventions", limit);
 
     public void Prune(TimeSpan retention)
@@ -111,7 +163,7 @@ public sealed class OperationalStore : IDisposable
             {
                 using var connection = Open();
                 using var transaction = connection.BeginTransaction();
-                foreach (var table in new[] { "snapshots", "findings", "events", "interventions" })
+                foreach (var table in new[] { "snapshots", "findings", "events", "event_gaps", "interventions" })
                 {
                     using var command = connection.CreateCommand();
                     command.Transaction = transaction;
