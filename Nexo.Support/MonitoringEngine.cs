@@ -14,6 +14,7 @@ public sealed class MonitoringEngine : IDisposable
     private readonly HealthThresholds thresholds;
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly HashSet<string> active = [];
+    private readonly Dictionary<string, DateTimeOffset> processAlerts = [];
     private CancellationTokenSource? running;
     private Task? loop;
     public event Action<HealthSnapshot, IReadOnlyList<HealthFinding>>? Updated;
@@ -33,18 +34,20 @@ public sealed class MonitoringEngine : IDisposable
             token.ThrowIfCancellationRequested();
             var snapshot = await sampler.Sample(token);
             store.SaveSnapshot(snapshot);
-            var window = TimeSpan.FromSeconds(Math.Max(600, interval.TotalSeconds * 5));
+            var window = TimeSpan.FromSeconds(Math.Max(600, interval.TotalSeconds * Math.Max(5, thresholds.ProcessMemorySamples + 1)));
             var history = store.RecentSnapshots(snapshot.Time - window, 20).OrderBy(s => s.Time).ToArray();
             var current = HealthRules.Evaluate(history, thresholds);
             var keys = current.Select(f => f.Id).ToHashSet();
             active.IntersectWith(keys);
-            var fresh = current.Where(f => !active.Contains(f.Id)).ToArray();
-            foreach (var finding in fresh)
-            {
-                active.Add(finding.Id);
-                finding.Id += ":" + snapshot.Id;
-            }
+            var fresh = current.Where(f => !active.Contains(f.Id) && !(processAlerts.TryGetValue(f.Id, out var seen) && snapshot.Time - seen < thresholds.ProcessMemoryAlertCooldown)).ToArray();
+            var freshKeys = fresh.Select(f => f.Id).ToArray();
+            foreach (var finding in fresh) finding.Id += ":" + snapshot.Id;
             store.SaveFindings(fresh);
+            // Só depois de gravar: uma falha não pode consumir o alerta.
+            active.UnionWith(freshKeys);
+            // A memória de um processo oscila: uma janela abaixo do limiar não encerra a ocorrência.
+            foreach (var expired in processAlerts.Where(alert => snapshot.Time - alert.Value >= thresholds.ProcessMemoryAlertCooldown).Select(alert => alert.Key).ToArray()) processAlerts.Remove(expired);
+            foreach (var key in keys.Where(key => key.StartsWith("process-memory-", StringComparison.Ordinal))) processAlerts[key] = snapshot.Time;
             LastError = null;
             Updated?.Invoke(snapshot, fresh);
         }
