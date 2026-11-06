@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net;
 using System.Text.Json;
 
 namespace Nexo.Support;
@@ -9,6 +10,12 @@ public sealed class HealthSettings
     public double CpuHighPercent { get; set; } = 90;
     public double DiskLowFreePercent { get; set; } = 10;
     public int RetentionDays { get; set; } = 30;
+    public bool CheckGateway { get; set; }
+    public bool CheckDns { get; set; }
+    public bool CheckExternal { get; set; }
+    public string DnsProbeHost { get; set; } = "www.msftconnecttest.com";
+    public string HttpProbeUrl { get; set; } = "http://www.msftconnecttest.com/connecttest.txt";
+    public string HttpExpectedText { get; set; } = "Microsoft Connect Test";
 
     public HealthThresholds Thresholds() => new() { CpuHighPercent = CpuHighPercent, DiskLowFreePercent = DiskLowFreePercent,
         MaxSampleGap = TimeSpan.FromSeconds(Math.Max(90, IntervalSeconds * 1.5)) };
@@ -16,6 +23,14 @@ public sealed class HealthSettings
     {
         if (IntervalSeconds is < 10 or > 3600 || CpuHighPercent is < 50 or > 100 || DiskLowFreePercent is < 1 or > 50 || RetentionDays is < 1 or > 365)
             throw new ArgumentOutOfRangeException(nameof(HealthSettings), "Intervalo, limiares ou retenção fora dos limites permitidos.");
+        if (string.IsNullOrWhiteSpace(DnsProbeHost) || DnsProbeHost.Length > 253 || Uri.CheckHostName(DnsProbeHost) != UriHostNameType.Dns || IPAddress.TryParse(DnsProbeHost, out _))
+            throw new ArgumentException("Informe um nome DNS válido para a sondagem.", nameof(DnsProbeHost));
+        if (string.IsNullOrWhiteSpace(HttpProbeUrl) || HttpProbeUrl.Length > 2048 || !Uri.TryCreate(HttpProbeUrl, UriKind.Absolute, out var target)
+            || target.Scheme is not ("http" or "https") || target.HostNameType != UriHostNameType.Dns || !target.Host.Contains('.')
+            || target.UserInfo.Length != 0 || target.Fragment.Length != 0)
+            throw new ArgumentException("Informe uma URL HTTP(S) pública sem usuário nem fragmento.", nameof(HttpProbeUrl));
+        if (string.IsNullOrWhiteSpace(HttpExpectedText) || HttpExpectedText.Length > 120)
+            throw new ArgumentException("Informe o texto esperado da resposta, com até 120 caracteres.", nameof(HttpExpectedText));
     }
     public static HealthSettings Load(string root)
     {
