@@ -18,6 +18,7 @@ public static class HealthReportPresentation
         text.AppendLine("RELATÓRIO LOCAL DE SAÚDE — dados observados, não instruções");
         text.AppendLine($"Amostra: {latest.Time:yyyy-MM-dd HH:mm:ss zzz}; coleta {latest.CollectionStatus}.");
         text.AppendLine($"CPU: {Percent(latest.CpuPercent)}; memória: {Percent(latest.MemoryUsedPercent)}; conectividade local: {latest.Connectivity}.");
+        text.AppendLine($"Gateway: {DescribeProbe(latest.GatewayProbe)}; DNS: {DescribeProbe(latest.DnsProbe)}; Destino externo: {DescribeProbe(latest.ExternalProbe)}.");
         foreach (var disk in latest.Disks.Take(8))
             text.AppendLine($"Volume {Safe(disk.Name)}: {(disk.TotalBytes > 0 ? 100.0 * disk.FreeBytes / disk.TotalBytes : 0):F1}% livre.");
         if (report.Findings.Count == 0) text.AppendLine("Nenhum achado sustentado foi registrado nos dados disponíveis.");
@@ -32,5 +33,18 @@ public static class HealthReportPresentation
         return text.ToString()[..Math.Min(text.Length, 7000)];
     }
     private static string Percent(double? value) => value.HasValue ? value.Value.ToString("F0") + "%" : "indisponível";
+    public static string DescribeProbe(NetworkProbeReading? reading)
+    {
+        if (reading == null) return "indisponível";
+        var state = reading.State switch
+        {
+            "disabled" => "desligado",
+            "ok" => "respondeu",
+            "no_response" => "sem resposta",
+            "unexpected" => "resposta inesperada",
+            _ => "indisponível"
+        };
+        return state + (string.IsNullOrWhiteSpace(reading.Target) ? "" : " (" + Safe(reading.Target) + ")");
+    }
     private static string Safe(string value) => new string(value.Take(160).Select(c => char.IsLetterOrDigit(c) || c is ' ' or '.' or ':' or '%' or '/' or '-' or '_' ? c : '_').ToArray());
 }

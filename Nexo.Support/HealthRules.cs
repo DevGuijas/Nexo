@@ -62,6 +62,15 @@ public static class HealthRules
         }
         if (network.Length == thresholds.NetworkSamples && Continuous(network) && network.All(s => s.Connectivity == "none"))
             findings.Add(Finding("network-none", "network", "Conectividade local ausente de forma recorrente", $"{network.Length} leituras sem conectividade informada pelo Windows", "Adaptador, cabo, Wi-Fi ou configuração ainda não identificados", "warning", "Recursos de rede podem ficar indisponíveis", "Execute o diagnóstico de interfaces antes de alterar configurações", 0.7));
+        if (network.Length == thresholds.NetworkSamples && Continuous(network)
+            && network.All(s => s.Connectivity == "local" && s.ExternalProbe?.State is ("no_response" or "unexpected"))
+            && !string.IsNullOrWhiteSpace(latest.ExternalProbe.Target)
+            && network.All(s => s.ExternalProbe.Target == latest.ExternalProbe.Target))
+            findings.Add(Finding("network-external-unconfirmed", "network", "Acesso ao destino externo não confirmado",
+                $"{network.Length} consultas consecutivas a {latest.ExternalProbe.Target} sem a resposta esperada",
+                "Destino indisponível, proxy, portal cativo ou restrição de rede são possibilidades ainda não diferenciadas",
+                "warning", "Serviços que dependem deste destino podem estar indisponíveis",
+                "Confira gateway, DNS e o destino configurado antes de alterar a rede", 0.65));
 
         var memory = Tail(3);
         if (memory.Length == 3 && Continuous(memory) && memory.All(s => s.MemoryUsedPercent.HasValue)

@@ -32,7 +32,44 @@ internal static class MonitoringChecks
         check(Eval(demand).All(f => f.Category != "service"), "Serviço sob demanda parado não é falha");
         var network = Eval(At(-60, connectivity: "none"), At(-30, connectivity: "none"), At(0, connectivity: "none"));
         check(network.Any(f => f.Category == "network"), "Falha de conectividade recorrente gera alerta");
+        HealthSnapshot ExternalAt(int seconds, string local, string external)
+        {
+            var sample = At(seconds, connectivity: local);
+            sample.ExternalProbe = new NetworkProbeReading(external, "example.com", "resultado do destino configurado");
+            return sample;
+        }
+        check(Eval(ExternalAt(-60, "local", "ok"), ExternalAt(-30, "local", "ok"), ExternalAt(0, "local", "no_response"))
+            .All(f => f.Id != "network-external-unconfirmed"), "Falha isolada do destino externo não gera alerta");
+        check(Eval(ExternalAt(-60, "local", "no_response"), ExternalAt(-30, "local", "unexpected"), ExternalAt(0, "local", "no_response"))
+            .Any(f => f.Id == "network-external-unconfirmed" && f.Evidence.Contains("example.com")),
+            "Três falhas consecutivas do destino externo geram alerta com alvo identificado");
+        check(Eval(ExternalAt(-60, "local", "no_response"), ExternalAt(-30, "local", "no_response"), ExternalAt(0, "local", "ok"))
+            .All(f => f.Id != "network-external-unconfirmed"), "Resposta externa bem-sucedida encerra o alerta");
+        check(Eval(ExternalAt(-60, "none", "unavailable"), ExternalAt(-30, "none", "unavailable"), ExternalAt(0, "none", "unavailable"))
+            .All(f => f.Id != "network-external-unconfirmed"), "Rede isolada não vira diagnóstico de falha do destino externo");
+        check(Eval(ExternalAt(-300, "local", "no_response"), ExternalAt(-30, "local", "no_response"), ExternalAt(0, "local", "no_response"))
+            .All(f => f.Id != "network-external-unconfirmed"), "Lacuna entre amostras impede alerta externo persistente");
+        check(Eval(ExternalAt(-60, "local", "no_response"), ExternalAt(-30, "local", "unavailable"), ExternalAt(0, "local", "no_response"))
+            .All(f => f.Id != "network-external-unconfirmed"), "Sondagem indisponível interrompe a sequência de falhas externas");
+        var otherTarget = ExternalAt(0, "local", "no_response");
+        otherTarget.ExternalProbe = new NetworkProbeReading("no_response", "other.example", "destino diferente");
+        check(Eval(ExternalAt(-60, "local", "no_response"), ExternalAt(-30, "local", "no_response"), otherTarget)
+            .All(f => f.Id != "network-external-unconfirmed"), "Troca do destino externo interrompe a sequência de falhas");
         check(Eval(At(-60, 10, 55), At(-30, 10, 70), At(0, 10, 85)).Any(f => f.Category == "memory"), "Crescimento sustentado de memória gera alerta preventivo");
+
+        var reportRoot = Path.Combine(Path.GetTempPath(), "nexo-connectivity-report-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var reportStore = new OperationalStore(reportRoot);
+            var observed = ExternalAt(0, "local", "unexpected");
+            observed.GatewayProbe = new NetworkProbeReading("no_response", "192.0.2.1", "sem resposta ICMP");
+            observed.DnsProbe = new NetworkProbeReading("ok", "example.com", "resolvido");
+            reportStore.SaveSnapshot(observed);
+            var text = HealthReportPresentation.FromStore(reportStore);
+            check(text.Contains("Gateway:") && text.Contains("DNS:") && text.Contains("Destino externo:")
+                && text.Contains("inesperada"), "Relatório separa gateway, DNS e destino externo sem alegar acesso geral");
+        }
+        finally { if (Directory.Exists(reportRoot)) Directory.Delete(reportRoot, true); }
 
         var root = Path.Combine(Path.GetTempPath(), "nexo-monitor-" + Guid.NewGuid().ToString("N"));
         try
