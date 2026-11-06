@@ -44,6 +44,15 @@ internal static class ConnectivityProbeChecks
         var expectedPage = new ConnectivityProbe(request: (_, _) => Task.FromResult(new HttpProbeResponse(200, "OK")));
         var expectedResult = await expectedPage.Run(settings, true, [], CancellationToken.None);
         check(expectedResult.External.State == "ok", "Resposta esperada confirma acesso ao destino configurado");
+        var changedSettings = new HealthSettings { CheckExternal = true, HttpProbeUrl = "https://example.com/other", HttpExpectedText = "OK" };
+        var changedUrlResult = await expectedPage.Run(changedSettings, true, [], CancellationToken.None);
+        changedSettings.HttpProbeUrl = settings.HttpProbeUrl;
+        changedSettings.HttpExpectedText = "OTHER";
+        var changedBodyResult = await expectedPage.Run(changedSettings, true, [], CancellationToken.None);
+        check(!string.IsNullOrWhiteSpace(expectedResult.External.ConfigurationId)
+            && expectedResult.External.ConfigurationId != changedUrlResult.External.ConfigurationId
+            && expectedResult.External.ConfigurationId != changedBodyResult.External.ConfigurationId,
+            "Identidade da sondagem muda com URL ou resposta esperada, mesmo no mesmo host");
 
         var requests = 0;
         var bounded = new ConnectivityProbe((_, _) => { requests++; return Task.FromResult(false); });
@@ -57,6 +66,14 @@ internal static class ConnectivityProbeChecks
         try { await expectedPage.Run(settings, true, [], cancelled.Token); }
         catch (OperationCanceledException) { cancellationObserved = true; }
         check(cancellationObserved, "Cancelamento não é registrado como falha de conectividade");
+        var pending = new ConnectivityProbe(request: (_, _) => new TaskCompletionSource<HttpProbeResponse>().Task);
+        using var duringRequest = new CancellationTokenSource(TimeSpan.FromMilliseconds(50));
+        var cancelledInFlight = false;
+        try { await pending.Run(settings, true, [], duringRequest.Token); }
+        catch (OperationCanceledException) { cancelledInFlight = true; }
+        check(cancelledInFlight, "Cancelamento durante HTTP interrompe a consulta sem registrar falha");
+        var deadlineResult = await pending.Run(settings, true, [], CancellationToken.None);
+        check(deadlineResult.External.State == "no_response", "Prazo da consulta HTTP vira resultado incerto sem travar a coleta");
 
         var constructor = typeof(WindowsHealthSampler).GetConstructor([typeof(HealthSettings), typeof(ConnectivityProbe)]);
         check(constructor != null, "Coletor aceita as preferências e uma sondagem controlada");

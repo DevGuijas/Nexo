@@ -71,6 +71,10 @@ internal static class ScenarioChecks
             var emptyRejected = false;
             try { emptyExpectation.Save(root); } catch (ArgumentException) { emptyRejected = true; }
             check(emptyRejected, "Sondagem HTTP exige resposta esperada para não aceitar qualquer página");
+            var disabledWithDraft = new HealthSettings { CheckDns = false, CheckExternal = false, DnsProbeHost = "1.2.3.4", HttpProbeUrl = "incompleto", HttpExpectedText = "" };
+            disabledWithDraft.Save(root);
+            check(HealthSettings.Load(root).IntervalSeconds == 30,
+                "Campos de sondagem desligada não impedem salvar outras preferências");
             using (var snapshot = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(new HealthSnapshot())))
                 check(snapshot.RootElement.TryGetProperty("GatewayProbe", out var gatewayProbe) && gatewayProbe.GetProperty("State").GetString() == "disabled",
                     "Nova amostra diferencia sondagem desligada de falha de rede");

@@ -35,7 +35,7 @@ internal static class MonitoringChecks
         HealthSnapshot ExternalAt(int seconds, string local, string external)
         {
             var sample = At(seconds, connectivity: local);
-            sample.ExternalProbe = new NetworkProbeReading(external, "example.com", "resultado do destino configurado");
+            sample.ExternalProbe = new NetworkProbeReading(external, "example.com", "resultado do destino configurado", "test-config-1");
             return sample;
         }
         check(Eval(ExternalAt(-60, "local", "ok"), ExternalAt(-30, "local", "ok"), ExternalAt(0, "local", "no_response"))
@@ -52,9 +52,16 @@ internal static class MonitoringChecks
         check(Eval(ExternalAt(-60, "local", "no_response"), ExternalAt(-30, "local", "unavailable"), ExternalAt(0, "local", "no_response"))
             .All(f => f.Id != "network-external-unconfirmed"), "Sondagem indisponível interrompe a sequência de falhas externas");
         var otherTarget = ExternalAt(0, "local", "no_response");
-        otherTarget.ExternalProbe = new NetworkProbeReading("no_response", "other.example", "destino diferente");
+        otherTarget.ExternalProbe = new NetworkProbeReading("no_response", "other.example", "destino diferente", "test-config-2");
         check(Eval(ExternalAt(-60, "local", "no_response"), ExternalAt(-30, "local", "no_response"), otherTarget)
             .All(f => f.Id != "network-external-unconfirmed"), "Troca do destino externo interrompe a sequência de falhas");
+        var changedTest = ExternalAt(0, "local", "no_response");
+        changedTest.ExternalProbe = new NetworkProbeReading("no_response", "example.com", "mesmo host, novo teste", "test-config-2");
+        check(Eval(ExternalAt(-60, "local", "no_response"), ExternalAt(-30, "local", "no_response"), changedTest)
+            .All(f => f.Id != "network-external-unconfirmed"), "Troca de URL ou resposta esperada no mesmo host reinicia a sequência");
+        check(HealthRules.Evaluate([ExternalAt(-100, "local", "no_response"), ExternalAt(-50, "local", "no_response"), ExternalAt(0, "local", "no_response")],
+                new HealthSettings { IntervalSeconds = 10 }.Thresholds()).All(f => f.Id != "network-external-unconfirmed"),
+            "Intervalo de dez segundos não aceita leituras externas separadas por cinquenta segundos");
         check(Eval(At(-60, 10, 55), At(-30, 10, 70), At(0, 10, 85)).Any(f => f.Category == "memory"), "Crescimento sustentado de memória gera alerta preventivo");
 
         var reportRoot = Path.Combine(Path.GetTempPath(), "nexo-connectivity-report-" + Guid.NewGuid().ToString("N"));

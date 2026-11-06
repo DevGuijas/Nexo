@@ -26,7 +26,7 @@ public sealed record DiskHealth(string Name, long FreeBytes, long TotalBytes, st
 public sealed record ProcessHealth(string Name, int Id, long WorkingSetBytes, double? CpuPercent);
 public sealed record ServiceHealth(string Name, string Status, string StartType);
 public sealed record AdapterHealth(string Id, string Name, string Status, bool Enabled);
-public sealed record NetworkProbeReading(string State = "disabled", string Target = "", string Detail = "");
+public sealed record NetworkProbeReading(string State = "disabled", string Target = "", string Detail = "", string ConfigurationId = "");
 
 public sealed class HealthFinding
 {

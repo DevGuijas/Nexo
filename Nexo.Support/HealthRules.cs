@@ -7,6 +7,7 @@ public sealed class HealthThresholds
     public double MemoryGrowthPoints { get; set; } = 20;
     public double MemoryGrowthFinalPercent { get; set; } = 80;
     public TimeSpan MaxSampleGap { get; set; } = TimeSpan.FromSeconds(90);
+    public TimeSpan ExternalProbeMaxSampleGap { get; set; } = TimeSpan.FromSeconds(45);
     public int CpuSamples { get; set; } = 3;
     public int OtherSamples { get; set; } = 2;
     public int NetworkSamples { get; set; } = 3;
@@ -17,14 +18,15 @@ public static class HealthRules
     public static List<HealthFinding> Evaluate(IReadOnlyList<HealthSnapshot> history, HealthThresholds thresholds)
     {
         if (thresholds.CpuSamples < 2 || thresholds.OtherSamples < 2 || thresholds.NetworkSamples < 2
-            || thresholds.MaxSampleGap <= TimeSpan.Zero || thresholds.CpuHighPercent is < 1 or > 100
+            || thresholds.MaxSampleGap <= TimeSpan.Zero || thresholds.ExternalProbeMaxSampleGap <= TimeSpan.Zero || thresholds.CpuHighPercent is < 1 or > 100
             || thresholds.DiskLowFreePercent is < 1 or > 100)
             throw new ArgumentOutOfRangeException(nameof(thresholds));
         var ordered = history.OrderBy(s => s.Time).ToArray();
         if (ordered.Length == 0) return [];
         var latest = ordered[^1];
         var findings = new List<HealthFinding>();
-        bool Continuous(HealthSnapshot[] samples) => samples.Length > 0 && samples.Zip(samples.Skip(1)).All(pair => pair.Second.Time - pair.First.Time <= thresholds.MaxSampleGap);
+        bool Continuous(HealthSnapshot[] samples, TimeSpan? maxGap = null) => samples.Length > 0
+            && samples.Zip(samples.Skip(1)).All(pair => pair.Second.Time - pair.First.Time <= (maxGap ?? thresholds.MaxSampleGap));
         HealthSnapshot[] Tail(int count) => ordered.TakeLast(count).ToArray();
         HealthFinding Finding(string id, string category, string problem, string evidence, string cause, string severity, string impact, string recommendation, double confidence)
             => new() { Id = id, Time = latest.Time, Category = category, Problem = problem, Evidence = evidence, Cause = cause,
@@ -62,10 +64,10 @@ public static class HealthRules
         }
         if (network.Length == thresholds.NetworkSamples && Continuous(network) && network.All(s => s.Connectivity == "none"))
             findings.Add(Finding("network-none", "network", "Conectividade local ausente de forma recorrente", $"{network.Length} leituras sem conectividade informada pelo Windows", "Adaptador, cabo, Wi-Fi ou configuração ainda não identificados", "warning", "Recursos de rede podem ficar indisponíveis", "Execute o diagnóstico de interfaces antes de alterar configurações", 0.7));
-        if (network.Length == thresholds.NetworkSamples && Continuous(network)
+        if (network.Length == thresholds.NetworkSamples && Continuous(network, thresholds.ExternalProbeMaxSampleGap)
             && network.All(s => s.Connectivity == "local" && s.ExternalProbe?.State is ("no_response" or "unexpected"))
-            && !string.IsNullOrWhiteSpace(latest.ExternalProbe.Target)
-            && network.All(s => s.ExternalProbe.Target == latest.ExternalProbe.Target))
+            && !string.IsNullOrWhiteSpace(latest.ExternalProbe.Target) && !string.IsNullOrWhiteSpace(latest.ExternalProbe.ConfigurationId)
+            && network.All(s => s.ExternalProbe.ConfigurationId == latest.ExternalProbe.ConfigurationId))
             findings.Add(Finding("network-external-unconfirmed", "network", "Acesso ao destino externo não confirmado",
                 $"{network.Length} consultas consecutivas a {latest.ExternalProbe.Target} sem a resposta esperada",
                 "Destino indisponível, proxy, portal cativo ou restrição de rede são possibilidades ainda não diferenciadas",

@@ -3,6 +3,7 @@ using System.IO;
 using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace Nexo.Support;
@@ -70,20 +71,21 @@ public sealed class ConnectivityProbe(
     private async Task<NetworkProbeReading> CheckExternal(HealthSettings settings, bool localActive, CancellationToken token)
     {
         var target = new Uri(settings.HttpProbeUrl);
-        if (!localActive) return new("unavailable", target.Host, "Sem interface local ativa para consultar o destino.");
+        var configurationId = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(settings.HttpProbeUrl + "\0" + settings.HttpExpectedText)));
+        if (!localActive) return new("unavailable", target.Host, "Sem interface local ativa para consultar o destino.", configurationId);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(4));
         try
         {
             var response = await requestPage(target, deadline.Token).WaitAsync(deadline.Token);
             return response.StatusCode == 200 && string.Equals(response.Body.Trim(), settings.HttpExpectedText, StringComparison.Ordinal)
-                ? new("ok", target.Host, "Destino respondeu com o texto esperado.")
-                : new("unexpected", target.Host, "Destino respondeu de outra forma; portal, proxy ou mudança no próprio destino são possíveis.");
+                ? new("ok", target.Host, "Destino respondeu com o texto esperado.", configurationId)
+                : new("unexpected", target.Host, "Destino respondeu de outra forma; portal, proxy ou mudança no próprio destino são possíveis.", configurationId);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
-        { return new("no_response", target.Host, "A consulta ao destino excedeu quatro segundos."); }
+        { return new("no_response", target.Host, "A consulta ao destino excedeu quatro segundos.", configurationId); }
         catch (Exception ex) when (ex is HttpRequestException or IOException or SocketException)
-        { return new("no_response", target.Host, "O destino configurado não respondeu nesta leitura."); }
+        { return new("no_response", target.Host, "O destino configurado não respondeu nesta leitura.", configurationId); }
     }
 
     private static async Task<bool> PingGateway(IPAddress address, CancellationToken token)
