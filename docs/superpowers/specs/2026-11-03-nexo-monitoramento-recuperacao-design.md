@@ -1,4 +1,4 @@
-# Nexo: sistema imunológico digital — desenho incremental
+# Nexo: monitoramento e recuperação locais — desenho incremental
 
 ## Intenção
 
