@@ -11,6 +11,9 @@ public sealed class HealthSnapshot
     public long? MemoryTotalBytes { get; set; }
     public string StorageHealth { get; set; } = "unavailable";
     public string Connectivity { get; set; } = "unknown";
+    public NetworkProbeReading GatewayProbe { get; set; } = new();
+    public NetworkProbeReading DnsProbe { get; set; } = new();
+    public NetworkProbeReading ExternalProbe { get; set; } = new();
     public string CollectionStatus { get; set; } = "partial";
     public List<DiskHealth> Disks { get; set; } = [];
     public List<ProcessHealth> Processes { get; set; } = [];
@@ -23,6 +26,7 @@ public sealed record DiskHealth(string Name, long FreeBytes, long TotalBytes, st
 public sealed record ProcessHealth(string Name, int Id, long WorkingSetBytes, double? CpuPercent);
 public sealed record ServiceHealth(string Name, string Status, string StartType);
 public sealed record AdapterHealth(string Id, string Name, string Status, bool Enabled);
+public sealed record NetworkProbeReading(string State = "disabled", string Target = "", string Detail = "", string ConfigurationId = "");
 
 public sealed class HealthFinding
 {
