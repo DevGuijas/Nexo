@@ -24,17 +24,37 @@ public sealed class OperationalStore : IDisposable
             command.CommandText = """
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                INSERT OR IGNORE INTO metadata(key,value) VALUES('schema','1');
+                INSERT OR IGNORE INTO metadata(key,value) VALUES('schema','2');
                 CREATE TABLE IF NOT EXISTS snapshots (id TEXT PRIMARY KEY, time TEXT NOT NULL, payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS snapshots_time ON snapshots(time);
                 CREATE TABLE IF NOT EXISTS findings (id TEXT PRIMARY KEY, time TEXT NOT NULL, payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS findings_time ON findings(time);
-                CREATE TABLE IF NOT EXISTS events (log TEXT NOT NULL, record_id INTEGER NOT NULL, time TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(log,record_id));
+                CREATE TABLE IF NOT EXISTS events (log TEXT NOT NULL, record_id INTEGER NOT NULL, time TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(log,record_id,time));
                 CREATE INDEX IF NOT EXISTS events_time ON events(time);
+                CREATE TABLE IF NOT EXISTS event_gaps (id TEXT PRIMARY KEY, time TEXT NOT NULL, payload TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS event_gaps_time ON event_gaps(time);
                 CREATE TABLE IF NOT EXISTS interventions (id TEXT PRIMARY KEY, time TEXT NOT NULL, payload TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS interventions_time ON interventions(time);
                 """;
             command.ExecuteNonQuery();
+            command.CommandText = "SELECT sql FROM sqlite_master WHERE type='table' AND name='events'";
+            var eventsSchema = (string?)command.ExecuteScalar();
+            if (eventsSchema?.Contains("PRIMARY KEY(log,record_id)", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                using var transaction = connection.BeginTransaction();
+                command.Transaction = transaction;
+                command.CommandText = """
+                    CREATE TABLE events_migrated (log TEXT NOT NULL, record_id INTEGER NOT NULL, time TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(log,record_id,time));
+                    INSERT OR IGNORE INTO events_migrated(log,record_id,time,payload) SELECT log,record_id,time,payload FROM events;
+                    DROP TABLE events;
+                    ALTER TABLE events_migrated RENAME TO events;
+                    CREATE INDEX events_time ON events(time);
+                    UPDATE metadata SET value='2' WHERE key='schema';
+                    """;
+                command.ExecuteNonQuery();
+                transaction.Commit();
+                command.Transaction = null;
+            }
             command.CommandText = "PRAGMA quick_check";
             if ((string?)command.ExecuteScalar() != "ok") throw new InvalidDataException("Banco operacional inconsistente.");
         }
@@ -73,6 +93,59 @@ public sealed class OperationalStore : IDisposable
     { foreach (var item in items) Write("INSERT OR REPLACE INTO findings(id,time,payload) VALUES($id,$time,$payload)", item.Id, item.Time, item); }
     public void SaveEvents(IEnumerable<SystemEvent> items)
     { foreach (var item in items) Write("INSERT OR REPLACE INTO events(log,record_id,time,payload) VALUES($log,$record,$time,$payload)", "", item.Time, item, item.Log, item.RecordId); }
+    public void SaveEventGaps(IEnumerable<EventGap> items)
+    { foreach (var item in items) Write("INSERT OR REPLACE INTO event_gaps(id,time,payload) VALUES($id,$time,$payload)", item.Id, item.Time, item); }
+    public void SaveEventCursors(IReadOnlyDictionary<string, EventCursor> cursors)
+    {
+        lock (gate)
+        {
+            try
+            {
+                using var connection = Open();
+                using var transaction = connection.BeginTransaction();
+                using (var clear = connection.CreateCommand())
+                {
+                    clear.Transaction = transaction;
+                    clear.CommandText = "DELETE FROM metadata WHERE key LIKE 'event_cursor:%'";
+                    clear.ExecuteNonQuery();
+                }
+                foreach (var (log, cursor) in cursors)
+                {
+                    using var command = connection.CreateCommand();
+                    command.Transaction = transaction;
+                    command.CommandText = "INSERT INTO metadata(key,value) VALUES($key,$value)";
+                    command.Parameters.AddWithValue("$key", "event_cursor:" + log);
+                    command.Parameters.AddWithValue("$value", JsonSerializer.Serialize(cursor, Json));
+                    command.ExecuteNonQuery();
+                }
+                transaction.Commit();
+            }
+            catch (SqliteException ex) { throw new OperationalStoreException("Falha ao gravar a posição da coleta de eventos.", ex); }
+        }
+    }
+    public Dictionary<string, EventCursor> EventCursors()
+    {
+        lock (gate)
+        {
+            try
+            {
+                using var connection = Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "SELECT key, value FROM metadata WHERE key LIKE 'event_cursor:%'";
+                using var reader = command.ExecuteReader();
+                var result = new Dictionary<string, EventCursor>();
+                while (reader.Read())
+                {
+                    var value = reader.GetString(1);
+                    var cursor = long.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var oldRecordId)
+                        ? new EventCursor(oldRecordId, null) : JsonSerializer.Deserialize<EventCursor>(value, Json);
+                    if (cursor is { RecordId: > 0 }) result[reader.GetString(0)["event_cursor:".Length..]] = cursor;
+                }
+                return result;
+            }
+            catch (Exception ex) when (ex is SqliteException or JsonException) { throw new OperationalStoreException("Falha ao consultar a posição da coleta de eventos.", ex); }
+        }
+    }
     public void SaveIntervention(InterventionRecord item) => Write("INSERT OR REPLACE INTO interventions(id,time,payload) VALUES($id,$time,$payload)", item.Id, item.Time, item);
 
     private List<T> Read<T>(string table, int limit, DateTimeOffset? since = null)
@@ -99,6 +172,7 @@ public sealed class OperationalStore : IDisposable
     public List<HealthSnapshot> RecentSnapshots(DateTimeOffset since, int limit) => Read<HealthSnapshot>("snapshots", limit, since);
     public List<HealthFinding> RecentFindings(int limit) => Read<HealthFinding>("findings", limit);
     public List<SystemEvent> RecentEvents(int limit) => Read<SystemEvent>("events", limit);
+    public List<EventGap> RecentEventGaps(int limit, DateTimeOffset? since = null) => Read<EventGap>("event_gaps", limit, since);
     public List<InterventionRecord> RecentInterventions(int limit) => Read<InterventionRecord>("interventions", limit);
 
     public void Prune(TimeSpan retention)
@@ -111,7 +185,7 @@ public sealed class OperationalStore : IDisposable
             {
                 using var connection = Open();
                 using var transaction = connection.BeginTransaction();
-                foreach (var table in new[] { "snapshots", "findings", "events", "interventions" })
+                foreach (var table in new[] { "snapshots", "findings", "events", "event_gaps", "interventions" })
                 {
                     using var command = connection.CreateCommand();
                     command.Transaction = transaction;

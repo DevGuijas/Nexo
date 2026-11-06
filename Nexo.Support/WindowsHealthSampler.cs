@@ -7,6 +7,15 @@ namespace Nexo.Support;
 
 public sealed class WindowsHealthSampler : IHealthSampler
 {
+    internal const int MaxServicesCollected = 200;
+
+    private const string MetricsScript = """
+        $os=Get-CimInstance Win32_OperatingSystem
+        $cpu=Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average
+        $services=@(Get-CimInstance Win32_Service | Where-Object { $_.StartMode -eq 'Auto' } | Select-Object Name,State)
+        [pscustomobject]@{ Cpu=$cpu.Average; TotalKb=$os.TotalVisibleMemorySize; FreeKb=$os.FreePhysicalMemory; Services=$services } | ConvertTo-Json -Compress -Depth 4
+        """;
+
     public async Task<HealthSnapshot> Sample(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
@@ -56,8 +65,7 @@ public sealed class WindowsHealthSampler : IHealthSampler
         catch (Exception ex) { result.Warnings.Add("Estado administrativo dos adaptadores indisponível: " + ex.Message); }
         try
         {
-            const string script = "$os=Get-CimInstance Win32_OperatingSystem; $cpu=Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average; $svc=@(Get-CimInstance Win32_Service | Where-Object { $_.StartMode -eq 'Auto' } | Select-Object -First 80 Name,State,StartMode); [pscustomobject]@{Cpu=$cpu.Average; TotalKb=$os.TotalVisibleMemorySize; FreeKb=$os.FreePhysicalMemory; Services=$svc} | ConvertTo-Json -Compress -Depth 4";
-            using var doc = JsonDocument.Parse(await SupportService.Powershell(script, token, 20));
+            using var doc = JsonDocument.Parse(await SupportService.Powershell(MetricsScript, token, 20));
             var root = doc.RootElement;
             if (root.TryGetProperty("Cpu", out var cpu) && cpu.ValueKind == JsonValueKind.Number) result.CpuPercent = cpu.GetDouble();
             if (root.TryGetProperty("TotalKb", out var total) && total.ValueKind == JsonValueKind.Number && total.GetInt64() > 0
@@ -67,12 +75,38 @@ public sealed class WindowsHealthSampler : IHealthSampler
                 result.MemoryUsedBytes = (total.GetInt64() - free.GetInt64()) * 1024;
                 result.MemoryUsedPercent = 100.0 * result.MemoryUsedBytes / result.MemoryTotalBytes;
             }
-            if (root.TryGetProperty("Services", out var services) && services.ValueKind == JsonValueKind.Array)
-                result.Services = services.EnumerateArray().Select(s => new ServiceHealth(s.GetProperty("Name").GetString() ?? "", s.GetProperty("State").GetString() ?? "", "Automatic")).ToList();
+            ReadServices(root, result);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception ex) { result.Warnings.Add("CPU, memória ou serviços indisponíveis: " + ex.Message); }
-        result.CollectionStatus = result.Warnings.Count == 0 ? "complete" : "partial";
+        ApplyCollectionStatus(result);
         return result;
+    }
+
+    internal static void ApplyCollectionStatus(HealthSnapshot snapshot)
+    {
+        snapshot.CollectionStatus = snapshot.Warnings.Count == 0 ? "complete" : "partial";
+    }
+
+    internal static void ReadServices(JsonElement root, HealthSnapshot snapshot)
+    {
+        if (!root.TryGetProperty("Services", out var services) || services.ValueKind != JsonValueKind.Array)
+            return;
+
+        var automatic = services.EnumerateArray()
+            .Select(service => new ServiceHealth(
+                service.GetProperty("Name").GetString() ?? "",
+                service.GetProperty("State").GetString() ?? "",
+                "Automatic"))
+            .ToList();
+
+        snapshot.Services = automatic
+            .OrderBy(service => service.Status.Equals("Running", StringComparison.OrdinalIgnoreCase))
+            .ThenBy(service => service.Name, StringComparer.OrdinalIgnoreCase)
+            .Take(MaxServicesCollected)
+            .ToList();
+
+        if (automatic.Count > snapshot.Services.Count)
+            snapshot.Warnings.Add($"Serviços automáticos: {snapshot.Services.Count} de {automatic.Count} coletados; os demais não foram avaliados.");
     }
 }
