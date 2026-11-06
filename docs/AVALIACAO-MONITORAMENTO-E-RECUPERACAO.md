@@ -1,4 +1,4 @@
-# Avaliação do sistema imunológico digital do Nexo
+# Avaliação do monitoramento e da recuperação do Nexo
 
 ## Escopo implementado
 
