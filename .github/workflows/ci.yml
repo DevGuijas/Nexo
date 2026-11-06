@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [development]
+  pull_request:
+    branches: [development]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-and-test:
+    name: Compilação e regressões
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Instalar o .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Preparar a pasta de logs
+        run: mkdir -p logs
+
+      - name: Compilar o aplicativo
+        run: dotnet build Nexo.Support -c Release 2>&1 | tee logs/build-app.log
+
+      - name: Compilar o instalador
+        run: dotnet build Nexo.Setup -c Release 2>&1 | tee logs/build-setup.log
+
+      - name: Regressões do Nexo
+        run: dotnet run --project Nexo.Checks -c Release 2>&1 | tee logs/nexo-checks.log
+
+      - name: Regressões do instalador
+        run: dotnet run --project Nexo.Setup.Checks -c Release 2>&1 | tee logs/setup-checks.log
+
+      - name: Transações de rede simuladas
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File Nexo.Checks/NetworkScriptChecks.ps1 2>&1 | tee logs/network-transaction.log
+
+      - name: Inventário e ativação de rede simulados
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File Nexo.Checks/NetworkAdapterChecks.ps1 2>&1 | tee logs/network-adapter.log
+
+      - name: Publicar os logs da falha
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-ci-${{ github.run_number }}
+          path: logs/
+          if-no-files-found: ignore
+          retention-days: 7
