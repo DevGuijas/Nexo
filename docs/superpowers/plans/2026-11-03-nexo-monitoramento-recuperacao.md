@@ -1,4 +1,4 @@
-# Nexo Imunológico Implementation Plan
+# Nexo Monitoring and Recovery Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** C#/.NET 8 Windows, WPF, PowerShell/Windows APIs, Ollama Qwen3 8B, Microsoft.Data.Sqlite 8.0.33.
 
-**Spec:** `docs/superpowers/specs/2026-11-03-nexo-imunologico-design.md`
+**Spec:** `docs/superpowers/specs/2026-11-03-nexo-monitoramento-recuperacao-design.md`
 
 ## Global Constraints
 
@@ -91,7 +91,7 @@
 
 ### Task 6: Dashboard, scenario harness and TCC evidence
 
-**Files:** Modify `MainWindow.xaml`, `MainWindow.xaml.cs`; create `Nexo.Checks/ScenarioChecks.cs`, `docs/AVALIACAO-SISTEMA-IMUNOLOGICO.md`; update `README.md` and Checks project/program.
+**Files:** Modify `MainWindow.xaml`, `MainWindow.xaml.cs`; create `Nexo.Checks/ScenarioChecks.cs`, `docs/AVALIACAO-MONITORAMENTO-E-RECUPERACAO.md`; update `README.md` and Checks project/program.
 
 **Interfaces:** Consume `OperationalStore`, monitoring and diagnostic report; produce live health dashboard, occurrences/events/recovery/driver sections, controls for interval/threshold/retention, seven controlled scenario fixtures and an experimental protocol.
 
