@@ -138,14 +138,21 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         finally
         {
             var state = ResultState(output);
+            var pendingId = currentIntervention?.PendingOperation;
             try
             {
+                if (state != "unknown" && !string.IsNullOrEmpty(pendingId)) currentIntervention!.PendingOperation = "";
                 currentIntervention!.After = output ?? JsonSerializer.Serialize(new { status = "unavailable", reason = "A execução terminou sem resultado retornado." });
                 currentIntervention.Summary = InterventionSummary(state, currentIntervention.PendingOperation != "");
                 MoveIntervention(state, currentIntervention.Summary);
+                if (state != "unknown" && !string.IsNullOrEmpty(pendingId)) PendingOperations.DeleteResult(store.Root, pendingId);
             }
             catch (Exception ex) { try { store.Log(actor, "Falha ao registrar intervenção operacional: " + ex.Message); } catch { /* Preserve the original action result. */ } }
-            finally { currentIntervention = null; }
+            finally
+            {
+                if (!string.IsNullOrEmpty(pendingId)) PendingOperations.Release(pendingId);
+                currentIntervention = null;
+            }
         }
     }
 
@@ -171,7 +178,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     internal static string InterventionSummary(string state, bool pending)
     {
         if (state == "reported") return "Executor relatou conclusão; funcionamento depende de verificação.";
-        if (state == "unknown" && pending) return "A operação continua em segundo plano; o Nexo conferirá o resultado quando o Windows concluir.";
+        if (state == "unknown" && pending) return "A operação pode continuar em segundo plano; o Nexo conferirá o resultado quando o Windows concluir.";
         return "Resultado não confirmado ou recusado.";
     }
 
@@ -456,7 +463,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 progress.Report("Baixando o driver completo da NVIDIA e validando a assinatura digital…");
                 var driverFile = await OfficialDriverSource.DownloadNvidiaDriver(official, token);
                 token.ThrowIfCancellationRequested();
-                progress.Report($"Solicitando permissão do Windows e instalando o driver NVIDIA. Pode levar até {NvidiaSupervisionTimeout.TotalMinutes:F0} minutos…");
+                progress.Report($"Solicitando permissão do Windows e instalando o driver NVIDIA. O Nexo acompanha por {NvidiaSupervisionTimeout.TotalMinutes:F0} minutos e depois mantém o estado incerto até receber o resultado…");
                 return VerifyDriverInstallationResult(await Elevated(NvidiaDriverInstallationScript(driverFile, official, nvidiaDevice.Id, nvidiaDevice.DriverVersion), NvidiaSupervisionTimeout, token));
             case "download_nvidia_app":
                 if (!Fresh(observedDevicesAt) || observedDevices.Count != 1 || !OfficialDriverSource.IsNvidiaDisplay(observedDevices.Values.Single().Device))
@@ -502,7 +509,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         $signature=Get-AuthenticodeSignature -LiteralPath $installer
         if($signature.Status -ne 'Valid' -or [string]$signature.SignerCertificate.Subject -notmatch 'NVIDIA'){throw 'A assinatura do instalador NVIDIA não foi validada'}
         $process=Start-Process -FilePath $installer -ArgumentList @('-s','-n','Display.Driver') -PassThru -ErrorAction Stop
-        if(-not $process.WaitForExit({{(long)NvidiaInstallerTimeout.TotalMilliseconds}})){throw 'O instalador NVIDIA excedeu {{NvidiaInstallerTimeout.TotalMinutes:F0}} minutos; o estado da instalação não foi confirmado'}
+        if(-not $process.WaitForExit({{(long)NvidiaInstallerTimeout.TotalMilliseconds}})){$process.WaitForExit()}
         if($process.ExitCode -notin @(0,1)){throw ('O instalador NVIDIA terminou com código '+$process.ExitCode)}
         Start-Sleep -Seconds 3
         $after=@(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object {$_.PNPDeviceID -eq $targetId -and $_.Present -eq $true})
@@ -613,21 +620,33 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         var output = Path.Combine(dir, "result.json");
         var wrapped = "$ErrorActionPreference='Stop'; try { $data=& { " + script + " }; $result=@{success=$true;data=$data} } catch { $result=@{success=$false;error=$_.Exception.Message} }; $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath " + Quote(output) + " -Encoding UTF8";
         var finished = false;
+        var started = false;
+        var registered = false;
         try
         {
             token.ThrowIfCancellationRequested();
+            if (tracksResult && currentIntervention != null)
+            {
+                using var operational = new OperationalStore(store.Root);
+                PendingOperations.Register(operational, currentIntervention, operationId, DateTimeOffset.UtcNow);
+                registered = true;
+            }
             using var process = StartElevated(wrapped);
+            started = true;
             var state = await OperationSupervisor.Wait(async () => { await process.WaitForExitAsync(); return process.ExitCode; }, timeout, token);
             finished = process.HasExited;
-            if (tracksResult && state == OperationState.Unknown && !finished && currentIntervention != null)
-                currentIntervention.PendingOperation = operationId;
             if (state == OperationState.Unknown) return JsonSerializer.Serialize(new { success = false, state = "unknown", error = "O processo elevado não confirmou o término no prazo ou a espera foi cancelada. A ação pode continuar em segundo plano; confira o estado antes de repetir." });
             if (state == OperationState.Failed || !File.Exists(output)) return JsonSerializer.Serialize(new { success = false, state = "unknown", error = "O processo elevado não retornou resultado válido. Estado não confirmado." });
             return await File.ReadAllTextAsync(output, CancellationToken.None);
         }
         finally
         {
-            try { if (finished) { if (File.Exists(output)) File.Delete(output); Directory.Delete(dir); } }
+            if (registered && !started)
+            {
+                if (currentIntervention != null) currentIntervention.PendingOperation = "";
+                PendingOperations.Release(operationId);
+            }
+            try { if (!started || finished && !registered) { if (File.Exists(output)) File.Delete(output); Directory.Delete(dir); } }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
         }

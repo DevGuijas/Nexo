@@ -59,6 +59,8 @@ internal static class RecoveryChecks
             && WindowsTools.NvidiaSupervisionTimeout > WindowsTools.NvidiaInstallerTimeout
             && script.Contains($"WaitForExit({(long)WindowsTools.NvidiaInstallerTimeout.TotalMilliseconds})"),
             "Supervisor da instalação NVIDIA espera mais que o prazo usado pelo próprio script");
+        check(script.Contains("$process.WaitForExit()") && !script.Contains("throw 'O instalador NVIDIA excedeu"),
+            "Ao superar 30 minutos, o script continua aguardando o instalador para registrar o resultado real");
 
         var time = new FakeTimeProvider();
         var installer = new TaskCompletionSource<int>();
@@ -91,7 +93,7 @@ internal static class RecoveryChecks
 
             check(resolved == 1
                 && stored[late.Id] is { State: "reported", PendingOperation: "" }
-                && stored[late.Id].Transitions[^1].Details.Contains("depois do prazo")
+                && stored[late.Id].Transitions[^1].Details.Contains("reconciliar")
                 && !Directory.Exists(PendingOperations.Folder(root, "late")),
                 "Resultado que chega depois do prazo atualiza a intervenção incerta");
             check(stored[waiting.Id] is { State: "unknown", PendingOperation: "waiting" }
@@ -99,6 +101,44 @@ internal static class RecoveryChecks
                 "Operação sem resultado continua visível como em andamento ou incerta");
             check(stored[partial.Id] is { State: "unknown", PendingOperation: "partial" },
                 "Resultado gravado pela metade não encerra a operação pendente");
+
+            var old = new InterventionRecord { Action = "install_official_nvidia_driver", State = "unknown", PendingOperation = "old", Time = DateTimeOffset.UtcNow.AddDays(-1) };
+            operations.SaveIntervention(old);
+            for (var index = 0; index < 55; index++)
+                operations.SaveIntervention(new InterventionRecord { Time = DateTimeOffset.UtcNow.AddMinutes(index) });
+            WriteResult(root, "old", """{"success":true,"data":{"Driver":"NVIDIA 621.01","Verification":"version_changed"}}""");
+            check(PendingOperations.Reconcile(root, operations, DateTimeOffset.UtcNow) == 1
+                && operations.PendingInterventions().All(item => item.Id != old.Id),
+                "Pendência antiga é reconciliada mesmo após mais de 50 intervenções novas");
+
+            var prepared = new InterventionRecord { Action = "install_official_nvidia_driver", Authorized = true };
+            PendingOperations.Register(operations, prepared, "prepared", DateTimeOffset.UtcNow);
+            using var reopened = new OperationalStore(root);
+            check(reopened.PendingInterventions().Any(item => item.Id == prepared.Id && item.PendingOperation == "prepared" && item.State == "executing")
+                && HealthReportPresentation.InterventionState(prepared).Contains("em andamento"),
+                "Vínculo da operação é persistido antes da espera e sobrevive à reabertura do banco");
+            WriteResult(root, "prepared", """{"success":true,"data":{"Driver":"NVIDIA 621.01","Verification":"version_changed"}}""");
+            check(PendingOperations.Reconcile(root, operations, DateTimeOffset.UtcNow) == 0,
+                "Monitor não consome o resultado enquanto o executor ainda está ativo");
+            PendingOperations.Release("prepared");
+            check(PendingOperations.Reconcile(root, operations, DateTimeOffset.UtcNow) == 1,
+                "Após encerrar o executor, o monitor pode reconciliar a pendência");
+
+            var retained = new InterventionRecord { Time = DateTimeOffset.UtcNow.AddDays(-5), State = "unknown", PendingOperation = "retained" };
+            var expired = new InterventionRecord { Time = DateTimeOffset.UtcNow.AddDays(-5), State = "reported" };
+            operations.SaveIntervention(retained);
+            operations.SaveIntervention(expired);
+            WriteResult(root, "retained", """{"success":true,"data":{"Driver":"NVIDIA 621.01","Verification":"version_changed"}}""");
+            operations.Prune(TimeSpan.FromDays(1));
+            check(operations.PendingInterventions().Any(item => item.Id == retained.Id)
+                && operations.RecentInterventions(100).All(item => item.Id != expired.Id)
+                && PendingOperations.Reconcile(root, operations, DateTimeOffset.UtcNow) == 1,
+                "Retenção preserva operação incerta até ler o resultado tardio");
+
+            var rejectedPath = false;
+            try { PendingOperations.Folder(root, "../outside"); }
+            catch (ArgumentException) { rejectedPath = true; }
+            check(rejectedPath, "Identificador de pendência não pode escapar da pasta de operações");
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }

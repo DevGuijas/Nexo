@@ -1,23 +1,51 @@
 using System.IO;
 using System.Text.Json;
+using System.Collections.Concurrent;
 
 namespace Nexo.Support;
 
 public static class PendingOperations
 {
-    private const int InterventionsToCheck = 50;
+    private static readonly ConcurrentDictionary<string, byte> Active = new(StringComparer.Ordinal);
 
-    public static string Folder(string root, string operationId) => Path.Combine(root, "operations", operationId);
+    public static string Folder(string root, string operationId)
+    {
+        ValidateId(operationId);
+        return Path.Combine(root, "operations", operationId);
+    }
+
+    private static void ValidateId(string operationId)
+    {
+        if (string.IsNullOrEmpty(operationId) || operationId.Length > 64 || operationId.Any(c => c is not (>= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '-')))
+            throw new ArgumentException("Identificador de operação inválido.", nameof(operationId));
+    }
 
     public static bool IsWaiting(InterventionRecord intervention)
-        => intervention.State == "unknown" && intervention.PendingOperation != "";
+        => intervention.State is "unknown" or "executing" && !string.IsNullOrEmpty(intervention.PendingOperation);
+
+    public static void Register(OperationalStore operations, InterventionRecord intervention, string operationId, DateTimeOffset now)
+    {
+        ValidateId(operationId);
+        intervention.PendingOperation = operationId;
+        intervention.State = "executing";
+        intervention.Summary = "Operação elevada preparada; aguardando resultado verificável.";
+        if (intervention.Transitions.LastOrDefault()?.State != "executing")
+            intervention.Transitions.Add(new InterventionTransition(now, "executing", intervention.Summary));
+        operations.SaveIntervention(intervention);
+        Active.TryAdd(operationId, 0);
+    }
+
+    public static void Release(string operationId) => Active.TryRemove(operationId, out _);
 
     public static int Reconcile(string root, OperationalStore operations, DateTimeOffset now)
     {
         var resolved = 0;
-        foreach (var intervention in operations.RecentInterventions(InterventionsToCheck).Where(IsWaiting))
+        foreach (var intervention in operations.PendingInterventions().Where(IsWaiting))
         {
-            var folder = Folder(root, intervention.PendingOperation);
+            if (Active.ContainsKey(intervention.PendingOperation)) continue;
+            string folder;
+            try { folder = Folder(root, intervention.PendingOperation); }
+            catch (ArgumentException) { continue; }
             var output = ReadLateResult(folder);
             if (output == null) continue;
 
@@ -28,7 +56,7 @@ public static class PendingOperations
             intervention.After = output;
             intervention.Summary = WindowsTools.InterventionSummary(state, pending: false);
             intervention.PendingOperation = "";
-            intervention.Transitions.Add(new InterventionTransition(now, state, "Resultado recebido depois do prazo de espera do Nexo."));
+            intervention.Transitions.Add(new InterventionTransition(now, state, "Resultado recebido ao reconciliar a operação pendente."));
             operations.SaveIntervention(intervention);
             TryDelete(folder);
             resolved++;
@@ -60,4 +88,6 @@ public static class PendingOperations
         {
         }
     }
+
+    public static void DeleteResult(string root, string operationId) => TryDelete(Folder(root, operationId));
 }

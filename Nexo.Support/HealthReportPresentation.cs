@@ -33,7 +33,7 @@ public static class HealthReportPresentation
     }
     public static string InterventionState(InterventionRecord intervention) => intervention.State switch
     {
-        "unknown" when PendingOperations.IsWaiting(intervention) => "em andamento ou incerto, aguardando o resultado do Windows",
+        _ when PendingOperations.IsWaiting(intervention) => "em andamento ou incerto, aguardando o resultado do Windows",
         "unknown" => "incerto, sem resultado verificável",
         _ => intervention.State
     };
