@@ -55,16 +55,16 @@
 
 **Interfaces:** `HealthRules.Evaluate` emits `network-external-unconfirmed` only from three consecutive failing external checks while local connectivity is active. Settings checkboxes and fields feed `HealthSettings`; panel and report label each probe independently.
 
-- [ ] Add failing tests for a lone failure, three continuous failures, a successful recovery, network isolation, an unavailable target and report text.
-- [ ] Run the suite and observe the failures.
-- [ ] Implement rule and presentation, then wire the settings and sampler.
-- [ ] Run the suite and WPF preview to green; commit `feat(interface): mostra sondagens e alertas de conectividade`.
+- [x] Add failing tests for a lone failure, three continuous failures, a successful recovery, network isolation, an unavailable target and report text.
+- [x] Run the suite and observe the failures.
+- [x] Implement rule and presentation, then wire the settings and sampler.
+- [x] Run the suite and WPF preview to green; commit `feat(interface): mostra sondagens e alertas de conectividade`.
 
 ### Task 4: Evidence and delivery
 
 **Files:** Modify `README.md`, `docs/AVALIACAO-MONITORAMENTO-E-RECUPERACAO.md`, this plan.
 
-- [ ] Document opt-in behavior, target-specific interpretation and remaining real-network limits.
+- [x] Document opt-in behavior, target-specific interpretation and remaining real-network limits.
 - [ ] Run builds, both .NET suites, simulated PowerShell network suites, `scripts/Check-UiPreview.ps1` and `git diff --check`.
 - [ ] Request a read-only branch review; address concrete findings with red-green tests.
 - [ ] Push the feature branch, open a PR to `development`, wait for Actions and record evidence on #17.
