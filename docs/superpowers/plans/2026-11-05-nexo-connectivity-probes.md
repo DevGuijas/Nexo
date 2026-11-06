@@ -42,12 +42,12 @@
 
 **Files:** Create `Nexo.Support/ConnectivityProbe.cs`, `Nexo.Checks/ConnectivityProbeChecks.cs`; modify `Nexo.Checks/Nexo.Checks.csproj`, `Nexo.Checks/Program.cs`, `Nexo.Support/WindowsHealthSampler.cs`.
 
-**Interfaces:** `ConnectivityProbe.Run(HealthSettings settings, IReadOnlyList<IPAddress> gateways, CancellationToken token)` returns three `NetworkProbeReading` values; injectable ping, DNS and HTTP delegates allow deterministic checks without live requests. `WindowsHealthSampler(HealthSettings? settings = null, ConnectivityProbe? probe = null)` keeps existing call sites valid.
+**Interfaces:** `ConnectivityProbe.Run(HealthSettings settings, bool localActive, IReadOnlyList<IPAddress> gateways, CancellationToken token)` returns three `NetworkProbeReading` values; injectable ping, DNS and HTTP delegates allow deterministic checks without live requests. `WindowsHealthSampler(HealthSettings? settings = null, ConnectivityProbe? probe = null)` keeps existing call sites valid.
 
-- [ ] Add failing tests for disabled checks, no gateway, ICMP silence, DNS failure, matching HTTP body, redirect/wrong body, cancellation and bounded requests.
-- [ ] Run the suite and observe the failures.
-- [ ] Implement the smallest probe and sampler integration; cap work per sample and preserve local collection if a probe fails.
-- [ ] Run the suite to green and commit `feat(monitoramento): coleta gateway DNS e destino externo`.
+- [x] Add failing tests for disabled checks, no gateway, ICMP silence, DNS failure, matching HTTP body, redirect/wrong body, cancellation and bounded requests.
+- [x] Run the suite and observe the failures.
+- [x] Implement the smallest probe and sampler integration; cap work per sample and preserve local collection if a probe fails.
+- [x] Run the suite to green and commit `feat(monitoramento): coleta gateway DNS e destino externo`.
 
 ### Task 3: Temporal rule, report and UI
 

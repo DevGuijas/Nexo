@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.NetworkInformation;
 using System.Text.Json;
 
@@ -8,6 +9,14 @@ namespace Nexo.Support;
 public sealed class WindowsHealthSampler : IHealthSampler
 {
     internal const int MaxServicesCollected = 200;
+    private readonly HealthSettings settings;
+    private readonly ConnectivityProbe connectivityProbe;
+
+    public WindowsHealthSampler(HealthSettings? settings = null, ConnectivityProbe? probe = null)
+    {
+        this.settings = settings ?? new HealthSettings();
+        connectivityProbe = probe ?? new ConnectivityProbe();
+    }
 
     private const string MetricsScript = """
         $os=Get-CimInstance Win32_OperatingSystem
@@ -20,6 +29,7 @@ public sealed class WindowsHealthSampler : IHealthSampler
     {
         token.ThrowIfCancellationRequested();
         var result = new HealthSnapshot();
+        IReadOnlyList<IPAddress> gateways = [];
         try
         {
             foreach (var drive in DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed))
@@ -41,10 +51,19 @@ public sealed class WindowsHealthSampler : IHealthSampler
         catch (Exception ex) { result.Warnings.Add("Processos: " + ex.Message); }
         try
         {
-            result.Adapters = NetworkInterface.GetAllNetworkInterfaces()
+            var interfaces = NetworkInterface.GetAllNetworkInterfaces()
                 .Where(n => n.NetworkInterfaceType is not (NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel))
+                .ToArray();
+            result.Adapters = interfaces
                 .Select(n => new AdapterHealth(n.Id, n.Name, n.OperationalStatus.ToString(), n.OperationalStatus == OperationalStatus.Up)).ToList();
             result.Connectivity = result.Adapters.Any(a => a.Enabled) ? "local" : "none";
+            gateways = interfaces.Where(n => n.OperationalStatus == OperationalStatus.Up)
+                .SelectMany(n =>
+                {
+                    try { return n.GetIPProperties().GatewayAddresses.Select(g => g.Address).ToArray(); }
+                    catch (NetworkInformationException) { return []; }
+                })
+                .Distinct().Take(4).ToArray();
         }
         catch (Exception ex) { result.Warnings.Add("Adaptadores: " + ex.Message); }
         try
@@ -79,6 +98,15 @@ public sealed class WindowsHealthSampler : IHealthSampler
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception ex) { result.Warnings.Add("CPU, memória ou serviços indisponíveis: " + ex.Message); }
+        try
+        {
+            var readings = await connectivityProbe.Run(settings, result.Connectivity == "local", gateways, token);
+            result.GatewayProbe = readings.Gateway;
+            result.DnsProbe = readings.Dns;
+            result.ExternalProbe = readings.External;
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (Exception ex) { result.Warnings.Add("Sondagens de rede indisponíveis: " + ex.Message); }
         ApplyCollectionStatus(result);
         return result;
     }
