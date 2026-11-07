@@ -270,7 +270,7 @@ O Ollama e o modelo continuam separados nos dois casos. Uma publicação self-co
 Depois de conferir que o executável abre:
 
 ```powershell
-$nexoZip = ".\artifacts\Nexo-$nexoVersion-local-Windows.zip"
+$nexoZip = "$nexoPublishDir-Windows.zip"
 Compress-Archive -Path "$nexoPublishDir\*" -DestinationPath $nexoZip
 ```
 
@@ -280,11 +280,12 @@ Use nomes novos para não sobrescrever por acidente um pacote já validado. Dist
 
 Para distribuir também o Ollama e o modelo, use o instalador descrito em [Instalador e publicação na Oracle](INSTALADOR-NUVEM.md). O executável de instalação publicado está disponível em [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe).
 
-Compilar `NexoSetup.exe` só exige o SDK:
+Compilar `NexoSetup.exe` só exige o SDK. O instalador tem versão própria, definida em `Nexo.Setup.csproj`:
 
 ```powershell
+$nexoSetupVersion = "1.0.0"
 dotnet publish .\Nexo.Setup\Nexo.Setup.csproj -c Release -r win-x64 --self-contained true `
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ".\artifacts\NexoSetup-$nexoVersion"
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ".\artifacts\NexoSetup-$nexoSetupVersion"
 ```
 
 Gerar uma versão completa depende de infraestrutura externa: `scripts/Build-CloudRelease.ps1` exige a chave privada de publicação, o instalador oficial do Ollama e o modelo local, e o envio usa o bucket da Oracle. Sem esses itens, esse passo não pode ser reproduzido.
