@@ -35,6 +35,28 @@ public static class OfficialDriverSource
         return new Version((branch % 10) * 100 + build / 100, build % 100);
     }
 
+    // O catálogo põe "NVIDIA" na série 50 e na RTX 40 desktop, mas não na RTX 40 Laptop, na série 30 e anteriores; o Windows sempre põe.
+    private static string WithoutNvidiaPrefix(string name)
+    {
+        var trimmed = name.Trim();
+        return trimmed.StartsWith("NVIDIA ", StringComparison.OrdinalIgnoreCase) ? trimmed[7..].TrimStart() : trimmed;
+    }
+
+    public static bool SameNvidiaProduct(string catalogName, string deviceName) => WithoutNvidiaPrefix(deviceName).Length > 0
+        && WithoutNvidiaPrefix(catalogName).Equals(WithoutNvidiaPrefix(deviceName), StringComparison.OrdinalIgnoreCase);
+
+    // O nome exato tem prioridade, porque alguns modelos aparecem com e sem o prefixo em séries diferentes.
+    // Sem nome exato, a comparação ignora o prefixo e ainda exige um único produto.
+    public static (int ProductId, int SeriesId)? FindNvidiaProduct(string productXml, string deviceName)
+    {
+        var values = XDocument.Parse(productXml).Descendants("LookupValue").ToArray();
+        var matches = values.Where(value => string.Equals(value.Element("Name")?.Value, deviceName, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (matches.Length == 0) matches = values.Where(value => SameNvidiaProduct(value.Element("Name")?.Value ?? "", deviceName)).ToArray();
+        if (matches.Length != 1 || !int.TryParse(matches[0].Element("Value")?.Value, out var productId)
+            || !int.TryParse(matches[0].Attribute("ParentID")?.Value, out var seriesId)) return null;
+        return (productId, seriesId);
+    }
+
     public static DriverOffer? ParseNvidiaDriverDetails(string json, string id, string deviceName, string installedVersion, bool windows11)
     {
         using var document = JsonDocument.Parse(json);
@@ -49,8 +71,7 @@ public static class OfficialDriverSource
         if (!info.GetProperty("OSList").EnumerateArray().Any(os => Uri.UnescapeDataString(os.GetProperty("OSName").GetString() ?? "") == matchingOs)) return null;
         var matchingProduct = info.GetProperty("series").EnumerateArray().Any(series =>
             series.GetProperty("products").EnumerateArray().Any(product =>
-                Uri.UnescapeDataString(product.GetProperty("productName").GetString() ?? "")
-                    .Equals(deviceName, StringComparison.OrdinalIgnoreCase)));
+                SameNvidiaProduct(Uri.UnescapeDataString(product.GetProperty("productName").GetString() ?? ""), deviceName)));
         if (!matchingProduct || !Uri.TryCreate(Get("DownloadURL"), UriKind.Absolute, out var url) || !AllowedNvidiaDriver(url, version)) return null;
         return new DriverOffer(id, version, url, deviceName, installedVersion);
     }
@@ -61,10 +82,7 @@ public static class OfficialDriverSource
             throw new InvalidOperationException("A consulta oficial exige uma placa NVIDIA PCI presente no Windows 10/11.");
         var windows11 = OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000);
         var productXml = await FetchSmall("https://www.nvidia.com/Download/API/lookupValueSearch.aspx?TypeID=3&ParentID=0&Lang=en-us", 200_000, token);
-        var products = XDocument.Parse(productXml).Descendants("LookupValue")
-            .Where(value => string.Equals(value.Element("Name")?.Value, device.Name, StringComparison.OrdinalIgnoreCase)).ToArray();
-        if (products.Length != 1 || !int.TryParse(products[0].Element("Value")?.Value, out var productId)
-            || !int.TryParse(products[0].Attribute("ParentID")?.Value, out var seriesId))
+        if (FindNvidiaProduct(productXml, device.Name) is not (int productId, int seriesId))
             throw new InvalidDataException("A NVIDIA não identificou de forma única o modelo observado. Consulte o fabricante manualmente.");
         var osXml = await FetchSmall("https://www.nvidia.com/Download/API/lookupValueSearch.aspx?TypeID=4&ParentID=0&Lang=en-us", 50_000, token);
         var osName = windows11 ? "Windows 11" : "Windows 10 64-bit";
