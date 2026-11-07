@@ -724,6 +724,8 @@ public partial class MainWindow : Window
         var cpu = Field(healthPanel, "Alerta de CPU persistente (%)", healthSettings.CpuHighPercent.ToString("F0"));
         var disk = Field(healthPanel, "Alerta de espaço livre abaixo de (%)", healthSettings.DiskLowFreePercent.ToString("F0"));
         var retention = Field(healthPanel, "Retenção do histórico operacional (dias: 1–365)", healthSettings.RetentionDays.ToString());
+        var processGrowth = Field(healthPanel, "Alerta de crescimento de memória por processo (pontos da RAM: 1–50)", healthSettings.ProcessMemoryGrowthPoints.ToString());
+        var processSamples = Field(healthPanel, "Leituras seguidas para esse alerta (3–19)", healthSettings.ProcessMemorySamples.ToString());
         var networkHeading = Text("Sondagens de rede (opcionais)", 15); networkHeading.FontWeight = FontWeights.SemiBold;
         networkHeading.Margin = new Thickness(0, 24, 0, 8); healthPanel.Children.Add(networkHeading);
         healthPanel.Children.Add(Text("Ao ativar DNS ou destino externo, o Nexo envia consultas aos endereços abaixo. Um teste sem resposta não confirma a causa da falha.", 12, "Secondary"));
@@ -745,12 +747,14 @@ public partial class MainWindow : Window
         healthPanel.Children.Add(Action("Salvar monitoramento", async (_, _) => await GuardAsync(async () =>
         {
             if (!int.TryParse(interval.Text, out var intervalValue) || !HealthSettings.TryParsePercent(cpu.Text, System.Globalization.CultureInfo.CurrentCulture, out var cpuValue)
-                || !HealthSettings.TryParsePercent(disk.Text, System.Globalization.CultureInfo.CurrentCulture, out var diskValue) || !int.TryParse(retention.Text, out var retentionValue))
+                || !HealthSettings.TryParsePercent(disk.Text, System.Globalization.CultureInfo.CurrentCulture, out var diskValue) || !int.TryParse(retention.Text, out var retentionValue)
+                || !HealthSettings.TryParseGrowthPoints(processGrowth.Text, System.Globalization.CultureInfo.CurrentCulture, out var processGrowthValue) || !int.TryParse(processSamples.Text, out var processSamplesValue))
                 throw new InvalidOperationException("Informe números válidos para as preferências de saúde.");
             var next = new HealthSettings { IntervalSeconds = intervalValue, CpuHighPercent = cpuValue, DiskLowFreePercent = diskValue,
                 RetentionDays = retentionValue, CheckGateway = checkGateway.IsChecked == true, CheckDns = checkDns.IsChecked == true,
                 CheckExternal = checkExternal.IsChecked == true, DnsProbeHost = dnsHost.Text.Trim(), HttpProbeUrl = httpUrl.Text.Trim(),
-                HttpExpectedText = expectedText.Text.Trim() };
+                HttpExpectedText = expectedText.Text.Trim(), ProcessMemoryGrowthPoints = processGrowthValue,
+                ProcessMemorySamples = processSamplesValue };
             next.Save(store.Root);
             if (healthMonitor != null) { await healthMonitor.StopAsync(); healthMonitor.Dispose(); healthMonitor = null; }
             healthSettings = next; healthStore?.Prune(TimeSpan.FromDays(next.RetentionDays)); StartHealthMonitoring();
