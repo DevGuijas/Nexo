@@ -296,12 +296,18 @@ public partial class MainWindow : Window
                 PageContent.Children.Add(Card(overview));
             }
             var alerts = healthStore.RecentFindings(20);
+            var occurrenceNow = DateTimeOffset.UtcNow;
+            var occurrenceHistory = healthStore.RecentSnapshots(occurrenceNow.AddHours(-6), 20);
+            var occurrenceLimits = healthSettings.Thresholds();
             PageContent.Children.Add(SectionHeading("health", "Ocorrências preventivas"));
-            if (alerts.Count == 0) PageContent.Children.Add(Card(Text("Nenhuma ocorrência persistente registrada.", 13, "Secondary")));
-            foreach (var finding in alerts)
+            PageContent.Children.Add(Card(Text(HealthOccurrences.CollectionNotice(latest, occurrenceLimits, occurrenceNow), 12, "Secondary")));
+            if (alerts.Count == 0) PageContent.Children.Add(Card(Text("Nenhuma ocorrência registrada.", 13, "Secondary")));
+            foreach (var (finding, status) in HealthOccurrences.Classify(alerts, occurrenceHistory, occurrenceLimits, occurrenceNow))
             {
                 var detail = new StackPanel();
-                detail.Children.Add(Text($"{finding.Time.ToLocalTime():g}  ·  {finding.Severity}", 11, finding.Severity == "critical" ? "Danger" : "Warning"));
+                detail.Children.Add(Text($"{finding.Time.ToLocalTime():g}  ·  {finding.Severity}", 11, status.State != OccurrenceState.Persistent ? "Secondary" : finding.Severity == "critical" ? "Danger" : "Warning"));
+                var occurrenceState = Text(status.Label, 12, status.State switch { OccurrenceState.Persistent => "Warning", OccurrenceState.Resolved => "Success", _ => "Secondary" });
+                occurrenceState.FontWeight = FontWeights.SemiBold; occurrenceState.Margin = new Thickness(0, 5, 0, 0); detail.Children.Add(occurrenceState);
                 var problem = Text(finding.Problem, 15); problem.FontWeight = FontWeights.SemiBold; problem.Margin = new Thickness(0, 7, 0, 7); detail.Children.Add(problem);
                 detail.Children.Add(Text($"{finding.Evidence}\nHipótese: {finding.Cause}\nPróximo passo: {finding.Recommendation}", 13, "Secondary"));
                 PageContent.Children.Add(Card(detail));
@@ -837,6 +843,30 @@ public partial class MainWindow : Window
                 throw new InvalidOperationException("O painel não separa gateway, DNS e destino externo.");
             await Capture("nexo-health-data.png");
             Width = 1060; Height = 720; UpdateLayout(); await Capture("nexo-health-data-small.png");
+            Width = 1380; Height = 900; UpdateLayout();
+            var occurrenceSample = DateTimeOffset.UtcNow;
+            for (var i = 0; i < 3; i++)
+                healthStore.SaveSnapshot(new HealthSnapshot { Time = occurrenceSample.AddMilliseconds(i), CpuPercent = 95, MemoryUsedPercent = 54, Connectivity = "local",
+                    CollectionStatus = "complete", Disks = [new DiskHealth("C:\\", 80, 200)] });
+            HealthFinding Occurrence(string id, string severity, string title) => new() { Id = id + ":preview", Time = occurrenceSample.AddMinutes(-5), Severity = severity, Problem = title,
+                Evidence = "Leituras simuladas da prévia", Cause = "Exemplo da prévia", Recommendation = "Nenhuma ação: dados de exemplo" };
+            healthStore.SaveFindings([Occurrence("cpu-high", "warning", "Uso persistente de CPU"), Occurrence("disk-low:C:\\", "critical", "Pouco espaço no volume C:\\"),
+                Occurrence("service-stopped:Spooler", "warning", "Serviço automático interrompido")]);
+            ShowPage("health");
+            var occurrenceTexts = Descendants<TextBlock>(PageContent).ToArray();
+            foreach (var expected in new[] { "Última coleta", "Persiste nas leituras atuais", "Resolvida:", "estado atual desconhecido" })
+                if (!occurrenceTexts.Any(text => text.Text.Contains(expected))) throw new InvalidOperationException("O painel não mostra o estado da ocorrência: " + expected);
+            async Task CaptureAt(string text, string file, double extraScroll = 0)
+            {
+                UpdateLayout(); occurrenceTexts.First(item => item.Text.Contains(text)).BringIntoView();
+                if (extraScroll > 0) { UpdateLayout(); PageScroll.ScrollToVerticalOffset(PageScroll.VerticalOffset + extraScroll); }
+                await Capture(file);
+            }
+            await CaptureAt("Última coleta", "nexo-health-occurrences.png");
+            await CaptureAt("Uso persistente de CPU", "nexo-health-occurrences-active.png", 100);
+            Width = 1060; Height = 720;
+            await CaptureAt("Última coleta", "nexo-health-occurrences-small.png");
+            await CaptureAt("Uso persistente de CPU", "nexo-health-occurrences-active-small.png", 100);
             Width = 1380; Height = 900; UpdateLayout();
         }
         ShowPage("settings");
