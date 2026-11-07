@@ -20,6 +20,10 @@ public sealed class HealthSettings
     public string HttpProbeUrl { get; set; } = "http://www.msftconnecttest.com/connecttest.txt";
     public string HttpExpectedText { get; set; } = "Microsoft Connect Test";
 
+    // Sem separador de milhar: em pt-BR, "2.5" viraria 25 sem nenhum aviso.
+    public static bool TryParsePercent(string text, IFormatProvider culture, out double value)
+        => double.TryParse(text, NumberStyles.Float, culture, out value) && double.IsFinite(value);
+
     public HealthThresholds Thresholds() => new() { CpuHighPercent = CpuHighPercent, DiskLowFreePercent = DiskLowFreePercent,
         MaxSampleGap = TimeSpan.FromSeconds(Math.Max(90, IntervalSeconds * 1.5)),
         ExternalProbeMaxSampleGap = TimeSpan.FromSeconds(Math.Max(IntervalSeconds * 1.5, IntervalSeconds + 14)),
@@ -43,9 +47,8 @@ public sealed class HealthSettings
                 throw new ArgumentException("Informe o texto esperado da resposta, com até 120 caracteres.", nameof(HttpExpectedText));
         }
     }
-    // Sem separador de milhar: em pt-BR, "1.5" viraria 15 sem nenhum aviso.
     public static bool TryParseGrowthPoints(string text, IFormatProvider culture, out double points)
-        => double.TryParse(text, NumberStyles.Float, culture, out points);
+        => TryParsePercent(text, culture, out points);
     public static HealthSettings Load(string root)
     {
         var path = Path.Combine(root, "health-settings.json");
