@@ -13,7 +13,7 @@ public static class HealthOccurrences
     public static IReadOnlyList<(HealthFinding Finding, OccurrenceStatus Status)> Classify(IReadOnlyList<HealthFinding> findings, IReadOnlyList<HealthSnapshot> history, HealthThresholds thresholds, DateTimeOffset now)
     {
         var ordered = history.OrderBy(s => s.Time).ToArray();
-        var active = HealthRules.Evaluate(ordered, thresholds).Select(f => f.Id).ToHashSet();
+        var active = HealthRules.Evaluate(ordered, thresholds);
         var current = IsRecent(ordered.LastOrDefault(), thresholds, now);
         var newest = findings.GroupBy(BaseId).Select(group => group.MaxBy(f => f.Time)!).ToHashSet();
         return findings.Select(finding => (finding, Status(finding))).ToArray();
@@ -24,7 +24,9 @@ public static class HealthOccurrences
             if (!newest.Contains(finding)) return Unknown("há ocorrência mais recente do mesmo alerta");
             if (!current) return Unknown("sem leitura recente");
             var id = BaseId(finding);
-            if (active.Contains(id)) return new(OccurrenceState.Persistent, "Persiste nas leituras atuais");
+            if (active.Any(currentFinding => currentFinding.Id == id && (id != "network-external-unconfirmed"
+                || SameProbe(finding, currentFinding.ProbeTarget, currentFinding.ProbeConfigurationId))))
+                return new(OccurrenceState.Persistent, "Persiste nas leituras atuais");
             var criterion = CriterionFor(id, finding, thresholds);
             if (criterion == null) return Unknown("sem critério para confirmar o fim");
             var recent = ordered.Where(s => s.Time > finding.Time).TakeLast(criterion.Samples).ToArray();
@@ -49,6 +51,11 @@ public static class HealthOccurrences
     // O monitor acrescenta ":{id da amostra}" ao identificador da regra.
     private static string BaseId(HealthFinding finding) => finding.Id.Contains(':') ? finding.Id[..finding.Id.LastIndexOf(':')] : finding.Id;
 
+    private static bool SameProbe(HealthFinding finding, string target, string configurationId)
+        => !string.IsNullOrWhiteSpace(finding.ProbeTarget) && !string.IsNullOrWhiteSpace(finding.ProbeConfigurationId)
+            && string.Equals(finding.ProbeTarget, target, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(finding.ProbeConfigurationId, configurationId, StringComparison.Ordinal);
+
     private static Criterion? CriterionFor(string id, HealthFinding finding, HealthThresholds limits)
     {
         var separator = id.IndexOf(':');
@@ -58,9 +65,9 @@ public static class HealthOccurrences
             "cpu-high" => new(limits.CpuSamples, limits.MaxSampleGap, s => s.CpuPercent < limits.CpuHighPercent),
             "memory-growing" => new(3, limits.MaxSampleGap, s => s.MemoryUsedPercent < limits.MemoryGrowthFinalPercent),
             "network-none" => new(limits.NetworkSamples, limits.MaxSampleGap, s => s.Connectivity == "local"),
-            // A evidência guarda o destino: a resposta de outro destino não encerra este alerta.
-            "network-external-unconfirmed" => new(limits.NetworkSamples, limits.ExternalProbeMaxSampleGap, s => s.ExternalProbe?.State == "ok"
-                && !string.IsNullOrWhiteSpace(s.ExternalProbe.Target) && finding.Evidence.Contains(s.ExternalProbe.Target, StringComparison.Ordinal)),
+            "network-external-unconfirmed" when !string.IsNullOrWhiteSpace(finding.ProbeTarget) && !string.IsNullOrWhiteSpace(finding.ProbeConfigurationId)
+                => new(limits.NetworkSamples, limits.ExternalProbeMaxSampleGap, s => s.ExternalProbe?.State == "ok"
+                    && SameProbe(finding, s.ExternalProbe.Target, s.ExternalProbe.ConfigurationId)),
             "disk-low" => new(limits.OtherSamples, limits.MaxSampleGap, s => s.Disks.FirstOrDefault(d => d.Name.Equals(subject, StringComparison.OrdinalIgnoreCase)) is { TotalBytes: > 0 } disk
                 && 100.0 * disk.FreeBytes / disk.TotalBytes >= limits.DiskLowFreePercent),
             "service-stopped" => new(limits.OtherSamples, limits.MaxSampleGap, s => s.Services.FirstOrDefault(x => x.Name == subject) is { } service

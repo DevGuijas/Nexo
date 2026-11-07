@@ -28,9 +28,11 @@ public static class HealthRules
         bool Continuous(HealthSnapshot[] samples, TimeSpan? maxGap = null) => samples.Length > 0
             && samples.Zip(samples.Skip(1)).All(pair => pair.Second.Time - pair.First.Time <= (maxGap ?? thresholds.MaxSampleGap));
         HealthSnapshot[] Tail(int count) => ordered.TakeLast(count).ToArray();
-        HealthFinding Finding(string id, string category, string problem, string evidence, string cause, string severity, string impact, string recommendation, double confidence)
+        HealthFinding Finding(string id, string category, string problem, string evidence, string cause, string severity, string impact, string recommendation, double confidence,
+            string probeTarget = "", string probeConfigurationId = "")
             => new() { Id = id, Time = latest.Time, Category = category, Problem = problem, Evidence = evidence, Cause = cause,
-                Severity = severity, Impact = impact, Recommendation = recommendation, Confidence = confidence, Confirmed = false };
+                Severity = severity, Impact = impact, Recommendation = recommendation, Confidence = confidence, Confirmed = false,
+                ProbeTarget = probeTarget, ProbeConfigurationId = probeConfigurationId };
 
         var cpu = Tail(thresholds.CpuSamples);
         if (cpu.Length == thresholds.CpuSamples && Continuous(cpu) && cpu.All(s => s.CpuPercent >= thresholds.CpuHighPercent))
@@ -72,7 +74,8 @@ public static class HealthRules
                 $"{network.Length} consultas consecutivas a {latest.ExternalProbe.Target} sem a resposta esperada",
                 "Destino indisponível, proxy, portal cativo ou restrição de rede são possibilidades ainda não diferenciadas",
                 "warning", "Serviços que dependem deste destino podem estar indisponíveis",
-                "Confira gateway, DNS e o destino configurado antes de alterar a rede", 0.65));
+                "Confira gateway, DNS e o destino configurado antes de alterar a rede", 0.65,
+                latest.ExternalProbe.Target, latest.ExternalProbe.ConfigurationId));
 
         var memory = Tail(3);
         if (memory.Length == 3 && Continuous(memory) && memory.All(s => s.MemoryUsedPercent.HasValue)

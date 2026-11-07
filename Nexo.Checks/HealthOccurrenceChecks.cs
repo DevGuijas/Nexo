@@ -90,10 +90,21 @@ internal static class HealthOccurrenceChecks
         check(State(adapter, Series(s => s.Connectivity = "none", 30, 0)).State == OccurrenceState.Unknown, "Adaptador ausente da leitura não prova resolução");
 
         var external = Found("network-external-unconfirmed", evidence: "3 consultas consecutivas a example.com sem a resposta esperada");
-        static NetworkProbeReading Probe(string state, string target = "example.com") => new(state, target, "", "config");
+        external.ProbeTarget = "example.com";
+        external.ProbeConfigurationId = "config";
+        static NetworkProbeReading Probe(string state, string target = "example.com", string configuration = "config") => new(state, target, "", configuration);
         check(State(external, Series(s => { s.Connectivity = "local"; s.ExternalProbe = Probe("unexpected"); }, 60, 30, 0)).State == OccurrenceState.Persistent, "Destino externo sem resposta persiste");
         check(State(external, Series(s => { s.Connectivity = "local"; s.ExternalProbe = Probe("ok"); }, 60, 30, 0)).State == OccurrenceState.Resolved, "Resposta esperada do mesmo destino resolve a ocorrência");
         check(State(external, Series(s => { s.Connectivity = "local"; s.ExternalProbe = Probe("ok", "outro.example"); }, 60, 30, 0)).State == OccurrenceState.Unknown, "Resposta de outro destino não resolve a ocorrência");
+        check(State(external, Series(s => { s.Connectivity = "local"; s.ExternalProbe = Probe("ok", "api.example.com"); }, 60, 30, 0)).State == OccurrenceState.Unknown, "Subdomínio que contém o nome anterior não resolve a ocorrência");
+        var subdomain = Found("network-external-unconfirmed", evidence: "3 consultas consecutivas a api.example.com sem a resposta esperada");
+        subdomain.ProbeTarget = "api.example.com";
+        subdomain.ProbeConfigurationId = "config-api";
+        check(State(subdomain, Series(s => { s.Connectivity = "local"; s.ExternalProbe = Probe("ok", "example.com", "config-api"); }, 60, 30, 0)).State == OccurrenceState.Unknown, "Nome curto contido no host anterior não resolve a ocorrência");
+        check(State(external, Series(s => { s.Connectivity = "local"; s.ExternalProbe = Probe("ok", "example.com", "outra-configuracao"); }, 60, 30, 0)).State == OccurrenceState.Unknown, "Mudança de URL ou resposta esperada no mesmo host não resolve a ocorrência antiga");
+        check(State(external, Series(s => { s.Connectivity = "local"; s.ExternalProbe = Probe("unexpected", "example.com", "outra-configuracao"); }, 60, 30, 0)).State == OccurrenceState.Unknown, "Alerta de outra configuração no mesmo host não mantém a ocorrência antiga ativa");
+        check(State(Found("network-external-unconfirmed", evidence: external.Evidence), Series(s => { s.Connectivity = "local"; s.ExternalProbe = Probe("ok"); }, 60, 30, 0)).State == OccurrenceState.Unknown,
+            "Ocorrência antiga sem identidade de configuração não é declarada resolvida por texto livre");
         check(State(external, Series(s => { s.Connectivity = "local"; s.ExternalProbe = Probe("ok", ""); }, 60, 30, 0)).State == OccurrenceState.Unknown, "Resposta sem destino informado não resolve a ocorrência");
         check(State(external, Series(s => { s.Connectivity = "local"; s.ExternalProbe = Probe("disabled"); }, 60, 30, 0)).State == OccurrenceState.Unknown, "Sondagem desligada não prova resolução");
         check(State(external, Series(s => { s.Connectivity = "local"; s.ExternalProbe = Probe("ok"); }, 120, 60, 0)).State == OccurrenceState.Unknown, "Sondagem externa exige o mesmo intervalo curto da regra");

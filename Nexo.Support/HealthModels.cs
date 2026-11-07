@@ -42,6 +42,8 @@ public sealed class HealthFinding
     public double Confidence { get; set; }
     public bool Confirmed { get; set; }
     public string Source { get; set; } = "rules";
+    public string ProbeTarget { get; set; } = "";
+    public string ProbeConfigurationId { get; set; } = "";
 }
 
 public sealed class SystemEvent
