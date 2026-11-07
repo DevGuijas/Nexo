@@ -131,7 +131,7 @@ internal static class EventCollectionChecks
         }
         finally
         {
-            try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            if (Directory.Exists(root)) Directory.Delete(root, true);
         }
 
         var legacyRoot = Path.Combine(Path.GetTempPath(), "NexoEventsLegacy-" + Guid.NewGuid().ToString("N"));
@@ -139,7 +139,7 @@ internal static class EventCollectionChecks
         try
         {
             var oldEvent = new SystemEvent { Log = "System", RecordId = 1, Time = now.AddHours(-1), Provider = "Disk", EventId = 7, Level = 2 };
-            using (var sql = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(legacyRoot, "operations.db") }.ToString()))
+            using (var sql = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = Path.Combine(legacyRoot, "operations.db"), Pooling = false }.ToString()))
             {
                 sql.Open();
                 using var create = sql.CreateCommand();
@@ -160,8 +160,9 @@ internal static class EventCollectionChecks
         }
         finally
         {
-            try { Directory.Delete(legacyRoot, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            Directory.Delete(legacyRoot, true);
         }
+        check(!Directory.Exists(legacyRoot), "Eventos: diretório temporário legado é removido após a migração");
     }
 
     private static EventBatch Collect(WindowsEventCollector collector, Dictionary<string, EventCursor>? cursors, int budget)
