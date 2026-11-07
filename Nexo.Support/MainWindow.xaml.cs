@@ -744,8 +744,8 @@ public partial class MainWindow : Window
         RefreshProbeFields();
         healthPanel.Children.Add(Action("Salvar monitoramento", async (_, _) => await GuardAsync(async () =>
         {
-            if (!int.TryParse(interval.Text, out var intervalValue) || !double.TryParse(cpu.Text, out var cpuValue)
-                || !double.TryParse(disk.Text, out var diskValue) || !int.TryParse(retention.Text, out var retentionValue))
+            if (!int.TryParse(interval.Text, out var intervalValue) || !HealthSettings.TryParsePercent(cpu.Text, System.Globalization.CultureInfo.CurrentCulture, out var cpuValue)
+                || !HealthSettings.TryParsePercent(disk.Text, System.Globalization.CultureInfo.CurrentCulture, out var diskValue) || !int.TryParse(retention.Text, out var retentionValue))
                 throw new InvalidOperationException("Informe números válidos para as preferências de saúde.");
             var next = new HealthSettings { IntervalSeconds = intervalValue, CpuHighPercent = cpuValue, DiskLowFreePercent = diskValue,
                 RetentionDays = retentionValue, CheckGateway = checkGateway.IsChecked == true, CheckDns = checkDns.IsChecked == true,

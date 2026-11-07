@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Text.Json;
@@ -16,6 +17,10 @@ public sealed class HealthSettings
     public string DnsProbeHost { get; set; } = "www.msftconnecttest.com";
     public string HttpProbeUrl { get; set; } = "http://www.msftconnecttest.com/connecttest.txt";
     public string HttpExpectedText { get; set; } = "Microsoft Connect Test";
+
+    // Sem separador de milhar: em pt-BR, "2.5" viraria 25 sem nenhum aviso.
+    public static bool TryParsePercent(string text, IFormatProvider culture, out double value)
+        => double.TryParse(text, NumberStyles.Float, culture, out value) && double.IsFinite(value);
 
     public HealthThresholds Thresholds() => new() { CpuHighPercent = CpuHighPercent, DiskLowFreePercent = DiskLowFreePercent,
         MaxSampleGap = TimeSpan.FromSeconds(Math.Max(90, IntervalSeconds * 1.5)),
