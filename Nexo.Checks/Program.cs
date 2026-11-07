@@ -10,6 +10,7 @@ try
     HealthDataChecks.Run(Path.Combine(root, "operational"), Assert);
     MonitoringChecks.Run(Assert);
     await ConnectivityProbeChecks.Run(Assert);
+    ProcessMemoryChecks.Run(Assert);
     DiagnosticChecks.Run(Assert);
     EventCollectionChecks.Run(Assert);
     HealthAgentChecks.Run(Assert);
