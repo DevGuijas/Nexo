@@ -5,3 +5,5 @@ artifacts/
 *.user
 .vs/
 .runtime/
+*.log
+/log.txt
