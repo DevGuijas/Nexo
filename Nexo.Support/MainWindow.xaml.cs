@@ -237,6 +237,7 @@ public partial class MainWindow : Window
             {
                 healthStore.Prune(TimeSpan.FromDays(healthSettings.RetentionDays)); lastPrune = now;
             }
+            if (healthStore != null) PendingOperations.Reconcile(store.Root, healthStore, now);
             if (healthStore != null && now - lastEventScan > TimeSpan.FromMinutes(5) && Interlocked.Exchange(ref eventScanRunning, 1) == 0)
             {
                 try
@@ -322,7 +323,7 @@ public partial class MainWindow : Window
             PageContent.Children.Add(SectionHeading("shield", "Recuperação assistida"));
             var interventions = healthStore.RecentInterventions(12);
             if (interventions.Count == 0) PageContent.Children.Add(Card(Text("Nenhuma intervenção registrada.", 13, "Secondary")));
-            foreach (var item in interventions) PageContent.Children.Add(Card(Text($"{item.Time.ToLocalTime():g} · {item.Action} · {item.State}\nAutorizada: {(item.Authorized ? "sim" : "não")} · {item.Summary}", 12)));
+            foreach (var item in interventions) PageContent.Children.Add(Card(Text($"{item.Time.ToLocalTime():g} · {item.Action} · {HealthReportPresentation.InterventionState(item)}\nAutorizada: {(item.Authorized ? "sim" : "não")} · {item.Summary}", 12)));
             PageContent.Children.Add(SectionHeading("settings", "Drivers instalados"));
             PageContent.Children.Add(Card(Text("O assistente consulta o INF e a versão do driver associados a um dispositivo identificado. A busca online e a instalação exigem um alvo observado e autorização específica.", 13, "Secondary")));
             PageContent.Children.Add(Action("Investigar um driver no assistente", async (_, _) => await GuardAsync(async () => { ShowPage("chat"); await Send("Verifique o driver do dispositivo com problema. Consulte o inventário e o INF instalado antes de sugerir qualquer alteração."); })));
