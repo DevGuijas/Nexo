@@ -1,12 +1,12 @@
 # Arquitetura e limites do Nexo
 
-Estado do código em 21/10/2026. Este documento descreve o aplicativo implementado, não uma capacidade futura prometida.
+Estado do código em 06/11/2026, na branch `development` (`ed0f40f`). Este documento descreve o aplicativo implementado, não uma capacidade futura prometida.
 
 ## Objetivo e requisitos operacionais
 
 O Nexo abre direto para o usuário atual do Windows, sem tela de login do aplicativo. A sessão local pode diagnosticar e solicitar correções, mas não tem administração de contas. Para cada incidente, deve coletar evidência, selecionar uma ferramenta do catálogo, pedir autorização antes de alterar o sistema, observar o resultado e distinguir correção confirmada de hipótese ou falha. Quando a função depender do usuário (som, imagem, impressão ou aplicativo), deve solicitar um teste funcional. Se não houver ferramenta ou evidência suficiente, deve parar e oferecer um relatório local para encaminhamento à TI.
 
-O aplicativo é iniciado pelo usuário e conduz o atendimento no chat. Ele não é um serviço permanente que monitora ou repara o computador em segundo plano.
+O aplicativo é iniciado pelo usuário e conduz o atendimento no chat. Enquanto a janela está aberta, ele também coleta métricas locais e calcula alertas por regras. Ele não é um serviço do Windows: fechado o aplicativo, a coleta para, e nenhuma correção é feita em segundo plano sem o pedido e a autorização do usuário.
 
 ## Componentes e fluxo
 
@@ -26,6 +26,12 @@ flowchart LR
     C --> UI
     UI --> D[(Store: contas, histórico, auditoria)]
     C --> D
+    UI --> M[MonitoringEngine: coleta enquanto a janela está aberta]
+    M -->|consultas de leitura| W
+    M --> B[(OperationalStore: métricas, eventos, ocorrências, intervenções)]
+    X --> B
+    B --> UI
+    B --> C
 ```
 
 | Parte | Responsabilidade principal |
@@ -35,7 +41,13 @@ flowchart LR
 | `Nexo.Support/AgentService.cs` e `AgentProtocol.cs` | Prompt, chamadas ao Ollama, catálogo permitido, limites de etapas, continuidade e validação de conclusões. |
 | `Nexo.Support/WindowsTools.cs` e `SupportService.cs` | Fronteira de execução: consultas e ações específicas do Windows, validação, autorização e resultados. |
 | `Nexo.Support/NetworkWorkflow.cs`, `NetworkAssessment.cs` e scripts de rede | Diagnóstico guiado de falta de conexão, identidade da interface, espera de recuperação, transação IP/DNS e restauração. |
-| `Nexo.Checks` | Regressões determinísticas, simulações de executor e avaliações com Qwen local. |
+| `Nexo.Support/DriverWorkflow.cs`, `OfficialDriverSource.cs` e `DriverStoreInventory.cs` | Fluxo limitado de drivers, catálogo e download oficiais da NVIDIA, e consulta do INF instalado. |
+| `Nexo.Support/RestorePointProtection.cs` e `OperationSupervisor.cs` | Exigem um ponto de restauração confirmado antes de instalar um driver e aguardam a operação elevada até um prazo; sem resultado no prazo, o estado fica desconhecido. |
+| `Nexo.Support/MonitoringEngine.cs`, `WindowsHealthSampler.cs`, `ConnectivityProbe.cs` e `WindowsEventCollector.cs` | Coleta local de métricas, sondagens opcionais de rede e eventos do Windows. |
+| `Nexo.Support/HealthRules.cs`, `DiagnosticEngine.cs`, `EventAnalyzer.cs` e `HealthReportPresentation.cs` | Regras dos alertas, análise de eventos e relatório de saúde, disponível ao agente por `get_health_report`. |
+| `Nexo.Support/OperationalStore.cs` | Banco SQLite `operations.db`, separado das conversas: métricas, eventos, ocorrências e intervenções, com retenção configurável. |
+| `Nexo.Setup` | Instalador `NexoSetup.exe`: valida o manifesto assinado e os pacotes baixados, e instala o aplicativo, o Ollama e o modelo no perfil atual. |
+| `Nexo.Checks` e `Nexo.Setup.Checks` | Regressões determinísticas, simulações de executor e avaliações com Qwen local; regressões do instalador. |
 
 O painel **Registro de ações** mostra métricas calculadas dos atendimentos locais encerrados: resoluções marcadas pelo usuário, encaminhamentos preparados e tempo médio entre abertura e encerramento. A auditoria de ferramentas registra duração em milissegundos e apenas parâmetros categóricos validados. Conversas ainda em andamento ficam fora das taxas. Essas medidas não representam uma taxa de reparo comprovada em hardware. A gravação local substitui `data.json` após escrever um arquivo temporário; mudanças de conta, perfil, auditoria e encerramento revertem a memória se a gravação falhar.
 
@@ -57,6 +69,8 @@ O painel **Registro de ações** mostra métricas calculadas dos atendimentos lo
 
 **Falta de conexão:** o fluxo guiado inventaria interfaces, testa conexão, observa link e compara sondagens por interface. Uma única mudança autorizada deve ser seguida por leitura e testes repetidos para confirmar estabilidade. Resultados parciais, recusa, falha ou alvo ambíguo impedem declarar resolução.
 
+**Monitoramento local:** um coletor serial grava leituras enquanto a janela está aberta. As regras só alertam com leituras suficientes e contínuas, e cada ocorrência é uma hipótese a confirmar, não um reparo. As sondagens de gateway, DNS e destino externo começam desligadas e, quando ativadas, enviam consultas aos destinos configurados. O agente lê esses dados por uma ferramenta somente leitura, e toda alteração segue o fluxo normal de confirmação.
+
 **Encaminhamento:** quando a correção não está implementada ou o teste não confirma a função, o usuário pode preparar e exportar um relatório local. O Nexo não envia automaticamente um chamado para um sistema externo.
 
 ## Limitações verificáveis
@@ -66,8 +80,10 @@ O painel **Registro de ações** mostra métricas calculadas dos atendimentos lo
 - A sondagem de rede testa IPv4 e destinos TCP específicos. Não comprova todos os sites, IPv6, proxy, VPN ou redes internas.
 - O catálogo não implementa pareamento Bluetooth, reparo físico, todas as permissões corporativas, configuração de impressoras de rede nem execução arbitrária de comandos.
 - O modelo e o Ollama são instalados separadamente do executável. Sem eles, os atendimentos guiados pela IA não funcionam.
-- O armazenamento local contém histórico e resultados técnicos em JSON; trate backups e exportações como dados potencialmente sensíveis.
-- Operações elevadas já iniciadas são aguardadas para que o Nexo não apresente cancelamento como reversão concluída. Ainda falta um mecanismo de supervisão para processos elevados travados; esse limite impede considerar timeout e cancelamento totalmente validados.
+- O armazenamento local contém histórico e resultados técnicos em JSON e em `operations.db`; trate backups e exportações como dados potencialmente sensíveis.
+- Sem resultado no prazo, uma operação elevada fica em estado desconhecido, nunca como concluída. O processo não é encerrado nem revertido por isso, e continua podendo terminar depois.
+- Ainda estão abertos: prazo e saída segura para transações de rede travadas (#9), recuperação após encerramento abrupto do executor (#10), autenticação da decisão de manter uma mudança de rede (#11), prazo da instalação NVIDIA (#12) e conferência de que a versão instalada é a oferecida (#13).
+- O monitoramento só vê o período com a janela aberta. Temperatura e SMART ficam indisponíveis quando o Windows não fornece leitura confiável, e os sete cenários de falha ainda dependem da VM de laboratório (#8).
 
 ## Evolução controlada
 
