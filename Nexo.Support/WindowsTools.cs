@@ -580,8 +580,9 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         System.Text.Json.Nodes.JsonArray? processes;
         try { processes = System.Text.Json.Nodes.JsonNode.Parse(json) as System.Text.Json.Nodes.JsonArray; }
         catch (JsonException ex) { throw new InvalidDataException("A lista de processos veio em formato inesperado.", ex); }
-        if (processes == null) throw new InvalidDataException("A lista de processos veio em formato inesperado.");
-        foreach (var process in processes.OfType<System.Text.Json.Nodes.JsonObject>())
+        if (processes == null || processes.Any(process => process is not System.Text.Json.Nodes.JsonObject))
+            throw new InvalidDataException("A lista de processos veio em formato inesperado.");
+        foreach (var process in processes.Cast<System.Text.Json.Nodes.JsonObject>())
         {
             var name = process["Name"] is System.Text.Json.Nodes.JsonValue value && value.TryGetValue<string>(out var text) ? text : "";
             var safe = new string(name.Take(40).Select(c => char.IsLetterOrDigit(c) || c is '.' or '-' or '_' ? c : '_').ToArray());
