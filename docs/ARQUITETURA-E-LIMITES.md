@@ -72,6 +72,8 @@ O painel **Registro de ações** mostra métricas calculadas dos atendimentos lo
 
 **Monitoramento local:** um coletor serial grava leituras enquanto a janela está aberta. As regras só alertam com leituras suficientes e contínuas, e cada ocorrência é uma hipótese a confirmar, não um reparo. A tendência de memória usa PID e horário de início para identificar um processo, limiares configuráveis e leituras seguidas; observa apenas os 12 maiores consumidores e ainda precisa de calibração em laboratório. A contagem de repetição recomeça ao reabrir o aplicativo ou salvar as preferências. As sondagens de gateway, DNS e destino externo começam desligadas e, quando ativadas, enviam consultas aos destinos configurados. O relatório prioriza ocorrências críticas das últimas 24 horas e informa quando omite as demais. O agente lê esses dados por uma ferramenta somente leitura, e toda alteração segue o fluxo normal de confirmação.
 
+O painel e o relatório distinguem ocorrência persistente, resolvida nas leituras e estado atual desconhecido, com o horário da última coleta. Uma sondagem externa só muda o estado de sua própria configuração; uma resposta de outro destino ou teste não confirma recuperação. "Resolvida" descreve os sensores e ainda exige o teste funcional da pessoa atendida.
+
 **Encaminhamento:** quando a correção não está implementada ou o teste não confirma a função, o usuário pode preparar e exportar um relatório local. O Nexo não envia automaticamente um chamado para um sistema externo.
 
 ## Limitações verificáveis
