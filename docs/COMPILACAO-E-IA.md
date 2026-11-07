@@ -1,19 +1,39 @@
 # Tutorial de compilação, execução e evolução da IA
 
-Este documento explica como preparar o ambiente, compilar, testar e publicar o Nexo 1.6.2. A segunda parte mostra como o modelo de IA é usado pelo projeto e como organizar um experimento de fine-tuning sem confundir treinamento com correções no código do aplicativo.
+Este documento explica como preparar o ambiente, compilar, testar e publicar o Nexo a partir da branch `development`. O aplicativo está na versão 1.6.3 e o instalador na 1.0.0, conforme o `<Version>` de cada projeto. A segunda parte mostra como o modelo de IA é usado pelo projeto e como organizar um experimento de fine-tuning sem confundir treinamento com correções no código do aplicativo.
 
 ## 1. Visão geral do projeto
 
-O repositório contém dois projetos .NET:
+O repositório contém quatro projetos .NET, sem arquivo `.sln`:
 
 | Projeto | Tipo | Finalidade |
 |---|---|---|
 | `Nexo.Support/Nexo.Support.csproj` | WPF, `net8.0-windows` | Aplicativo gráfico. O executável gerado se chama `Nexo.exe`. |
-| `Nexo.Checks/Nexo.Checks.csproj` | Console, `net8.0-windows` | Regressões, avaliações da IA e algumas verificações opcionais do Windows real. |
+| `Nexo.Checks/Nexo.Checks.csproj` | Console, `net8.0-windows` | Regressões, avaliações da IA e verificações opcionais do Windows real. |
+| `Nexo.Setup/Nexo.Setup.csproj` | WPF, `net8.0-windows` | Instalador gráfico. O executável gerado se chama `NexoSetup.exe`. |
+| `Nexo.Setup.Checks/Nexo.Setup.Checks.csproj` | Console, `net8.0-windows` | Regressões do instalador. |
 
-O Nexo é exclusivo para Windows porque usa WPF e ferramentas do próprio sistema operacional. O projeto principal não possui pacotes NuGet externos; os scripts PowerShell necessários são incorporados ao assembly durante a compilação.
+O Nexo é exclusivo para Windows porque usa WPF e ferramentas do próprio sistema operacional. Os dados operacionais usam SQLite, então `Nexo.Support` e `Nexo.Checks` dependem do pacote NuGet `Microsoft.Data.Sqlite` 8.0.33: a primeira restauração precisa de acesso ao NuGet ou de um cache local. Os scripts PowerShell necessários são incorporados ao assembly durante a compilação.
+
+Além do atendimento, o aplicativo contém os módulos de monitoramento e recuperação:
+
+| Arquivos em `Nexo.Support` | Papel |
+|---|---|
+| `MonitoringEngine.cs`, `WindowsHealthSampler.cs`, `ConnectivityProbe.cs`, `WindowsEventCollector.cs` | Coletam métricas, sondagens de rede opcionais e eventos enquanto a janela está aberta. |
+| `HealthRules.cs`, `DiagnosticEngine.cs`, `HealthReportPresentation.cs` | Transformam as leituras em achados e no relatório de saúde. |
+| `OperationalStore.cs` | Guarda o histórico em `operations.db`, separado das conversas. |
+| `RestorePointProtection.cs` | Exige um ponto de restauração confirmado antes de instalar um driver. |
 
 O modelo não é compilado dentro de `Nexo.exe`. O aplicativo conversa com o Ollama em `http://127.0.0.1:11434` e, por padrão, solicita o modelo `qwen3:8b`.
+
+### O que cada forma de distribuição inclui
+
+| Forma | O que contém | O que ainda falta na máquina |
+|---|---|---|
+| Publicação dependente de framework (seção 7, opção A) | Só o Nexo | .NET Desktop Runtime 8, Ollama e modelo |
+| Publicação independente, chamada aqui de portátil (seção 7, opção B) | Nexo e o runtime .NET | Ollama e modelo |
+| Ollama e modelo | Motor local e pesos do `qwen3:8b`, instalados à parte | Sem eles, o aplicativo abre, mas o atendimento guiado pela IA não funciona |
+| `NexoSetup.exe`, instalador em nuvem | Assistente que baixa e valida o Nexo, o Ollama e o modelo por manifesto assinado | Nada, além de acesso à publicação; consulte [Instalador e publicação na Oracle](INSTALADOR-NUVEM.md) |
 
 ## 2. Pré-requisitos
 
@@ -22,6 +42,8 @@ O modelo não é compilado dentro de `Nexo.exe`. O aplicativo conversa com o Oll
 - Windows 10 ou 11, preferencialmente x64.
 - [.NET 8 SDK para Windows x64](https://dotnet.microsoft.com/en-us/download/dotnet/8.0). Instale o **SDK**, não apenas o Runtime. O SDK contém o compilador e também os runtimes necessários para executar durante o desenvolvimento.
 - PowerShell, já incluído no Windows.
+- [Git](https://git-scm.com/download/win), para clonar o repositório.
+- Acesso ao NuGet na primeira restauração.
 
 Depois da instalação, feche e abra novamente o terminal e confira:
 
@@ -31,6 +53,8 @@ dotnet --list-sdks
 ```
 
 Deve aparecer algum SDK `8.0.x`. Um SDK mais novo pode conseguir compilar o alvo .NET 8, mas instalar o SDK 8 torna o ambiente mais previsível.
+
+O SDK também pode ser instalado sem administrador, só no perfil do usuário, com o script oficial `dotnet-install.ps1`. Nesse caso, `dotnet build` e `dotnet run` funcionam, mas abrir `Nexo.exe` diretamente falha e pode abrir a página de download do .NET: veja [O executável pede o Runtime](#o-executável-pede-o-runtime).
 
 ### Opção com Visual Studio
 
@@ -57,15 +81,15 @@ ollama run qwen3:8b
 
 Digite `/bye` para sair do chat do Ollama.
 
-## 3. Abrir o terminal na pasta correta
-
-Todos os comandos deste documento partem da raiz do repositório:
+## 3. Obter o código e abrir o terminal na pasta correta
 
 ```powershell
-Set-Location G:\TCC
+git clone https://github.com/DevGuijas/Nexo.git
+Set-Location .\Nexo
+git switch development
 ```
 
-Se o projeto estiver em outro local, substitua `G:\TCC` pelo caminho correspondente.
+Todos os comandos deste documento partem da raiz do repositório. Os exemplos de fine-tuning, mais adiante, usam `G:\TCC` como caminho ilustrativo: substitua pelo caminho do seu clone.
 
 ## 4. Restaurar e compilar
 
@@ -99,16 +123,18 @@ O resultado ficará em:
 Nexo.Support\bin\Release\net8.0-windows\Nexo.exe
 ```
 
-Compilar `Nexo.Checks` também compila os arquivos compartilhados que ele vincula do projeto principal:
+Compilar `Nexo.Checks` também compila os arquivos compartilhados que ele vincula do projeto principal. O instalador é compilado à parte:
 
 ```powershell
 dotnet build .\Nexo.Checks\Nexo.Checks.csproj -c Release
+dotnet build .\Nexo.Setup\Nexo.Setup.csproj -c Release
+dotnet build .\Nexo.Setup.Checks\Nexo.Setup.Checks.csproj -c Release
 ```
 
-Para remover apenas saídas geradas pelo SDK e recompilar:
+Para remover apenas saídas geradas pelo SDK e recompilar. Sem `-c`, `dotnet clean` limpa só a configuração Debug:
 
 ```powershell
-dotnet clean .\Nexo.Support\Nexo.Support.csproj
+dotnet clean .\Nexo.Support\Nexo.Support.csproj -c Release
 dotnet build .\Nexo.Support\Nexo.Support.csproj -c Release
 ```
 
@@ -120,7 +146,7 @@ Durante o desenvolvimento:
 dotnet run --project .\Nexo.Support\Nexo.Support.csproj
 ```
 
-Ou execute diretamente o resultado de Release:
+Ou execute diretamente o resultado de Release, se o .NET estiver instalado para toda a máquina ou `DOTNET_ROOT` estiver definido:
 
 ```powershell
 .\Nexo.Support\bin\Release\net8.0-windows\Nexo.exe
@@ -133,7 +159,7 @@ Para testar a IA:
 1. Confirme que `ollama list` mostra `qwen3:8b`.
 2. Abra o Nexo.
 3. Acesse **Configurações** pela navegação lateral.
-4. Em **Configurações**, habilite o agente de IA e mantenha o nome `qwen3:8b`.
+4. Marque **Usar agente IA para conduzir os atendimentos** e mantenha `qwen3:8b` em **Modelo com suporte a ferramentas**.
 5. Use **Verificar modelo local**.
 
 Sem Ollama ou sem o modelo, o aplicativo ainda pode ser compilado e as verificações determinísticas funcionam, mas os atendimentos guiados pela IA e as avaliações que usam o Qwen não funcionarão.
@@ -143,10 +169,11 @@ Sem Ollama ou sem o modelo, o aplicativo ainda pode ser compilado e as verifica�
 ### Suíte básica
 
 ```powershell
-dotnet run --project .\Nexo.Checks\Nexo.Checks.csproj
+dotnet run --project .\Nexo.Checks\Nexo.Checks.csproj -c Release
+dotnet run --project .\Nexo.Setup.Checks\Nexo.Setup.Checks.csproj -c Release
 ```
 
-Essa suíte usa uma pasta temporária para os dados e executa regressões do código. Ao terminar, deve mostrar a quantidade de verificações aprovadas.
+As duas usam pastas temporárias para os dados e executam regressões do código. Ao terminar, cada uma mostra a quantidade de verificações aprovadas. O CI do repositório roda em `windows-latest`, em todo PR para `development`, os builds de `Nexo.Support` e `Nexo.Setup`, estas duas suítes e os dois scripts de rede simulados.
 
 ### Scripts de rede simulados
 
@@ -172,7 +199,7 @@ Essas avaliações usam ferramentas simuladas para verificar seleção de açõe
 
 ### Verificações no Windows real
 
-Os comandos abaixo são opcionais. Os dois primeiros fazem somente leituras do Windows. O último também usa a IA instalada; ele permite que o modelo proponha uma correção de teste, mas o executor a recusa antes de qualquer alteração:
+Os comandos abaixo são opcionais e não alteram o Windows. `--diagnostics` só consulta o sistema. `--interface-probe-live` também tenta conexões TCP 443 a `1.1.1.1` e `8.8.8.8` por cada interface, então envia tráfego externo. O último também usa a IA instalada; ele permite que o modelo proponha uma correção de teste, mas o executor a recusa antes de qualquer alteração:
 
 ```powershell
 dotnet run --project .\Nexo.Checks\Nexo.Checks.csproj -- --diagnostics
@@ -180,18 +207,36 @@ dotnet run --project .\Nexo.Checks\Nexo.Checks.csproj -- --interface-probe-live
 dotnet run --project .\Nexo.Checks\Nexo.Checks.csproj -- --diagnostics --agent-live
 ```
 
+`--hardware-live` é outra verificação opcional: inventaria o hardware gráfico e consulta ofertas online em modo somente leitura. Depende de internet e do estado do computador, e pode falhar com o Windows Update desativado. Definir `NEXO_LIVE_SAMPLE=1` faz `Nexo.Checks` usar o amostrador real e imprimir um resumo da leitura.
+
+`dotnet run --project .\Nexo.Setup.Checks\Nexo.Setup.Checks.csproj -c Release -- --remote` baixa o manifesto e a assinatura da publicação na Oracle e confere se os pacotes existem, sem baixá-los. Depende dessa infraestrutura.
+
+### Prévia da interface
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Check-UiPreview.ps1
+```
+
+O script compila o aplicativo e o abre com `--screenshot`. A prévia usa dados de exemplo em `.preview-data`, sem tocar nos dados reais, e grava as imagens e `ui-checks.txt` em `Nexo.Support\bin\Release\net8.0-windows`. O comando `dotnet` precisa encontrar o SDK e, como o script abre `Nexo.exe` diretamente, também é preciso o runtime global ou `DOTNET_ROOT`.
+
 Não execute `Nexo.Checks/DhcpLiveCheck.ps1` no computador de uso diário. Esse teste altera temporariamente a configuração IPv4, exige administrador e foi criado para uma máquina ou VM de laboratório com recuperação preparada.
 
 ## 7. Publicar para distribuição
 
-Há duas formas principais de publicação.
+Há duas formas principais de publicar só o aplicativo, sem o Ollama e sem o modelo. Defina a versão uma vez, igual ao `<Version>` de `Nexo.Support.csproj`:
+
+```powershell
+$nexoVersion = "1.6.3"
+```
+
+A primeira publicação com `-r win-x64` baixa pacotes de runtime do NuGet: em um teste, o cache `~/.nuget/packages` cresceu cerca de 290 MB.
 
 ### Opção A: dependente do .NET Desktop Runtime
 
-Gera uma pasta menor. O computador de destino precisa ter o **.NET Desktop Runtime 8 x64**:
+Gera uma pasta menor, de cerca de 3 MB. O computador de destino precisa ter o **.NET Desktop Runtime 8 x64**:
 
 ```powershell
-$nexoPublishDir = ".\artifacts\Nexo-1.6.2-local"
+$nexoPublishDir = ".\artifacts\Nexo-$nexoVersion-local"
 dotnet publish .\Nexo.Support\Nexo.Support.csproj `
   -c Release `
   -r win-x64 `
@@ -207,10 +252,10 @@ Execute o resultado:
 
 ### Opção B: independente do Runtime
 
-Inclui o runtime na publicação e gera uma pasta consideravelmente maior, mas o usuário não precisa instalar o .NET 8 separadamente:
+Inclui o runtime na publicação e gera uma pasta de cerca de 160 MB, mas o usuário não precisa instalar o .NET 8 separadamente:
 
 ```powershell
-$nexoPublishDir = ".\artifacts\Nexo-1.6.2-self-contained"
+$nexoPublishDir = ".\artifacts\Nexo-$nexoVersion-self-contained"
 dotnet publish .\Nexo.Support\Nexo.Support.csproj `
   -c Release `
   -r win-x64 `
@@ -225,19 +270,49 @@ O Ollama e o modelo continuam separados nos dois casos. Uma publicação self-co
 Depois de conferir que o executável abre:
 
 ```powershell
-$nexoZip = ".\artifacts\Nexo-1.6.2-local-Windows.zip"
+$nexoZip = ".\artifacts\Nexo-$nexoVersion-local-Windows.zip"
 Compress-Archive -Path "$nexoPublishDir\*" -DestinationPath $nexoZip
 ```
 
 Use nomes novos para não sobrescrever por acidente um pacote já validado. Distribua o ZIP inteiro; não copie somente `Nexo.exe`.
 
-Para distribuir também o Ollama e o modelo, use o instalador assinado por manifesto descrito em [Instalador e publicação na Oracle](INSTALADOR-NUVEM.md). O executável de instalação publicado está disponível em [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe).
+### Instalador em nuvem
+
+Para distribuir também o Ollama e o modelo, use o instalador descrito em [Instalador e publicação na Oracle](INSTALADOR-NUVEM.md). O executável de instalação publicado está disponível em [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe).
+
+Compilar `NexoSetup.exe` só exige o SDK:
+
+```powershell
+dotnet publish .\Nexo.Setup\Nexo.Setup.csproj -c Release -r win-x64 --self-contained true `
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o ".\artifacts\NexoSetup-$nexoVersion"
+```
+
+Gerar uma versão completa depende de infraestrutura externa: `scripts/Build-CloudRelease.ps1` exige a chave privada de publicação, o instalador oficial do Ollama e o modelo local, e o envio usa o bucket da Oracle. Sem esses itens, esse passo não pode ser reproduzido.
 
 ## 8. Problemas comuns de compilação
 
 ### `dotnet` não é reconhecido
 
-O SDK não está instalado ou o terminal foi aberto antes da instalação. Instale o .NET 8 SDK, abra um PowerShell novo e repita `dotnet --info`. As pastas `.dotnet` e `.runtime` deste repositório são saídas/cache de trabalhos anteriores e não contêm, necessariamente, um SDK portátil utilizável.
+O SDK não está instalado ou o terminal foi aberto antes da instalação. Instale o .NET 8 SDK, abra um PowerShell novo e repita `dotnet --info`.
+
+### A restauração falha ao baixar pacotes
+
+`Microsoft.Data.Sqlite` vem do NuGet. Confira o acesso a `api.nuget.org` ou a origem configurada em `dotnet nuget list source` e rode `dotnet restore` novamente.
+
+### `No .NET SDKs were found`
+
+O comando `dotnet` encontrou uma instalação sem SDK. Isso acontece, por exemplo, quando o SDK está só no perfil do usuário e depois o .NET Desktop Runtime é instalado para toda a máquina: `C:\Program Files\dotnet` entra primeiro no PATH e não contém o SDK. Confira com:
+
+```powershell
+where.exe dotnet
+dotnet --list-sdks
+```
+
+A solução permanente é instalar o .NET 8 SDK completo para a máquina, o que pede UAC. Para o terminal atual, sem instalar nada:
+
+```powershell
+$env:PATH = "$env:LOCALAPPDATA\Microsoft\dotnet;$env:PATH"
+```
 
 ### `NETSDK1045` ou alvo `net8.0-windows` não suportado
 
@@ -245,7 +320,15 @@ Instale o .NET 8 SDK e confirme `dotnet --list-sdks`. Para Visual Studio, confir
 
 ### O executável pede o Runtime
 
-Foi usada publicação dependente de framework. Instale o .NET Desktop Runtime 8 x64 ou publique novamente com `--self-contained true`.
+`Nexo.exe` não encontrou o .NET. O Windows pode mostrar um aviso que abre a página de download, e o processo termina com o código `0x80008083`. Isso acontece em dois casos:
+
+- **Publicação dependente de framework:** instale o .NET Desktop Runtime 8 x64 ou publique novamente com `--self-contained true`.
+- **SDK instalado só no usuário:** use `dotnet run`, ou defina `DOTNET_ROOT` apenas para o terminal atual, sem instalar nada:
+
+```powershell
+$env:DOTNET_ROOT = "$env:LOCALAPPDATA\Microsoft\dotnet"
+.\Nexo.Support\bin\Release\net8.0-windows\Nexo.exe
+```
 
 ### O arquivo está em uso durante a compilação
 
