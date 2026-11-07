@@ -1,6 +1,6 @@
 # Arquitetura e limites do Nexo
 
-Estado do código em 06/11/2026, na branch `development` (`ed0f40f`). Este documento descreve o aplicativo implementado, não uma capacidade futura prometida.
+Estado do código em 07/11/2026, na branch `development`. Este documento descreve o aplicativo implementado, não uma capacidade futura prometida.
 
 ## Objetivo e requisitos operacionais
 
@@ -55,6 +55,7 @@ O painel **Registro de ações** mostra métricas calculadas dos atendimentos lo
 
 1. O texto do usuário, a resposta do modelo, o histórico e as saídas das consultas são dados não confiáveis. Uma instrução contida nesses dados não concede uma ferramenta nova.
 2. O modelo recebe esquemas de ferramentas predefinidas. O executor escolhe por nome em um `switch`; não expõe shell genérico ao modelo. Argumentos e identidade do alvo precisam ser validados pelo executor, mesmo quando o esquema do modelo os descreve.
+   A consulta de processos limita o nome enviado ao modelo a 40 caracteres e a letras, dígitos, ponto, hífen e sublinhado; o conteúdo continua sendo dado não confiável.
 3. A sessão local permite diagnóstico e correções sujeitas a confirmação específica no aplicativo. Ações elevadas solicitam UAC do Windows. Recusa encerra a etapa sem executar a alteração. A administração de contas não é exposta no modo direto.
 4. Rede usa GUID/índice observados e reconferidos. Mudanças IP/DNS registram estado anterior, têm confirmação de manutenção e caminho de restauração. Um comando aceito ainda exige observação posterior para comprovar funcionamento.
 5. O inventário de hardware usa dispositivos PnP presentes, código de problema, IDs e versão/provedor do driver. A busca online usa a fonte de atualizações configurada no Windows, respeitando Windows Update ou servidor gerenciado. Só são oferecidos drivers cujo HardwareID corresponde exatamente a um único dispositivo observado. Instalação exige confirmação específica, UAC, reconferência da identidade e verificação de versão/estado. Resultado incerto ou reinicialização pendente não comprova correção funcional; o Nexo não reinicia o PC automaticamente nem baixa executáveis de sites arbitrários.
@@ -69,7 +70,7 @@ O painel **Registro de ações** mostra métricas calculadas dos atendimentos lo
 
 **Falta de conexão:** o fluxo guiado inventaria interfaces, testa conexão, observa link e compara sondagens por interface. Uma única mudança autorizada deve ser seguida por leitura e testes repetidos para confirmar estabilidade. Resultados parciais, recusa, falha ou alvo ambíguo impedem declarar resolução.
 
-**Monitoramento local:** um coletor serial grava leituras enquanto a janela está aberta. As regras só alertam com leituras suficientes e contínuas, e cada ocorrência é uma hipótese a confirmar, não um reparo. As sondagens de gateway, DNS e destino externo começam desligadas e, quando ativadas, enviam consultas aos destinos configurados. O agente lê esses dados por uma ferramenta somente leitura, e toda alteração segue o fluxo normal de confirmação.
+**Monitoramento local:** um coletor serial grava leituras enquanto a janela está aberta. As regras só alertam com leituras suficientes e contínuas, e cada ocorrência é uma hipótese a confirmar, não um reparo. A tendência de memória usa PID e horário de início para identificar um processo, limiares configuráveis e leituras seguidas; observa apenas os 12 maiores consumidores e ainda precisa de calibração em laboratório. A contagem de repetição recomeça ao reabrir o aplicativo ou salvar as preferências. As sondagens de gateway, DNS e destino externo começam desligadas e, quando ativadas, enviam consultas aos destinos configurados. O relatório prioriza ocorrências críticas das últimas 24 horas e informa quando omite as demais. O agente lê esses dados por uma ferramenta somente leitura, e toda alteração segue o fluxo normal de confirmação.
 
 **Encaminhamento:** quando a correção não está implementada ou o teste não confirma a função, o usuário pode preparar e exportar um relatório local. O Nexo não envia automaticamente um chamado para um sistema externo.
 
