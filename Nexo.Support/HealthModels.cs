@@ -1,3 +1,6 @@
+using System.ComponentModel;
+using System.Diagnostics;
+
 namespace Nexo.Support;
 
 public sealed class HealthSnapshot
@@ -23,7 +26,7 @@ public sealed class HealthSnapshot
 }
 
 public sealed record DiskHealth(string Name, long FreeBytes, long TotalBytes, string Health = "unavailable");
-public sealed record ProcessHealth(string Name, int Id, long WorkingSetBytes, double? CpuPercent);
+public sealed record ProcessHealth(string Name, int Id, long WorkingSetBytes, double? CpuPercent, DateTimeOffset? StartTime = null);
 public sealed record ServiceHealth(string Name, string Status, string StartType);
 public sealed record AdapterHealth(string Id, string Name, string Status, bool Enabled);
 public sealed record NetworkProbeReading(string State = "disabled", string Target = "", string Detail = "", string ConfigurationId = "");
@@ -90,4 +93,34 @@ public sealed class DiagnosticReport
     public DateTimeOffset Created { get; set; } = DateTimeOffset.UtcNow;
     public List<HealthFinding> Findings { get; set; } = [];
     public List<string> Limitations { get; set; } = [];
+}
+
+internal static class ProcessReader
+{
+    /// <summary>Descreve os 12 processos com maior working set e libera todos os identificadores recebidos.</summary>
+    public static List<ProcessHealth> Top(Process[] processes)
+    {
+        try
+        {
+            return Largest(processes.Select(Describe).OfType<ProcessHealth>())
+                .Select(found => found with { StartTime = StartOf(() => processes.First(p => p.Id == found.Id).StartTime) }).ToList();
+        }
+        finally { foreach (var process in processes) process.Dispose(); }
+    }
+
+    public static IEnumerable<ProcessHealth> Largest(IEnumerable<ProcessHealth> processes)
+        => processes.OrderByDescending(p => p.WorkingSetBytes).Take(12);
+
+    private static ProcessHealth? Describe(Process process)
+    {
+        try { return new ProcessHealth(process.ProcessName, process.Id, process.WorkingSet64, null); }
+        catch { return null; }
+    }
+
+    // Sem privilégio, o Windows pode negar esta leitura: o processo fica na lista, sem identidade confirmada.
+    public static DateTimeOffset? StartOf(Func<DateTime> read)
+    {
+        try { return new DateTimeOffset(read()); }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException or ArgumentOutOfRangeException) { return null; }
+    }
 }

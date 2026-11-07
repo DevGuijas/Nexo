@@ -7,6 +7,17 @@ namespace Nexo.Support;
 // A read-only starting observation, not a fixed repair plan.
 public static class SupportIntake
 {
+    // "O instalador pediu reinicialização; prepare para eu retomar" pede o ponto de retomada,
+    // não uma nova busca ou instalação. Uma ordem de atualizar o driver continua sendo pedido
+    // de driver, mas "depois de atualizar" e "para eu instalar" só descrevem o contexto.
+    public static bool AsksRestartResume(string request)
+    {
+        var text = AgentProtocol.Normalize(request);
+        return Regex.IsMatch(text, @"\b(reinici\w*|restart\w*|reboot\w*)\b")
+            && Regex.IsMatch(text, @"\b(prepar\w*|retom\w*)\b")
+            && !Regex.IsMatch(text, @"(?<!\b(ao|apos|depois de|para eu) )\b(atualiz(a|e|ar|em)|instal(a|e|ar|em)|busc(a|ar)|busqu(e|em)|procur(a|e|ar|em)|verific(a|ar)|verifiqu(e|em))\b");
+    }
+
     public static HashSet<string> IncidentTopics(string request)
     {
         var text = new string(request.Normalize(NormalizationForm.FormD).Where(c => CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark).Select(char.ToLowerInvariant).ToArray());
@@ -26,7 +37,8 @@ public static class SupportIntake
         var text = new string(request.Normalize(NormalizationForm.FormD).Where(c => CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark).Select(char.ToLowerInvariant).ToArray());
         var hasSymptom = Regex.IsMatch(text, @"\b(nao\s+(funciona|aparece|conecta|imprime|consigo|liga)|sem\s+(som|audio|imagem|camera|microfone|bluetooth)|sumiu|desapareceu|preso|presos|presa|travou|travada|problema|falha|parou|para quando|desconectar e conectar)\b");
         var hardwareRequest = Regex.IsMatch(text, @"\b(hardware|drivers?|controladores?|placa de video|gpu|dispositivo desconhecido|gerenciador de dispositivos)\b")
-            && Regex.IsMatch(text, @"\b(atualiz\w*|instal\w*|verific\w*|detect\w*|diagnostic\w*)\b");
+            && Regex.IsMatch(text, @"\b(atualiz\w*|instal\w*|verific\w*|detect\w*|diagnostic\w*)\b")
+            && !AsksRestartResume(request);
         if (!hasSymptom && !hardwareRequest) return null;
         if (Regex.IsMatch(text, @"\b(camera|webcam)\b")) return "camera";
         if (Regex.IsMatch(text, @"\b(impressoras?|imprimir|impressao)\b")) return "printer";
