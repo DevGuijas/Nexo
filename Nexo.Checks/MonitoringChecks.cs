@@ -41,7 +41,8 @@ internal static class MonitoringChecks
         check(Eval(ExternalAt(-60, "local", "ok"), ExternalAt(-30, "local", "ok"), ExternalAt(0, "local", "no_response"))
             .All(f => f.Id != "network-external-unconfirmed"), "Falha isolada do destino externo não gera alerta");
         check(Eval(ExternalAt(-60, "local", "no_response"), ExternalAt(-30, "local", "unexpected"), ExternalAt(0, "local", "no_response"))
-            .Any(f => f.Id == "network-external-unconfirmed" && f.Evidence.Contains("example.com")),
+            .Any(f => f.Id == "network-external-unconfirmed" && f.Evidence.Contains("example.com")
+                && f.ProbeTarget == "example.com" && f.ProbeConfigurationId == "test-config-1"),
             "Três falhas consecutivas do destino externo geram alerta com alvo identificado");
         check(Eval(ExternalAt(-60, "local", "no_response"), ExternalAt(-30, "local", "no_response"), ExternalAt(0, "local", "ok"))
             .All(f => f.Id != "network-external-unconfirmed"), "Resposta externa bem-sucedida encerra o alerta");
