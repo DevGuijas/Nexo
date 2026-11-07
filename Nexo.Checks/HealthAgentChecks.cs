@@ -40,6 +40,13 @@ internal static class HealthAgentChecks
                 var flooded = HealthReportPresentation.FromStore(many);
                 check(flooded.Contains("DISCO CRITICO"), "Ocorrência crítica não some com muitas ocorrências no mesmo dia");
                 check(flooded.Contains("Mostrando 10 de 61 ocorrências"), "O aviso conta as ocorrências lidas no período");
+                many.SaveFindings(Enumerable.Range(60, 1000).Select(i => new HealthFinding
+                {
+                    Id = "service-stopped:extra" + i + ":new", Time = at.AddSeconds(-i), Severity = "warning", Problem = "Aviso extra " + i
+                }));
+                var veryCrowded = HealthReportPresentation.FromStore(many);
+                check(veryCrowded.Contains("DISCO CRITICO"), "Ocorrência crítica aparece mesmo atrás de mais de mil avisos recentes");
+                check(veryCrowded.Contains("Mostrando 10 de 1061 ocorrências"), "Relatório conta todas as ocorrências das últimas 24 horas");
             }
             using (var few = new OperationalStore(Path.Combine(root, "few")))
             {

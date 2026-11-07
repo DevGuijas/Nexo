@@ -9,8 +9,7 @@ public static class HealthReportPresentation
         var since = DateTimeOffset.UtcNow.AddDays(-1);
         var latest = store.RecentSnapshots(since, 1).FirstOrDefault();
         if (latest == null) return "Nenhuma amostra de saúde foi coletada nas últimas 24 horas. O monitoramento funciona enquanto o Nexo está aberto. Nenhum problema ou reparo pode ser confirmado com esses dados.";
-        // A leitura precisa alcançar a ocorrência crítica mesmo em um dia com muitos alertas.
-        var known = store.RecentFindings(1000).Where(f => f.Time >= since).ToArray();
+        var known = store.FindingsSince(since);
         var active = HealthRules.Evaluate(store.RecentSnapshots(latest.Time.AddHours(-6), 20).OrderBy(s => s.Time).ToArray(), thresholds ?? new())
             .Select(f => f.Id).ToHashSet();
         var events = new EventBatch { Events = store.RecentEvents(100).Where(e => e.Time >= since).ToList(), Gaps = store.RecentEventGaps(10, since) };
