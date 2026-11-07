@@ -86,7 +86,7 @@ public static class HealthReportPresentation
         var since = DateTimeOffset.UtcNow.AddDays(-1);
         var latest = store.RecentSnapshots(since, 1).FirstOrDefault();
         if (latest == null) return "Nenhuma amostra de saúde foi coletada nas últimas 24 horas. O monitoramento funciona enquanto o Nexo está aberto. Nenhum problema ou reparo pode ser confirmado com esses dados.";
-        var known = store.RecentFindings(40).Where(f => f.Time >= since).ToArray();
+        var known = store.FindingsSince(since);
         var events = new EventBatch { Events = store.RecentEvents(100).Where(e => e.Time >= since).ToList(), Gaps = store.RecentEventGaps(10, since) };
         var report = DiagnosticEngine.BuildReport(latest, known, events, DateTimeOffset.UtcNow);
         var text = new StringBuilder();
@@ -97,8 +97,9 @@ public static class HealthReportPresentation
         foreach (var disk in latest.Disks.Take(8))
             text.AppendLine($"Volume {Safe(disk.Name)}: {(disk.TotalBytes > 0 ? 100.0 * disk.FreeBytes / disk.TotalBytes : 0):F1}% livre.");
         if (report.Findings.Count == 0) text.AppendLine("Nenhum achado sustentado foi registrado nos dados disponíveis.");
-        var occurrences = HealthOccurrences.Classify(report.Findings, store.RecentSnapshots(latest.Time.AddHours(-6), 20), thresholds ?? new(), DateTimeOffset.UtcNow);
-        foreach (var (finding, status) in occurrences.OrderByDescending(o => o.Finding.Time).Take(10))
+        var occurrences = HealthOccurrences.Classify(report.Findings, store.RecentSnapshots(since, 20), thresholds ?? new(), DateTimeOffset.UtcNow);
+        if (occurrences.Count > 10) text.AppendLine($"Mostrando 10 de {occurrences.Count} ocorrências, as críticas primeiro; as demais foram omitidas deste relatório.");
+        foreach (var (finding, status) in occurrences.OrderByDescending(o => o.Finding.Severity == "critical").ThenByDescending(o => o.Finding.Time).Take(10))
         {
             text.AppendLine($"Achado {Safe(finding.Category)} ({Safe(finding.Severity)}), {finding.Time:yyyy-MM-dd HH:mm zzz}, {char.ToLowerInvariant(status.Label[0]) + status.Label[1..]}: {Safe(finding.Problem)}. Evidência: {Safe(finding.Evidence)}. Causa: hipótese, {Safe(finding.Cause)}. Recomendação: {Safe(finding.Recommendation)}. Confiança {Math.Clamp(finding.Confidence, 0, 1):P0}; confirmado: não.");
         }
