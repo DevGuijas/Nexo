@@ -72,6 +72,48 @@ try
         && OfficialDriverSource.ParseNvidiaDriverDetails(officialDetails, "282412", "NVIDIA GeForce RTX 5070", "32.0.16.1714", true) == null
         && OfficialDriverSource.ParseNvidiaDriverDetails(officialDetails, "282412", "NVIDIA GeForce RTX 5060 Ti", "32.0.16.2101", true) == null,
         "Oferta oficial exige produto exato e versão mais recente");
+    // O catálogo real lista a série 30 sem o prefixo "NVIDIA", que o Windows inclui no nome do dispositivo.
+    var unprefixedDetails = officialDetails.Replace("NVIDIA%20GeForce%20RTX%205060%20Ti", "GeForce%20RTX%203060%20Ti");
+    Assert(OfficialDriverSource.ParseNvidiaDriverDetails(unprefixedDetails, "282412", "NVIDIA GeForce RTX 3060 Ti", "32.0.15.9186", true)?.Version == "621.01"
+        && OfficialDriverSource.ParseNvidiaDriverDetails(unprefixedDetails, "282412", "NVIDIA GeForce RTX 3060", "32.0.15.9186", true) == null
+        && OfficialDriverSource.ParseNvidiaDriverDetails(unprefixedDetails, "282412", "NVIDIA GeForce RTX 3060 Ti SUPER", "32.0.15.9186", true) == null
+        && OfficialDriverSource.ParseNvidiaDriverDetails(unprefixedDetails, "282412", "NVIDIA", "32.0.15.9186", true) == null,
+        "Oferta oficial reconhece GeForce listada sem o prefixo NVIDIA, sem aceitar modelo vizinho");
+    var nvidiaCatalog = "<LookupValueSearch><LookupValues>"
+        + "<LookupValue ParentID=\"120\"><Name>GeForce RTX 3060 Ti</Name><Value>934</Value></LookupValue>"
+        + "<LookupValue ParentID=\"120\"><Name>GeForce RTX 3060</Name><Value>942</Value></LookupValue>"
+        + "<LookupValue ParentID=\"131\"><Name>NVIDIA GeForce RTX 5060 Ti</Name><Value>1066</Value></LookupValue>"
+        + "<LookupValue ParentID=\"110\"><Name>RTX 6000 Ada Generation</Name><Value>1001</Value></LookupValue>"
+        + "<LookupValue ParentID=\"111\"><Name>NVIDIA RTX 6000 Ada Generation</Name><Value>1002</Value></LookupValue>"
+        + "<LookupValue ParentID=\"101\"><Name>GeForce GTX 1650</Name><Value>2001</Value></LookupValue>"
+        + "<LookupValue ParentID=\"102\"><Name>GeForce GTX 1650</Name><Value>2002</Value></LookupValue>"
+        + "<LookupValue ParentID=\"103\"><Value>3001</Value></LookupValue>"
+        + "</LookupValues></LookupValueSearch>";
+    Assert(OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "NVIDIA GeForce RTX 3060 Ti") == (934, 120)
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "NVIDIA GeForce RTX 3060") == (942, 120)
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "NVIDIA GeForce RTX 5060 Ti") == (1066, 131),
+        "Catálogo NVIDIA acha o modelo com e sem o prefixo no nome");
+    Assert(OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "NVIDIA RTX 6000 Ada Generation") == (1002, 111)
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "RTX 6000 Ada Generation") == (1001, 110),
+        "Nome exato do catálogo tem prioridade sobre o nome sem prefixo");
+    Assert(OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "NVIDIA GeForce GTX 1650") == null
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "NVIDIA GeForce RTX 3070") == null
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "NVIDIA GeForce RTX 3060 Ti SUPER") == null
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "NVIDIA") == null
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "") == null,
+        "Catálogo NVIDIA recusa modelo ambíguo, ausente ou vizinho");
+    Assert(OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "nvidia geforce rtx 3060 ti") == (934, 120)
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "NVIDIA GEFORCE RTX 3060 TI") == (934, 120)
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "  NVIDIA  GeForce RTX 3060 Ti  ") == (934, 120)
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "nvidia geforce rtx 5060 ti") == (1066, 131)
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "nvidia rtx 6000 ada generation") == (1002, 111)
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "rtx 6000 ada generation") == (1001, 110),
+        "Catálogo NVIDIA ignora caixa e espaço sobrando no nome do dispositivo");
+    Assert(OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "ASUS GeForce RTX 3060 Ti") == null
+        && OfficialDriverSource.FindNvidiaProduct(nvidiaCatalog, "Gigabyte NVIDIA GeForce RTX 3060 Ti") == null
+        && OfficialDriverSource.ParseNvidiaDriverDetails(unprefixedDetails, "282412", "ASUS GeForce RTX 3060 Ti", "32.0.15.9186", true) == null
+        && OfficialDriverSource.ParseNvidiaDriverDetails(unprefixedDetails, "282412", "Gigabyte NVIDIA GeForce RTX 3060 Ti", "32.0.15.9186", true) == null,
+        "Nome com outro fabricante antes do modelo é recusado");
 
     var migrationRoot = Path.Combine(root, "direct-migration");
     var previousStore = new Store(migrationRoot);
