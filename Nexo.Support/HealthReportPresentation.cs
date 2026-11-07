@@ -10,7 +10,7 @@ public static class HealthReportPresentation
         var latest = store.RecentSnapshots(since, 1).FirstOrDefault();
         if (latest == null) return "Nenhuma amostra de saúde foi coletada nas últimas 24 horas. O monitoramento funciona enquanto o Nexo está aberto. Nenhum problema ou reparo pode ser confirmado com esses dados.";
         var known = store.FindingsSince(since);
-        var active = HealthRules.Evaluate(store.RecentSnapshots(latest.Time.AddHours(-6), 20).OrderBy(s => s.Time).ToArray(), thresholds ?? new())
+        var active = HealthRules.Evaluate(store.RecentSnapshots(since, 20).OrderBy(s => s.Time).ToArray(), thresholds ?? new())
             .Select(f => f.Id).ToHashSet();
         var events = new EventBatch { Events = store.RecentEvents(100).Where(e => e.Time >= since).ToList(), Gaps = store.RecentEventGaps(10, since) };
         var report = DiagnosticEngine.BuildReport(latest, known, events, DateTimeOffset.UtcNow);

@@ -41,12 +41,7 @@ public sealed class WindowsHealthSampler : IHealthSampler
         catch (Exception ex) { result.Warnings.Add("Discos: " + ex.Message); }
         try
         {
-            result.Processes = Process.GetProcesses().Select(p =>
-            {
-                try { return new ProcessHealth(p.ProcessName, p.Id, p.WorkingSet64, null); }
-                catch { return null; }
-                finally { p.Dispose(); }
-            }).Where(p => p != null).Cast<ProcessHealth>().OrderByDescending(p => p.WorkingSetBytes).Take(12).ToList();
+            result.Processes = ProcessReader.Top(Process.GetProcesses());
         }
         catch (Exception ex) { result.Warnings.Add("Processos: " + ex.Message); }
         try
