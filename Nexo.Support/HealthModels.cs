@@ -80,6 +80,7 @@ public sealed class InterventionRecord
     public bool Authorized { get; set; }
     public bool RebootRequired { get; set; }
     public int? RecoveryPointSequence { get; set; }
+    public string PendingOperation { get; set; } = "";
     public List<InterventionTransition> Transitions { get; set; } = [];
 }
 

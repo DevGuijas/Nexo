@@ -175,6 +175,25 @@ public sealed class OperationalStore : IDisposable
     public List<EventGap> RecentEventGaps(int limit, DateTimeOffset? since = null) => Read<EventGap>("event_gaps", limit, since);
     public List<InterventionRecord> RecentInterventions(int limit) => Read<InterventionRecord>("interventions", limit);
 
+    public List<InterventionRecord> PendingInterventions()
+    {
+        lock (gate)
+        {
+            try
+            {
+                using var connection = Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "SELECT payload FROM interventions WHERE json_extract(payload, '$.PendingOperation') <> '' ORDER BY time DESC";
+                using var reader = command.ExecuteReader();
+                var pending = new List<InterventionRecord>();
+                while (reader.Read()) pending.Add(JsonSerializer.Deserialize<InterventionRecord>(reader.GetString(0), Json)!);
+                return pending;
+            }
+            catch (Exception ex) when (ex is SqliteException or JsonException)
+            { throw new OperationalStoreException("Falha ao consultar operações pendentes.", ex); }
+        }
+    }
+
     public void Prune(TimeSpan retention)
     {
         if (retention <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(retention));
@@ -189,7 +208,9 @@ public sealed class OperationalStore : IDisposable
                 {
                     using var command = connection.CreateCommand();
                     command.Transaction = transaction;
-                    command.CommandText = $"DELETE FROM {table} WHERE time < $cutoff";
+                    command.CommandText = table == "interventions"
+                        ? "DELETE FROM interventions WHERE time < $cutoff AND COALESCE(json_extract(payload, '$.PendingOperation'), '') = ''"
+                        : $"DELETE FROM {table} WHERE time < $cutoff";
                     command.Parameters.AddWithValue("$cutoff", cutoff);
                     command.ExecuteNonQuery();
                 }
