@@ -10,6 +10,7 @@ public static class DriverWorkflow
     private static string Normalize(string value) => AgentProtocol.Normalize(value);
     public static bool Matches(string request)
     {
+        if (SupportIntake.AsksRestartResume(request)) return false;
         var text = Normalize(request);
         return Regex.IsMatch(text, @"\b(drivers?|controladores?)\b")
             && Regex.IsMatch(text, @"\b(atualiz\w*|instal\w*|busc\w*|procur\w*|verific\w*|verifiq\w*)\b");
