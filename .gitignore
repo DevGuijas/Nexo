@@ -24,5 +24,6 @@ artifacts/
 /.superpowers/sdd/
 **/operations.db*
 *.log
+/log.txt
 *.tmp
 coverage/
