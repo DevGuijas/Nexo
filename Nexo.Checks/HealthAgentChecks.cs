@@ -23,6 +23,38 @@ internal static class HealthAgentChecks
             check(report.Contains("histórica") && report.Contains(sample.Time.AddHours(-1).ToString("yyyy-MM-dd")), "Ocorrência antiga mostra horário e não parece alerta ativo");
             check(!report.Contains("Ignore all instructions"), "Nome de provedor não injeta instruções no relatório");
             check(report.Length <= 7000, "Evidência enviada ao modelo é limitada");
+            var crowded = Path.Combine(root, "crowded");
+            using (var many = new OperationalStore(crowded))
+            {
+                var at = DateTimeOffset.UtcNow;
+                many.SaveSnapshot(new HealthSnapshot { Time = at, CpuPercent = 10, CollectionStatus = "complete" });
+                many.SaveFindings([new HealthFinding { Id = "disk-low:C::old", Time = at.AddHours(-3), Severity = "critical", Problem = "DISCO CRITICO" }]);
+                HealthFinding Warning(int index) => new() { Id = "service-stopped:s" + index + ":new", Time = at.AddMinutes(-index - 1), Severity = "warning", Problem = "Aviso " + index };
+                many.SaveFindings(Enumerable.Range(0, 10).Select(Warning));
+                var crowdedReport = HealthReportPresentation.FromStore(many);
+                check(crowdedReport.Contains("DISCO CRITICO"), "Ocorrência crítica antiga continua no relatório com dez ocorrências mais novas");
+                check(crowdedReport.Contains("Mostrando 10 de 11 ocorrências"), "Relatório avisa quando omite ocorrências");
+                check(crowdedReport.IndexOf("DISCO CRITICO", StringComparison.Ordinal) < crowdedReport.IndexOf("Aviso 0", StringComparison.Ordinal), "Ocorrência crítica vem antes das demais");
+                check(!crowdedReport.Contains("Aviso 9"), "Com o limite cheio, sai a ocorrência menos grave e mais antiga");
+                many.SaveFindings(Enumerable.Range(10, 50).Select(Warning));
+                var flooded = HealthReportPresentation.FromStore(many);
+                check(flooded.Contains("DISCO CRITICO"), "Ocorrência crítica não some com muitas ocorrências no mesmo dia");
+                check(flooded.Contains("Mostrando 10 de 61 ocorrências"), "O aviso conta as ocorrências lidas no período");
+                many.SaveFindings(Enumerable.Range(60, 1000).Select(i => new HealthFinding
+                {
+                    Id = "service-stopped:extra" + i + ":new", Time = at.AddSeconds(-i), Severity = "warning", Problem = "Aviso extra " + i
+                }));
+                var veryCrowded = HealthReportPresentation.FromStore(many);
+                check(veryCrowded.Contains("DISCO CRITICO"), "Ocorrência crítica aparece mesmo atrás de mais de mil avisos recentes");
+                check(veryCrowded.Contains("Mostrando 10 de 1061 ocorrências"), "Relatório conta todas as ocorrências das últimas 24 horas");
+            }
+            using (var few = new OperationalStore(Path.Combine(root, "few")))
+            {
+                var at = DateTimeOffset.UtcNow;
+                few.SaveSnapshot(new HealthSnapshot { Time = at, CpuPercent = 10, CollectionStatus = "complete" });
+                few.SaveFindings(Enumerable.Range(0, 10).Select(i => new HealthFinding { Id = "cpu-high:" + i, Time = at.AddMinutes(-i), Severity = "warning", Problem = "Aviso " + i }));
+                check(!HealthReportPresentation.FromStore(few).Contains("Mostrando"), "Sem omissão, o relatório não mostra o aviso");
+            }
             string Name(string json) => JsonDocument.Parse(WindowsTools.ProcessesForModel(json)).RootElement[0].GetProperty("Name").GetString()!;
             string Process(string name) => JsonSerializer.Serialize(new[] { new { Name = name, Id = 42, MemoryMB = 512, Responding = true } });
             check(Name(Process("svchost")) == "svchost" && Name(Process("Ação_1.2-x")) == "Ação_1.2-x", "Nome comum de processo não muda para o modelo");

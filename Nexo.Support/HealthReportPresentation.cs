@@ -9,7 +9,7 @@ public static class HealthReportPresentation
         var since = DateTimeOffset.UtcNow.AddDays(-1);
         var latest = store.RecentSnapshots(since, 1).FirstOrDefault();
         if (latest == null) return "Nenhuma amostra de saúde foi coletada nas últimas 24 horas. O monitoramento funciona enquanto o Nexo está aberto. Nenhum problema ou reparo pode ser confirmado com esses dados.";
-        var known = store.RecentFindings(40).Where(f => f.Time >= since).ToArray();
+        var known = store.FindingsSince(since);
         var active = HealthRules.Evaluate(store.RecentSnapshots(since, 20).OrderBy(s => s.Time).ToArray(), thresholds ?? new())
             .Select(f => f.Id).ToHashSet();
         var events = new EventBatch { Events = store.RecentEvents(100).Where(e => e.Time >= since).ToList(), Gaps = store.RecentEventGaps(10, since) };
@@ -22,7 +22,8 @@ public static class HealthReportPresentation
         foreach (var disk in latest.Disks.Take(8))
             text.AppendLine($"Volume {Safe(disk.Name)}: {(disk.TotalBytes > 0 ? 100.0 * disk.FreeBytes / disk.TotalBytes : 0):F1}% livre.");
         if (report.Findings.Count == 0) text.AppendLine("Nenhum achado sustentado foi registrado nos dados disponíveis.");
-        foreach (var finding in report.Findings.OrderByDescending(f => f.Time).Take(10))
+        if (report.Findings.Count > 10) text.AppendLine($"Mostrando 10 de {report.Findings.Count} ocorrências, as críticas primeiro; as demais foram omitidas deste relatório.");
+        foreach (var finding in report.Findings.OrderByDescending(f => f.Severity == "critical").ThenByDescending(f => f.Time).Take(10))
         {
             var baseId = finding.Id.Contains(':') ? finding.Id[..finding.Id.LastIndexOf(':')] : finding.Id;
             var current = finding.Source == "rules" && active.Contains(baseId);
