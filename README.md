@@ -173,7 +173,7 @@ dotnet run --project Nexo.Checks -- --network-evals
 dotnet run --project Nexo.Checks -- --interaction-evals
 dotnet run --project Nexo.Checks -- --interface-probe-live
 dotnet run --project Nexo.Checks -- --hardware-live
-dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.6.2
+dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.6.3
 dotnet run --project Nexo.Setup.Checks -c Release
 ```
 
