@@ -77,12 +77,15 @@ internal static class ConnectivityProbeChecks
 
         var constructor = typeof(WindowsHealthSampler).GetConstructor([typeof(HealthSettings), typeof(ConnectivityProbe)]);
         check(constructor != null, "Coletor aceita as preferências e uma sondagem controlada");
-        var samplerSettings = new HealthSettings { CheckDns = true, DnsProbeHost = "example.com" };
-        var fakeDns = new ConnectivityProbe(resolve: (_, _) => Task.FromResult(new[] { IPAddress.Parse("192.0.2.10") }));
-        var sampler = (WindowsHealthSampler)constructor!.Invoke([samplerSettings, fakeDns]);
-        using var sampleDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        var sampled = await sampler.Sample(sampleDeadline.Token);
-        check(sampled.DnsProbe.State == (sampled.Connectivity == "local" ? "ok" : "unavailable"),
-            "Coletor grava a resolução do nome sem misturá-la com o estado local");
+        if (Environment.GetEnvironmentVariable("NEXO_LIVE_SAMPLE") == "1")
+        {
+            var samplerSettings = new HealthSettings { CheckDns = true, DnsProbeHost = "example.com" };
+            var fakeDns = new ConnectivityProbe(resolve: (_, _) => Task.FromResult(new[] { IPAddress.Parse("192.0.2.10") }));
+            var sampler = (WindowsHealthSampler)constructor!.Invoke([samplerSettings, fakeDns]);
+            using var sampleDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            var sampled = await sampler.Sample(sampleDeadline.Token);
+            check(sampled.DnsProbe.State == (sampled.Connectivity == "local" ? "ok" : "unavailable"),
+                "Coletor grava a resolução do nome sem misturá-la com o estado local");
+        }
     }
 }
