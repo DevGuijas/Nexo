@@ -43,10 +43,56 @@ internal static class ScenarioChecks
         var root = Path.Combine(Path.GetTempPath(), "nexo-settings-" + Guid.NewGuid().ToString("N"));
         try
         {
+            var ptBr = System.Globalization.CultureInfo.GetCultureInfo("pt-BR");
+            var enUs = System.Globalization.CultureInfo.GetCultureInfo("en-US");
+            check(double.TryParse("2.5", ptBr, out var misread) && misread == 25, "Base do defeito: em pt-BR, o TryParse padrão lê 2.5 como 25");
+            check(!HealthSettings.TryParsePercent("2.5", ptBr, out _), "Limiar com ponto é recusado em pt-BR, sem virar 25");
+            check(!HealthSettings.TryParsePercent("1.000", ptBr, out _), "Separador de milhar não é aceito em limiar");
+            check(HealthSettings.TryParsePercent("2,5", ptBr, out var comma) && comma == 2.5, "Limiar com vírgula funciona em pt-BR");
+            check(HealthSettings.TryParsePercent("90", ptBr, out var whole) && whole == 90, "Limiar inteiro funciona em pt-BR");
+            check(HealthSettings.TryParsePercent("2.5", enUs, out var dot) && dot == 2.5, "Limiar com ponto funciona em en-US");
+            check(!HealthSettings.TryParsePercent("2,5", enUs, out _), "Limiar com vírgula é recusado em en-US, sem virar 25");
+            foreach (var unreadable in new[] { "", "abc", "NaN", "Infinity", "-Infinity" })
+                check(!HealthSettings.TryParsePercent(unreadable, enUs, out _), "Limiar inválido é recusado: [" + unreadable + "]");
             var settings = new HealthSettings { IntervalSeconds = 45, CpuHighPercent = 88, DiskLowFreePercent = 12, RetentionDays = 14 };
             settings.Save(root);
             var loaded = HealthSettings.Load(root);
             check(loaded.IntervalSeconds == 45 && loaded.CpuHighPercent == 88 && loaded.RetentionDays == 14, "Preferências de saúde persistem localmente");
+            using (var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "health-settings.json"))))
+                check(saved.RootElement.TryGetProperty("CheckGateway", out var gatewayCheck) && gatewayCheck.ValueKind == System.Text.Json.JsonValueKind.False
+                    && saved.RootElement.TryGetProperty("CheckDns", out var dnsCheck) && dnsCheck.ValueKind == System.Text.Json.JsonValueKind.False
+                    && saved.RootElement.TryGetProperty("CheckExternal", out var externalCheck) && externalCheck.ValueKind == System.Text.Json.JsonValueKind.False,
+                    "Sondagens de rede ficam desativadas por padrão no arquivo local");
+            var configured = System.Text.Json.JsonSerializer.Deserialize<HealthSettings>("""{"CheckGateway":true,"CheckDns":true,"CheckExternal":true,"DnsProbeHost":"example.com","HttpProbeUrl":"https://example.com/check","HttpExpectedText":"OK"}""")!;
+            configured.Save(root);
+            using (var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "health-settings.json"))))
+                check(saved.RootElement.GetProperty("CheckGateway").GetBoolean()
+                    && saved.RootElement.GetProperty("DnsProbeHost").GetString() == "example.com"
+                    && saved.RootElement.GetProperty("HttpExpectedText").GetString() == "OK",
+                    "Alvos e opções de sondagem persistem no perfil");
+            var invalid = System.Text.Json.JsonSerializer.Deserialize<HealthSettings>("""{"CheckExternal":true,"HttpProbeUrl":"file:///C:/secret","HttpExpectedText":"OK"}""")!;
+            var invalidRejected = false;
+            try { invalid.Save(root); } catch (ArgumentException) { invalidRejected = true; }
+            check(invalidRejected, "Sondagem externa rejeita endereço fora de HTTP(S)");
+            var ipAsDns = System.Text.Json.JsonSerializer.Deserialize<HealthSettings>("""{"CheckDns":true,"DnsProbeHost":"1.2.3.4"}""")!;
+            var ipRejected = false;
+            try { ipAsDns.Save(root); } catch (ArgumentException) { ipRejected = true; }
+            check(ipRejected, "Sondagem DNS rejeita IP literal que não consultaria um nome");
+            var emptyExpectation = System.Text.Json.JsonSerializer.Deserialize<HealthSettings>("""{"CheckExternal":true,"HttpExpectedText":""}""")!;
+            var emptyRejected = false;
+            try { emptyExpectation.Save(root); } catch (ArgumentException) { emptyRejected = true; }
+            check(emptyRejected, "Sondagem HTTP exige resposta esperada para não aceitar qualquer página");
+            var disabledWithDraft = new HealthSettings { CheckDns = false, CheckExternal = false, DnsProbeHost = "1.2.3.4", HttpProbeUrl = "incompleto", HttpExpectedText = "" };
+            disabledWithDraft.Save(root);
+            check(HealthSettings.Load(root).IntervalSeconds == 30,
+                "Campos de sondagem desligada não impedem salvar outras preferências");
+            using (var snapshot = System.Text.Json.JsonDocument.Parse(System.Text.Json.JsonSerializer.Serialize(new HealthSnapshot())))
+                check(snapshot.RootElement.TryGetProperty("GatewayProbe", out var gatewayProbe) && gatewayProbe.GetProperty("State").GetString() == "disabled",
+                    "Nova amostra diferencia sondagem desligada de falha de rede");
+            File.WriteAllText(Path.Combine(root, "health-settings.json"), """{"IntervalSeconds":45,"RetentionDays":14}""");
+            var legacySettings = HealthSettings.Load(root);
+            check(!legacySettings.CheckGateway && !legacySettings.CheckDns && !legacySettings.CheckExternal,
+                "Preferência antiga carrega sem ativar consultas de rede");
             loaded.IntervalSeconds = 1;
             try { loaded.Save(root); throw new Exception("FAIL: intervalo inválido aceito"); }
             catch (ArgumentOutOfRangeException) { check(true, "Intervalo de coleta inválido é bloqueado"); }

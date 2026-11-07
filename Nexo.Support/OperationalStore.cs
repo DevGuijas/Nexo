@@ -148,18 +148,18 @@ public sealed class OperationalStore : IDisposable
     }
     public void SaveIntervention(InterventionRecord item) => Write("INSERT OR REPLACE INTO interventions(id,time,payload) VALUES($id,$time,$payload)", item.Id, item.Time, item);
 
-    private List<T> Read<T>(string table, int limit, DateTimeOffset? since = null)
+    private List<T> Read<T>(string table, int? limit, DateTimeOffset? since = null)
     {
-        if (limit is < 1 or > 1000) throw new ArgumentOutOfRangeException(nameof(limit));
+        if (limit is < 1 or > 1000 || limit == null && since == null) throw new ArgumentOutOfRangeException(nameof(limit));
         lock (gate)
         {
             try
             {
                 using var connection = Open();
                 using var command = connection.CreateCommand();
-                command.CommandText = $"SELECT payload FROM {table}" + (since == null ? "" : " WHERE time >= $since") + " ORDER BY time DESC LIMIT $limit";
+                command.CommandText = $"SELECT payload FROM {table}" + (since == null ? "" : " WHERE time >= $since") + " ORDER BY time DESC" + (limit == null ? "" : " LIMIT $limit");
                 if (since != null) command.Parameters.AddWithValue("$since", since.Value.ToUniversalTime().ToString("O"));
-                command.Parameters.AddWithValue("$limit", limit);
+                if (limit != null) command.Parameters.AddWithValue("$limit", limit.Value);
                 using var reader = command.ExecuteReader();
                 var result = new List<T>();
                 while (reader.Read()) result.Add(JsonSerializer.Deserialize<T>(reader.GetString(0), Json)!);
@@ -171,6 +171,7 @@ public sealed class OperationalStore : IDisposable
 
     public List<HealthSnapshot> RecentSnapshots(DateTimeOffset since, int limit) => Read<HealthSnapshot>("snapshots", limit, since);
     public List<HealthFinding> RecentFindings(int limit) => Read<HealthFinding>("findings", limit);
+    public List<HealthFinding> FindingsSince(DateTimeOffset since) => Read<HealthFinding>("findings", null, since);
     public List<SystemEvent> RecentEvents(int limit) => Read<SystemEvent>("events", limit);
     public List<EventGap> RecentEventGaps(int limit, DateTimeOffset? since = null) => Read<EventGap>("event_gaps", limit, since);
     public List<InterventionRecord> RecentInterventions(int limit) => Read<InterventionRecord>("interventions", limit);

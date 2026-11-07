@@ -223,7 +223,7 @@ public partial class MainWindow : Window
     private void StartHealthMonitoring()
     {
         if (healthStore == null || healthMonitor != null) return;
-        healthMonitor = new MonitoringEngine(new WindowsHealthSampler(), healthStore,
+        healthMonitor = new MonitoringEngine(new WindowsHealthSampler(healthSettings), healthStore,
             TimeSpan.FromSeconds(healthSettings.IntervalSeconds), healthSettings.Thresholds());
         healthMonitor.Updated += OnHealthUpdated;
         healthMonitor.Start();
@@ -279,6 +279,16 @@ public partial class MainWindow : Window
                 var storageStatus = latest.StorageHealth == "unavailable" ? "indisponível" : latest.StorageHealth;
                 var collectionStatus = latest.CollectionStatus switch { "complete" => "completa", "partial" => "parcial", _ => latest.CollectionStatus };
                 overview.Children.Add(Text("Temperatura: " + (latest.CpuTemperatureC?.ToString("F0") ?? "indisponível") + "  ·  SMART: " + storageStatus + "  ·  Coleta: " + collectionStatus, 12, "Secondary"));
+                foreach (var (label, reading) in new[]
+                {
+                    ("Gateway", latest.GatewayProbe), ("DNS", latest.DnsProbe), ("Destino externo", latest.ExternalProbe)
+                })
+                {
+                    var status = Text(label + ": " + HealthReportPresentation.DescribeProbe(reading), 12,
+                        reading?.State is "no_response" or "unexpected" ? "Warning" : "Secondary");
+                    status.Margin = new Thickness(0, 6, 0, 0);
+                    overview.Children.Add(status);
+                }
                 foreach (var disk in latest.Disks.Take(6))
                 {
                     var diskText = Text($"{disk.Name}: {(disk.TotalBytes > 0 ? 100.0 * disk.FreeBytes / disk.TotalBytes : 0):F1}% livre", 13, "Secondary");
@@ -287,12 +297,18 @@ public partial class MainWindow : Window
                 PageContent.Children.Add(Card(overview));
             }
             var alerts = healthStore.RecentFindings(20);
+            var occurrenceNow = DateTimeOffset.UtcNow;
+            var occurrenceHistory = healthStore.RecentSnapshots(occurrenceNow.AddHours(-6), 20);
+            var occurrenceLimits = healthSettings.Thresholds();
             PageContent.Children.Add(SectionHeading("health", "Ocorrências preventivas"));
-            if (alerts.Count == 0) PageContent.Children.Add(Card(Text("Nenhuma ocorrência persistente registrada.", 13, "Secondary")));
-            foreach (var finding in alerts)
+            PageContent.Children.Add(Card(Text(HealthOccurrences.CollectionNotice(latest, occurrenceLimits, occurrenceNow), 12, "Secondary")));
+            if (alerts.Count == 0) PageContent.Children.Add(Card(Text("Nenhuma ocorrência registrada.", 13, "Secondary")));
+            foreach (var (finding, status) in HealthOccurrences.Classify(alerts, occurrenceHistory, occurrenceLimits, occurrenceNow))
             {
                 var detail = new StackPanel();
-                detail.Children.Add(Text($"{finding.Time.ToLocalTime():g}  ·  {finding.Severity}", 11, finding.Severity == "critical" ? "Danger" : "Warning"));
+                detail.Children.Add(Text($"{finding.Time.ToLocalTime():g}  ·  {finding.Severity}", 11, status.State != OccurrenceState.Persistent ? "Secondary" : finding.Severity == "critical" ? "Danger" : "Warning"));
+                var occurrenceState = Text(status.Label, 12, status.State switch { OccurrenceState.Persistent => "Warning", OccurrenceState.Resolved => "Success", _ => "Secondary" });
+                occurrenceState.FontWeight = FontWeights.SemiBold; occurrenceState.Margin = new Thickness(0, 5, 0, 0); detail.Children.Add(occurrenceState);
                 var problem = Text(finding.Problem, 15); problem.FontWeight = FontWeights.SemiBold; problem.Margin = new Thickness(0, 7, 0, 7); detail.Children.Add(problem);
                 detail.Children.Add(Text($"{finding.Evidence}\nHipótese: {finding.Cause}\nPróximo passo: {finding.Recommendation}", 13, "Secondary"));
                 PageContent.Children.Add(Card(detail));
@@ -715,12 +731,37 @@ public partial class MainWindow : Window
         var cpu = Field(healthPanel, "Alerta de CPU persistente (%)", healthSettings.CpuHighPercent.ToString("F0"));
         var disk = Field(healthPanel, "Alerta de espaço livre abaixo de (%)", healthSettings.DiskLowFreePercent.ToString("F0"));
         var retention = Field(healthPanel, "Retenção do histórico operacional (dias: 1–365)", healthSettings.RetentionDays.ToString());
+        var processGrowth = Field(healthPanel, "Alerta de crescimento de memória por processo (pontos da RAM: 1–50)", healthSettings.ProcessMemoryGrowthPoints.ToString());
+        var processSamples = Field(healthPanel, "Leituras seguidas para esse alerta (3–19)", healthSettings.ProcessMemorySamples.ToString());
+        var networkHeading = Text("Sondagens de rede (opcionais)", 15); networkHeading.FontWeight = FontWeights.SemiBold;
+        networkHeading.Margin = new Thickness(0, 24, 0, 8); healthPanel.Children.Add(networkHeading);
+        healthPanel.Children.Add(Text("Ao ativar DNS ou destino externo, o Nexo envia consultas aos endereços abaixo. Um teste sem resposta não confirma a causa da falha.", 12, "Secondary"));
+        var checkGateway = Check(healthPanel, "Verificar gateway por ICMP", healthSettings.CheckGateway);
+        var checkDns = Check(healthPanel, "Verificar DNS do nome configurado", healthSettings.CheckDns);
+        var checkExternal = Check(healthPanel, "Verificar destino externo por HTTP(S)", healthSettings.CheckExternal);
+        foreach (var option in new[] { checkGateway, checkDns, checkExternal }) option.Margin = new Thickness(0, 10, 0, 0);
+        var dnsHost = Field(healthPanel, "Nome para consulta DNS", healthSettings.DnsProbeHost);
+        var httpUrl = Field(healthPanel, "URL do destino externo", healthSettings.HttpProbeUrl);
+        var expectedText = Field(healthPanel, "Texto esperado da resposta HTTP", healthSettings.HttpExpectedText);
+        void RefreshProbeFields()
+        {
+            dnsHost.IsEnabled = checkDns.IsChecked == true;
+            httpUrl.IsEnabled = expectedText.IsEnabled = checkExternal.IsChecked == true;
+        }
+        checkDns.Checked += (_, _) => RefreshProbeFields(); checkDns.Unchecked += (_, _) => RefreshProbeFields();
+        checkExternal.Checked += (_, _) => RefreshProbeFields(); checkExternal.Unchecked += (_, _) => RefreshProbeFields();
+        RefreshProbeFields();
         healthPanel.Children.Add(Action("Salvar monitoramento", async (_, _) => await GuardAsync(async () =>
         {
-            if (!int.TryParse(interval.Text, out var intervalValue) || !double.TryParse(cpu.Text, out var cpuValue)
-                || !double.TryParse(disk.Text, out var diskValue) || !int.TryParse(retention.Text, out var retentionValue))
+            if (!int.TryParse(interval.Text, out var intervalValue) || !HealthSettings.TryParsePercent(cpu.Text, System.Globalization.CultureInfo.CurrentCulture, out var cpuValue)
+                || !HealthSettings.TryParsePercent(disk.Text, System.Globalization.CultureInfo.CurrentCulture, out var diskValue) || !int.TryParse(retention.Text, out var retentionValue)
+                || !HealthSettings.TryParseGrowthPoints(processGrowth.Text, System.Globalization.CultureInfo.CurrentCulture, out var processGrowthValue) || !int.TryParse(processSamples.Text, out var processSamplesValue))
                 throw new InvalidOperationException("Informe números válidos para as preferências de saúde.");
-            var next = new HealthSettings { IntervalSeconds = intervalValue, CpuHighPercent = cpuValue, DiskLowFreePercent = diskValue, RetentionDays = retentionValue };
+            var next = new HealthSettings { IntervalSeconds = intervalValue, CpuHighPercent = cpuValue, DiskLowFreePercent = diskValue,
+                RetentionDays = retentionValue, CheckGateway = checkGateway.IsChecked == true, CheckDns = checkDns.IsChecked == true,
+                CheckExternal = checkExternal.IsChecked == true, DnsProbeHost = dnsHost.Text.Trim(), HttpProbeUrl = httpUrl.Text.Trim(),
+                HttpExpectedText = expectedText.Text.Trim(), ProcessMemoryGrowthPoints = processGrowthValue,
+                ProcessMemorySamples = processSamplesValue };
             next.Save(store.Root);
             if (healthMonitor != null) { await healthMonitor.StopAsync(); healthMonitor.Dispose(); healthMonitor = null; }
             healthSettings = next; healthStore?.Prune(TimeSpan.FromDays(next.RetentionDays)); StartHealthMonitoring();
@@ -755,6 +796,15 @@ public partial class MainWindow : Window
                 if (HasVectorIcon(VisualTreeHelper.GetChild(root, i))) return true;
             return false;
         }
+        static IEnumerable<T> Descendants<T>(DependencyObject root) where T : DependencyObject
+        {
+            for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+            {
+                var child = VisualTreeHelper.GetChild(root, i);
+                if (child is T found) yield return found;
+                foreach (var nested in Descendants<T>(child)) yield return nested;
+            }
+        }
         async Task Capture(string name)
         {
             await Task.Delay(200); UpdateLayout();
@@ -785,13 +835,45 @@ public partial class MainWindow : Window
         if (healthStore != null)
         {
             healthStore.SaveSnapshot(new HealthSnapshot { CpuPercent = 37, MemoryUsedPercent = 54, Connectivity = "local",
+                GatewayProbe = new NetworkProbeReading("no_response", "192.0.2.1"),
+                DnsProbe = new NetworkProbeReading("ok", "example.com"),
+                ExternalProbe = new NetworkProbeReading("unexpected", "example.com"),
                 CollectionStatus = "complete", Disks = [new DiskHealth("C:\\", 80, 200)] });
-            ShowPage("health"); await Capture("nexo-health-data.png");
+            ShowPage("health");
+            if (!new[] { "Gateway:", "DNS:", "Destino externo:" }.All(label => Descendants<TextBlock>(PageContent).Any(text => text.Text.Contains(label))))
+                throw new InvalidOperationException("O painel não separa gateway, DNS e destino externo.");
+            await Capture("nexo-health-data.png");
             Width = 1060; Height = 720; UpdateLayout(); await Capture("nexo-health-data-small.png");
+            Width = 1380; Height = 900; UpdateLayout();
+            var occurrenceSample = DateTimeOffset.UtcNow;
+            for (var i = 0; i < 3; i++)
+                healthStore.SaveSnapshot(new HealthSnapshot { Time = occurrenceSample.AddMilliseconds(i), CpuPercent = 95, MemoryUsedPercent = 54, Connectivity = "local",
+                    CollectionStatus = "complete", Disks = [new DiskHealth("C:\\", 80, 200)] });
+            HealthFinding Occurrence(string id, string severity, string title) => new() { Id = id + ":preview", Time = occurrenceSample.AddMinutes(-5), Severity = severity, Problem = title,
+                Evidence = "Leituras simuladas da prévia", Cause = "Exemplo da prévia", Recommendation = "Nenhuma ação: dados de exemplo" };
+            healthStore.SaveFindings([Occurrence("cpu-high", "warning", "Uso persistente de CPU"), Occurrence("disk-low:C:\\", "critical", "Pouco espaço no volume C:\\"),
+                Occurrence("service-stopped:Spooler", "warning", "Serviço automático interrompido")]);
+            ShowPage("health");
+            var occurrenceTexts = Descendants<TextBlock>(PageContent).ToArray();
+            foreach (var expected in new[] { "Última coleta", "Persiste nas leituras atuais", "Resolvida:", "estado atual desconhecido" })
+                if (!occurrenceTexts.Any(text => text.Text.Contains(expected))) throw new InvalidOperationException("O painel não mostra o estado da ocorrência: " + expected);
+            async Task CaptureAt(string text, string file, double extraScroll = 0)
+            {
+                UpdateLayout(); occurrenceTexts.First(item => item.Text.Contains(text)).BringIntoView();
+                if (extraScroll > 0) { UpdateLayout(); PageScroll.ScrollToVerticalOffset(PageScroll.VerticalOffset + extraScroll); }
+                await Capture(file);
+            }
+            await CaptureAt("Última coleta", "nexo-health-occurrences.png");
+            await CaptureAt("Uso persistente de CPU", "nexo-health-occurrences-active.png", 100);
+            Width = 1060; Height = 720;
+            await CaptureAt("Última coleta", "nexo-health-occurrences-small.png");
+            await CaptureAt("Uso persistente de CPU", "nexo-health-occurrences-active-small.png", 100);
             Width = 1380; Height = 900; UpdateLayout();
         }
         ShowPage("settings");
         if (!PageContent.Children.OfType<Border>().Any(b => b.Child is StackPanel s && s.Children.OfType<StackPanel>().Any(h => h.Children.OfType<TextBlock>().Any(t => t.Text == "Monitoramento local")))) throw new InvalidOperationException("Controles de monitoramento não abriram.");
+        if (!new[] { "Verificar gateway", "Verificar DNS", "Verificar destino externo" }.All(label => Descendants<CheckBox>(PageContent).Any(check => check.Content?.ToString()?.Contains(label) == true && check.IsChecked == false)))
+            throw new InvalidOperationException("As três sondagens precisam de opções independentes desligadas por padrão.");
         await Capture("nexo-health-settings.png");
         Width = 1060; Height = 720; UpdateLayout(); await Capture("nexo-health-settings-small.png");
         Width = 1380; Height = 900; UpdateLayout();

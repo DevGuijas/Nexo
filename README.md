@@ -6,7 +6,9 @@ O desenvolvimento acontece na branch `development`. Convenções de commits, tes
 
 ## Saúde do computador (ramo de desenvolvimento)
 
-A página **Saúde do PC** mostra leituras locais, ocorrências persistentes, eventos do Windows e intervenções registradas enquanto o aplicativo está aberto. **Configurações** permite ajustar intervalo, limiares de CPU/disco e retenção. O banco operacional SQLite fica separado das conversas. O agente local pode consultar `get_health_report`; sem Ollama, o aplicativo apresenta o relatório determinístico disponível. Um processo elevado sem resultado no prazo fica em estado **desconhecido**, nunca como correção concluída. O INF instalado pode ser consultado após identificar o dispositivo, sem busca online quando o pedido se limita ao INF. Antes de instalar um driver, o Nexo exige um ponto de restauração confirmado; se o Windows não puder criá-lo, a instalação é interrompida. Consulte o [protocolo de avaliação](docs/AVALIACAO-MONITORAMENTO-E-RECUPERACAO.md) para os sete cenários e os limites da validação.
+A página **Saúde do PC** mostra leituras locais, ocorrências persistentes, eventos do Windows e intervenções registradas enquanto o aplicativo está aberto. **Configurações** permite ajustar intervalo, limiares de CPU, disco e crescimento de memória por processo, e retenção. O crescimento sustentado aponta o processo por PID e horário de início, como hipótese a confirmar. O banco operacional SQLite fica separado das conversas. O agente local pode consultar `get_health_report`; sem Ollama, o aplicativo apresenta o relatório determinístico disponível. Um processo elevado sem resultado no prazo fica em estado **desconhecido**, nunca como correção concluída. O INF instalado pode ser consultado após identificar o dispositivo, sem busca online quando o pedido se limita ao INF. Antes de instalar um driver, o Nexo exige um ponto de restauração confirmado; se o Windows não puder criá-lo, a instalação é interrompida. Consulte o [protocolo de avaliação](docs/AVALIACAO-MONITORAMENTO-E-RECUPERACAO.md) para os sete cenários e os limites da validação.
+
+O monitor mostra separadamente a interface local, o gateway, a resolução DNS e um destino HTTP(S). As três sondagens de rede ficam desligadas por padrão e podem ser ativadas separadamente em **Configurações → Monitoramento local**; nome DNS, URL e texto esperado são editáveis. Ativá-las envia consultas aos destinos configurados. Três falhas consecutivas do mesmo teste externo, dentro do intervalo de coleta com tolerância curta, podem gerar um aviso. Mudar a URL ou o texto esperado reinicia essa contagem. O resultado descreve apenas aquele teste: bloqueio de ICMP, portal cativo, proxy, VPN ou indisponibilidade do próprio destino podem alterar as leituras. O Nexo não muda a rede ao coletar esses dados e continua a registrar CPU, disco e eventos sem acesso externo.
 
 ## Abrir
 
@@ -150,7 +152,7 @@ O acesso do aplicativo acompanha a sessão Windows que abriu o Nexo; o arquivo d
 
 O agente opera pelas ferramentas implementadas, sem executar PowerShell livre gerado pelo modelo. Não é controle irrestrito de qualquer software, não manipula arbitrariamente interfaces de aplicativos, não faz pareamento Bluetooth com PIN nem altera automaticamente o dispositivo de áudio padrão.
 
-Drivers dependem da disponibilidade e das políticas da fonte de atualizações configurada no Windows (Windows Update ou servidor gerenciado). O fallback NVIDIA baixa apenas o aplicativo oficial, não escolhe nem instala automaticamente um driver do fabricante. O Nexo não aceita URLs indicadas pelo modelo. Após uma instalação via Windows Update, compara a versão observada e o estado PnP; reinicialização pendente ou resultado não confirmado impedem declarar a correção concluída. Não há promessa de resolver qualquer incidente N3. Quando faltar uma ferramenta ou a correção falhar, o agente deve informar a limitação. Relatórios são exportáveis para a TI; ainda não há envio automático a GLPI/Jira ou outro sistema externo.
+Drivers dependem da disponibilidade e das políticas da fonte de atualizações configurada no Windows (Windows Update ou servidor gerenciado). Quando a fonte do Windows não oferece atualização para uma única placa NVIDIA, o Nexo pode baixar do catálogo oficial o driver WHQL do modelo observado e instalá-lo, somente com autorização explícita e assinatura válida; também pode baixar o NVIDIA App oficial, sem instalá-lo. O Nexo não aceita URLs indicadas pelo modelo. Após uma instalação via Windows Update, compara a versão observada e o estado PnP; reinicialização pendente ou resultado não confirmado impedem declarar a correção concluída. Não há promessa de resolver qualquer incidente N3. Quando faltar uma ferramenta ou a correção falhar, o agente deve informar a limitação. Relatórios são exportáveis para a TI; ainda não há envio automático a GLPI/Jira ou outro sistema externo.
 
 ## Desenvolvimento e testes
 
@@ -171,7 +173,7 @@ dotnet run --project Nexo.Checks -- --network-evals
 dotnet run --project Nexo.Checks -- --interaction-evals
 dotnet run --project Nexo.Checks -- --interface-probe-live
 dotnet run --project Nexo.Checks -- --hardware-live
-dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.6.2
+dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.6.3
 dotnet run --project Nexo.Setup.Checks -c Release
 ```
 

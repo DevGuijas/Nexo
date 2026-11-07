@@ -9,11 +9,14 @@ try
 {
     HealthDataChecks.Run(Path.Combine(root, "operational"), Assert);
     MonitoringChecks.Run(Assert);
+    await ConnectivityProbeChecks.Run(Assert);
+    ProcessMemoryChecks.Run(Assert);
     DiagnosticChecks.Run(Assert);
     EventCollectionChecks.Run(Assert);
     HealthAgentChecks.Run(Assert);
     RecoveryChecks.Run(Assert);
     ScenarioChecks.Run(Assert);
+    HealthOccurrenceChecks.Run(Assert);
     var freshDirectRoot = Path.Combine(root, "direct-fresh");
     var freshDirectStore = new Store(freshDirectRoot, directAccess: true);
     var directSession = freshDirectStore.GetLocalSession();
@@ -30,6 +33,31 @@ try
     Assert(humanScan.State == "0 ofertas compatíveis" && humanScan.Detail.Contains("Nenhum arquivo foi baixado"), "Busca sem oferta mostra fonte e limite real da execução");
     var humanDenied = ToolResultPresentation.Describe("Instalando driver", "{\"success\":false,\"denied\":true}");
     Assert(humanDenied.Warning && humanDenied.Detail.Contains("interrompeu"), "Recusa é exibida em linguagem clara");
+    foreach (var resume in new[]
+    {
+        "O instalador do driver pediu reinicialização. Prepare este atendimento para eu salvar meus arquivos, reiniciar manualmente e retomar aqui.",
+        "Instalei o driver de vídeo e preciso reiniciar. Quero retomar aqui depois.",
+        "Prepare o reinício para eu instalar o driver",
+        "Depois de atualizar o driver o Windows pediu para reiniciar. Prepare a retomada.",
+        "Após instalar o driver, prepare o reinício"
+    })
+        Assert(!DriverWorkflow.Matches(resume) && SupportIntake.InitialTopic(resume) == null, "Preparar reinício e retomada não abre fluxo de driver: " + resume);
+    foreach (var direct in new[]
+    {
+        "Atualize o driver de vídeo",
+        "Atualize o driver de vídeo e prepare o reinício",
+        "Atualiza o driver de vídeo e prepara o reinício",
+        "Instala o driver de áudio e prepara a reinicialização",
+        "Verifica o driver e prepara o reinício",
+        "Preciso reiniciar e retomar: procure o driver de vídeo",
+        "O driver de áudio pediu reinicialização, verifique se há atualização",
+        "Verifique o driver e prepare o reinício",
+        "O instalador do driver pediu reinicialização",
+        "O driver foi instalado, prepare o relatório"
+    })
+        Assert(DriverWorkflow.Matches(direct), "Pedido direto de driver continua no fluxo mesmo citando reinício: " + direct);
+    Assert(SupportIntake.InitialTopic("Atualize o driver de vídeo") == "hardware" && SupportIntake.InitialTopic("Atualiza o driver de vídeo e prepara o reinício") == "hardware",
+        "Pedido direto de driver continua abrindo a consulta de hardware");
     Assert(OfficialDriverSource.AllowedNvidiaDownload(new Uri("https://us.download.nvidia.com/nvapp/client/11.0.9.565/NVIDIA_app_v11.0.9.565.exe"))
         && !OfficialDriverSource.AllowedNvidiaDownload(new Uri("https://us.download.nvidia.com.evil.example/nvapp/client/11.0.9.565/NVIDIA_app_v11.0.9.565.exe"))
         && !OfficialDriverSource.AllowedNvidiaDownload(new Uri("http://us.download.nvidia.com/nvapp/client/11.0.9.565/NVIDIA_app_v11.0.9.565.exe")),

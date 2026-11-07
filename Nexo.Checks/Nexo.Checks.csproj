@@ -10,6 +10,7 @@
 <ItemGroup><Compile Include="../Nexo.Support/HealthModels.cs" Link="HealthModels.cs"/><Compile Include="../Nexo.Support/OperationalStore.cs" Link="OperationalStore.cs"/><PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.33" /></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/HealthRules.cs" Link="HealthRules.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/MonitoringEngine.cs" Link="MonitoringEngine.cs"/><Compile Include="../Nexo.Support/WindowsHealthSampler.cs" Link="WindowsHealthSampler.cs"/></ItemGroup>
+<ItemGroup><Compile Include="../Nexo.Support/ConnectivityProbe.cs" Link="ConnectivityProbe.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/WindowsEventCollector.cs" Link="WindowsEventCollector.cs"/><Compile Include="../Nexo.Support/EventAnalyzer.cs" Link="EventAnalyzer.cs"/><Compile Include="../Nexo.Support/DiagnosticEngine.cs" Link="DiagnosticEngine.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/HealthReportPresentation.cs" Link="HealthReportPresentation.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/OperationSupervisor.cs" Link="OperationSupervisor.cs"/><Compile Include="../Nexo.Support/DriverStoreInventory.cs" Link="DriverStoreInventory.cs"/></ItemGroup>

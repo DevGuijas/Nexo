@@ -337,7 +337,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             case "get_recent_errors":
                 return Ok(await SupportService.Powershell("$log=& \"$env:WINDIR\\System32\\wevtutil.exe\" qe System '/q:*[System[(Level=2) and TimeCreated[timediff(@SystemTime) <= 86400000]]]' /c:12 /rd:true /f:text; if($LASTEXITCODE -ne 0){throw 'Não foi possível ler os eventos do sistema'}; $text=$log -join \"`n\"; if($text.Length -gt 7000){$text.Substring(0,7000)}else{$text}", token));
             case "get_processes":
-                return Ok(await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 12 Name,Id,@{N='MemoryMB';E={[math]::Round($_.WorkingSet64/1MB)}},Responding)", token));
+                return Ok(ProcessesForModel(await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 12 Name,Id,@{N='MemoryMB';E={[math]::Round($_.WorkingSet64/1MB)}},Responding)", token)));
             case "get_health_report":
                 using (var operational = new OperationalStore(store.Root))
                 {
@@ -597,6 +597,23 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     }
     private static string Denied() => JsonSerializer.Serialize(new { success = false, denied = true, message = "Ação recusada pelo usuário. Não executar nem repetir." });
     public static string Ok(object data) => JsonSerializer.Serialize(new { success = true, data });
+
+    // O nome de um executável é escolhido por quem o criou: é dado não confiável, e o filtro só limita o que chega ao modelo.
+    public static string ProcessesForModel(string json)
+    {
+        System.Text.Json.Nodes.JsonArray? processes;
+        try { processes = System.Text.Json.Nodes.JsonNode.Parse(json) as System.Text.Json.Nodes.JsonArray; }
+        catch (JsonException ex) { throw new InvalidDataException("A lista de processos veio em formato inesperado.", ex); }
+        if (processes == null || processes.Any(process => process is not System.Text.Json.Nodes.JsonObject))
+            throw new InvalidDataException("A lista de processos veio em formato inesperado.");
+        foreach (var process in processes.Cast<System.Text.Json.Nodes.JsonObject>())
+        {
+            var name = process["Name"] is System.Text.Json.Nodes.JsonValue value && value.TryGetValue<string>(out var text) ? text : "";
+            var safe = new string(name.Take(40).Select(c => char.IsLetterOrDigit(c) || c is '.' or '-' or '_' ? c : '_').ToArray());
+            process["Name"] = safe.Length == 0 ? "processo" : safe;
+        }
+        return processes.ToJsonString();
+    }
     private static async Task<string> TestConnection(string host, int port, CancellationToken token)
     {
         if (Uri.CheckHostName(host) == UriHostNameType.Unknown || host.Length > 253 || port is < 1 or > 65535) throw new InvalidOperationException("Informe hostname/IP e porta válidos.");
