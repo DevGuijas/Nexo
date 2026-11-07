@@ -852,11 +852,16 @@ public partial class MainWindow : Window
             var occurrenceTexts = Descendants<TextBlock>(PageContent).ToArray();
             foreach (var expected in new[] { "Última coleta", "Persiste nas leituras atuais", "Resolvida:", "estado atual desconhecido" })
                 if (!occurrenceTexts.Any(text => text.Text.Contains(expected))) throw new InvalidOperationException("O painel não mostra o estado da ocorrência: " + expected);
-            occurrenceTexts.First(text => text.Text.StartsWith("Última coleta")).BringIntoView();
-            await Capture("nexo-health-occurrences.png");
-            Width = 1060; Height = 720; UpdateLayout();
-            occurrenceTexts.First(text => text.Text.StartsWith("Última coleta")).BringIntoView();
-            await Capture("nexo-health-occurrences-small.png");
+            async Task CaptureAt(string text, string file)
+            {
+                UpdateLayout(); occurrenceTexts.First(item => item.Text.Contains(text)).BringIntoView();
+                await Capture(file);
+            }
+            await CaptureAt("Última coleta", "nexo-health-occurrences.png");
+            await CaptureAt("Persiste nas leituras atuais", "nexo-health-occurrences-active.png");
+            Width = 1060; Height = 720;
+            await CaptureAt("Última coleta", "nexo-health-occurrences-small.png");
+            await CaptureAt("Persiste nas leituras atuais", "nexo-health-occurrences-active-small.png");
             Width = 1380; Height = 900; UpdateLayout();
         }
         ShowPage("settings");
