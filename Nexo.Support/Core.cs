@@ -50,6 +50,16 @@ public sealed class Conversation
     public List<AgentMessage> AgentHistory { get; set; } = [];
     public string? PendingRestartBoot { get; set; }
     public string? PendingRestartReason { get; set; }
+    // O pedido de driver que terminou na pergunta de dispositivo (#74). Vale só para a mensagem seguinte do usuário.
+    public PendingDriverChoice? PendingDriverChoice { get; set; }
+}
+// Só o pedido, os nomes mostrados na pergunta (nunca IDs), o texto da pergunta e quando ela foi feita (UTC).
+public sealed class PendingDriverChoice
+{
+    public string Request { get; set; } = "";
+    public List<string> Names { get; set; } = [];
+    public string Question { get; set; } = "";
+    public DateTime AskedUtc { get; set; }
 }
 public sealed class Ticket
 {

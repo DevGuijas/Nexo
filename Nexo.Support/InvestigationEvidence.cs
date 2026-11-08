@@ -58,11 +58,15 @@ public sealed class InvestigationEvidence
     // A forma normalizada só encontra o candidato; a autorização compara a identidade dele (ID do dispositivo ou nome exato da
     // impressora) com o alvo da ferramenta, para que outro observado com nome parecido não passe pelo escolhido.
     private static bool UserNamedExactlyOneTarget(string request, IEnumerable<(string Key, string Name)> candidates, string target, StringComparer identity)
+        => NamedCandidate(request, candidates) is { } chosen && identity.Equals(chosen, target);
+    // A identidade (Key) do único candidato que a mensagem nomeia pela regra acima; null quando nenhum ou mais de um.
+    // Também usada pela pergunta de dispositivo do fluxo de driver (#74).
+    internal static string? NamedCandidate(string request, IEnumerable<(string Key, string Name)> candidates)
     {
-        if (ReplyForms(request) is not { Count: > 0 } replies) return false;
+        if (ReplyForms(request) is not { Count: > 0 } replies) return null;
         var chosen = candidates.Select(candidate => (candidate.Key, Full: NameForm(candidate.Name), Cut: CutNameForm(candidate.Name)))
             .Where(candidate => candidate.Full.Length >= 6 && (replies.Contains(candidate.Full) || candidate.Cut is { Length: >= 6 } cut && replies.Contains(cut))).ToArray();
-        return chosen.Length == 1 && identity.Equals(chosen[0].Key, target);
+        return chosen.Length == 1 ? chosen[0].Key : null;
     }
     private static readonly string[] ReplyPrefixes = (from yes in new[] { "", "sim ", "sim, " } from verb in new[] { "", "e ", "foi " }
         from article in new[] { "", "a ", "o ", "na ", "no " } select yes + verb + article).Distinct().ToArray();
@@ -112,7 +116,7 @@ public sealed class InvestigationEvidence
         var pronoun = topic == "camera" ? "delas" : "deles";
         return prefix + category + ": " + string.Join("; ", candidates.Select(device => device.Value.Name).Order(StringComparer.CurrentCultureIgnoreCase).Select(name => Quoted(name))) + ". Qual " + pronoun + " apresenta a falha no aplicativo? " + ReplyWithName;
     }
-    private const string ReplyWithName = "Responda só com o nome, como está escrito acima.";
+    internal const string ReplyWithName ="Responda só com o nome, como está escrito acima.";
     public bool UpdateMatchesIncident(string id, HashSet<string> incidentTopics)
     {
         if (!observedUpdates.TryGetValue(id, out var update)) return false;
