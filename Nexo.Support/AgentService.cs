@@ -379,7 +379,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                         // A mesma chamada barrada de novo, ou outra alteração do componente que o pedido não cita, encerra o turno:
                         // a trava daria a mesma resposta, e a explicação dela já diz ao usuário o próximo passo.
                         if (failedCalls.Contains(signature) || missing != null && !topicBlocked.Add(missing)) { repeatedFailure = true; lockStop = true; }
-                        if (missing == null) throw new InvalidOperationException("A alteração escolhida não corresponde ao componente relatado ou a um dispositivo identificado nesta investigação. Não repita esta chamada; consulte o componente para identificar um único alvo ou pergunte ao usuário qual deles falha.");
+                        if (missing == null) throw new InvalidOperationException("A alteração escolhida não corresponde ao componente relatado ou a um dispositivo identificado nesta investigação. Não repita esta chamada; consulte o componente para identificar um único alvo ou pergunte ao usuário qual deles falha, pedindo que ele responda só com o nome.");
                         var component = InvestigationEvidence.Component(missing);
                         throw new InvalidOperationException("O pedido do usuário não cita " + component + ", então nenhuma alteração desse componente será executada neste turno. Não repita esta chamada nem tente outra alteração do mesmo componente: conclua com finish_support dizendo o que as consultas mostraram e peça ao usuário que diga, com as palavras dele, se o problema é com " + component + ".");
                     }
