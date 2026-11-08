@@ -131,7 +131,8 @@ try
     store.Data.AiEnabled = false;
     var admin = store.Login("Guisbz", "1234");
     Assert(admin.Admin && admin.MustChangePassword, "Conta inicial e indicação de troca de senha");
-    Assert(!File.ReadAllText(Path.Combine(root, "data.json")).Contains("1234"), "Senha inicial não armazenada em texto");
+    // O data.json tem GUIDs, horários e o hash, que podem conter "1234" por acaso; o que não pode existir é a senha como valor.
+    Assert(!File.ReadAllText(Path.Combine(root, "data.json")).Contains("\"1234\"") && admin.PasswordHash != "1234", "Senha inicial não armazenada em texto");
     Reject(() => store.Login("Guisbz", "wrong"), "Senha incorreta recusada");
     Reject(() => store.Require(admin, a => a.Admin), "Conta inicial não usa permissões antes da troca de senha");
     Reject(() => store.UpdateProfile(admin, admin.Name, "", "", "", ""), "Primeiro acesso exige nova senha");
