@@ -452,10 +452,9 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                     OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000));
                 if (checkedOffer == null || checkedOffer.Url != official.Url || checkedOffer.Version != official.Version)
                     throw new InvalidOperationException("A oferta oficial mudou desde a consulta; instalação bloqueada.");
+                var hdmiAudio = await DetectNvidiaHdmiAudio(token);
                 if (!await Approve(new ChangeRequest("Instalar driver NVIDIA " + official.Version,
-                    "Placa: " + nvidiaDevice.Name + "\nVersão atual: " + nvidiaDevice.DriverVersion + "\nNova versão: " + official.Version
-                    + "\nFonte: " + official.Url + "\nO download tem cerca de 1 GB. A tela pode piscar; talvez seja necessário reiniciar."
-                    + "\nO Nexo não reiniciará o computador. Leia e aceite a licença da NVIDIA para autorizar o download e a instalação. Antes de instalar, o Nexo tentará criar e confirmar um ponto de restauração; se indisponível, a instalação será interrompida.",
+                    NvidiaApprovalDetails(nvidiaDevice.Name, nvidiaDevice.DriverVersion, official.Version, official.Url, hdmiAudio),
                     LicenseUrl: OfficialDriverSource.NvidiaLicense), token)) return Denied();
                 var vendorRecovery = await PrepareDriverRecovery(token);
                 if (vendorRecovery != null) return vendorRecovery;
@@ -508,7 +507,14 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         if($signed.Count -ne 1 -or [string]$signed[0].DriverVersion -ne $expectedVersion){throw 'A versão do driver mudou antes da instalação; operação bloqueada'}
         $signature=Get-AuthenticodeSignature -LiteralPath $installer
         if($signature.Status -ne 'Valid' -or [string]$signature.SignerCertificate.Subject -notmatch 'NVIDIA'){throw 'A assinatura do instalador NVIDIA não foi validada'}
-        $process=Start-Process -FilePath $installer -ArgumentList @('-s','-n','Display.Driver') -PassThru -ErrorAction Stop
+        try{
+            $audioBefore=@(Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object {[string]$_.PNPDeviceID -like {{Quote(NvidiaHdmiAudioPattern)}} -and $_.Present -eq $true})
+        }catch{throw ('Não foi possível consultar o áudio HDMI da placa antes da instalação. O instalador NVIDIA não foi iniciado e nenhum driver foi alterado. Detalhe: '+$_.Exception.Message)}
+        $audioIds=@($audioBefore | ForEach-Object {[string]$_.PNPDeviceID})
+        $audioBeforeCodes=@{}
+        foreach($device in $audioBefore){$audioBeforeCodes[[string]$device.PNPDeviceID]=$(if($null -eq $device.ConfigManagerErrorCode){$null}else{[int]$device.ConfigManagerErrorCode})}
+        $arguments=if($audioIds.Count -gt 0){ {{PowerShellArray(NvidiaInstallerArguments(hdmiAudio: true))}} }else{ {{PowerShellArray(NvidiaInstallerArguments(hdmiAudio: false))}} }
+        $process=Start-Process -FilePath $installer -ArgumentList $arguments -PassThru -ErrorAction Stop
         if(-not $process.WaitForExit({{(long)NvidiaInstallerTimeout.TotalMilliseconds}})){$process.WaitForExit()}
         if($process.ExitCode -notin @(0,1)){throw ('O instalador NVIDIA terminou com código '+$process.ExitCode)}
         Start-Sleep -Seconds 3
@@ -516,8 +522,107 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         $afterDriver=@(Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | Where-Object {$_.DeviceID -eq $targetId})
         $afterVersion=if($afterDriver.Count -eq 1){[string]$afterDriver[0].DriverVersion}else{''}
         $verification=if($process.ExitCode -eq 1){'pending_restart'}elseif($after.Count -eq 1 -and [int]$after[0].ConfigManagerErrorCode -eq 0 -and $afterVersion -and $afterVersion -ne $expectedVersion){'version_changed'}else{'unconfirmed'}
-        [pscustomobject]@{Driver='NVIDIA '+{{Quote(offer.Version)}};Target=[string]$before[0].Name;BeforeVersion=$expectedVersion;AfterVersion=$afterVersion;DeviceCodeAfter=$(if($after.Count -eq 1){[int]$after[0].ConfigManagerErrorCode}else{-1});RebootRequired=($process.ExitCode -eq 1);Verification=$verification;Source='NVIDIA';InstallerExitCode=[int]$process.ExitCode}
+        $audioAfterCodes=@{}
+        $audioVanished=@(); $audioFailed=@(); $audioUnknown=@()
+        $audioWorking=@($audioIds | Where-Object {$audioBeforeCodes[$_] -eq 0})
+        if($audioIds.Count -gt 0){
+            for($attempt=1; $attempt -le {{NvidiaAudioReadings}}; $attempt++){
+                $devicesNow=@(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue)
+                foreach($id in $audioIds){
+                    $match=@($devicesNow | Where-Object {$_.Present -eq $true -and [string]$_.PNPDeviceID -eq $id})
+                    $audioAfterCodes[$id]=if($devicesNow.Count -eq 0 -or ($match.Count -eq 1 -and $null -eq $match[0].ConfigManagerErrorCode)){$null}elseif($match.Count -ne 1){-1}else{[int]$match[0].ConfigManagerErrorCode}
+                }
+                $audioVanished=@($audioWorking | Where-Object {$audioAfterCodes[$_] -eq -1})
+                $audioUnknown=@($audioWorking | Where-Object {$null -eq $audioAfterCodes[$_]})
+                $audioFailed=@($audioWorking | Where-Object {$null -ne $audioAfterCodes[$_] -and $audioAfterCodes[$_] -notin @(0,-1)})
+                if(($audioVanished.Count+$audioFailed.Count+$audioUnknown.Count) -eq 0 -or $attempt -ge {{NvidiaAudioReadings}}){break}
+                Start-Sleep -Seconds {{NvidiaAudioReadingIntervalSeconds}}
+            }
+        }
+        $audioPreexisting=@($audioIds | Where-Object {$audioBeforeCodes[$_] -ne 0})
+        $audioStatus=if($audioIds.Count -eq 0){'absent'}elseif($audioVanished.Count){'vanished'}elseif($audioFailed.Count){'failed'}elseif($audioUnknown.Count){'unknown'}elseif($audioPreexisting.Count){'preexisting'}else{'preserved'}
+        $audioKey=if($audioIds.Count -gt 0){@($audioVanished+$audioFailed+$audioUnknown+$audioPreexisting+$audioIds)[0]}else{''}
+        $audioBeforeCode=if($audioKey){$audioBeforeCodes[$audioKey]}else{$null}
+        $audioAfterCode=if($audioKey){$audioAfterCodes[$audioKey]}else{$null}
+        $audioPreserved=if($audioIds.Count -eq 0){$null}else{$audioStatus -eq 'preserved'}
+        $audioDriverVersion=''
+        if($audioKey){$audioDriver=@(Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | Where-Object {[string]$_.DeviceID -eq $audioKey}); if($audioDriver.Count -eq 1){$audioDriverVersion=[string]$audioDriver[0].DriverVersion} }
+        [pscustomobject]@{Driver='NVIDIA '+{{Quote(offer.Version)}};Target=[string]$before[0].Name;BeforeVersion=$expectedVersion;AfterVersion=$afterVersion;DeviceCodeAfter=$(if($after.Count -eq 1){[int]$after[0].ConfigManagerErrorCode}else{-1});RebootRequired=($process.ExitCode -eq 1);Verification=$verification;Source='NVIDIA';InstallerExitCode=[int]$process.ExitCode;HdmiAudioBefore=($audioIds.Count -gt 0);HdmiAudioStatus=$audioStatus;HdmiAudioBeforeCode=$audioBeforeCode;HdmiAudioAfterCode=$audioAfterCode;HdmiAudioPreserved=$audioPreserved;HdmiAudioDriverVersion=$audioDriverVersion}
         """;
+    // Instalar só Display.Driver faz o setup da NVIDIA remover o nvhda.inf (áudio HDMI/DisplayPort da placa).
+    // Os IDs vêm do cache do instalador: HDAudio.nvi (name="HDAudio.Driver") e setup.cfg (Display.Driver).
+    internal const string NvidiaHdmiAudioPattern = "HDAUDIO\\FUNC_01&VEN_10DE&*";
+    // Depois dos 3 s iniciais, até 5 leituras do áudio com 2 s entre elas (no máximo 8 s a mais), sem espera após a última.
+    internal const int NvidiaAudioReadings = 5;
+    internal const int NvidiaAudioReadingIntervalSeconds = 2;
+    internal static string[] NvidiaInstallerArguments(bool hdmiAudio) => hdmiAudio
+        ? ["-s", "-n", "Display.Driver", "HDAudio.Driver"]
+        : ["-s", "-n", "Display.Driver"];
+    internal static string PowerShellArray(IEnumerable<string> values) => "@(" + string.Join(",", values.Select(Quote)) + ")";
+    // Consulta só de leitura, sem elevação, para avisar no pedido de autorização. O script elevado decide de novo na hora.
+    internal static readonly string NvidiaHdmiAudioQuery = "ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object { [string]$_.PNPDeviceID -like "
+        + Quote(NvidiaHdmiAudioPattern) + " -and $_.Present -eq $true } | ForEach-Object { [string]$_.PNPDeviceID })";
+    internal static bool? ParseNvidiaHdmiAudioQuery(string output)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(output);
+            return document.RootElement.ValueKind == JsonValueKind.Array ? document.RootElement.GetArrayLength() > 0 : null;
+        }
+        catch (JsonException) { return null; }
+    }
+    internal static Task<bool?> DetectNvidiaHdmiAudio(CancellationToken token) =>
+        DetectNvidiaHdmiAudio((script, cancellation) => SupportService.Powershell(script, cancellation), token);
+    // O executor é parâmetro para os testes; em produção é a consulta PowerShell sem elevação.
+    internal static async Task<bool?> DetectNvidiaHdmiAudio(Func<string, CancellationToken, Task<string>> powershell, CancellationToken token)
+    {
+        try { return ParseNvidiaHdmiAudioQuery(await powershell(NvidiaHdmiAudioQuery, token)); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { return null; }
+    }
+    internal static string NvidiaApprovalDetails(string deviceName, string currentVersion, string newVersion, Uri source, bool? hdmiAudio) =>
+        "Placa: " + deviceName + "\nVersão atual: " + currentVersion + "\nNova versão: " + newVersion + "\nFonte: " + source
+        + hdmiAudio switch
+        {
+            true => "\nO áudio HDMI/DisplayPort da placa (som pelo monitor ou TV) também será reinstalado. Se você usa o som pelo monitor ou TV, talvez seja preciso testá-lo depois.",
+            null => "\nSe o computador tiver áudio HDMI/DisplayPort da placa (som pelo monitor ou TV), ele também será reinstalado. Se você usa o som pelo monitor ou TV, talvez seja preciso testá-lo depois.",
+            false => ""
+        }
+        + "\nO download tem cerca de 1 GB. A tela pode piscar; talvez seja necessário reiniciar."
+        + "\nO Nexo não reiniciará o computador. Leia e aceite a licença da NVIDIA para autorizar o download e a instalação. Antes de instalar, o Nexo tentará criar e confirmar um ponto de restauração; se indisponível, a instalação será interrompida.";
+    // Vale só para quem usa o som pelo monitor ou TV: um monitor sem alto-falante não indica defeito.
+    private const string SoundTestSteps = " Se você usa o som pelo monitor ou TV (HDMI/DisplayPort), toque um áudio e confira se ele sai. Se não sair:"
+        + " 1) confira se a saída escolhida no Windows é a do monitor ou TV; 2) feche e abra de novo o aplicativo que toca o som;"
+        + " 3) desligue e ligue o monitor ou TV, ou reconecte o cabo HDMI/DisplayPort; 4) reinicie o computador. Se ainda assim não sair, encaminhe à TI.";
+    // O Windows só informa o estado do dispositivo de áudio; quem confirma se o som sai é o usuário.
+    // Por isso o áudio sem erro nunca é declarado confirmado e vem com o pedido de teste.
+    // Tipos: "warning" quando o áudio que funcionava piorou; "audioTest" quando é preciso testar o som; "audioInfo" quando nada mudou.
+    internal static (string Kind, string Message)? HdmiAudioReport(JsonElement data)
+    {
+        if (data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("HdmiAudioBefore", out var before) || before.ValueKind != JsonValueKind.True)
+            return null;
+        int? Code(string key) => data.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number) ? number : null;
+        string Text(string key) => data.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
+        string Describe(int? code) => code is { } known ? "código " + known : "sem código informado";
+        var beforeCode = Code("HdmiAudioBeforeCode");
+        var afterCode = Code("HdmiAudioAfterCode");
+        var version = Text("HdmiAudioDriverVersion");
+        var reboot = data.TryGetProperty("RebootRequired", out var restart) && restart.ValueKind == JsonValueKind.True;
+        const string device = "dispositivo de áudio HDMI/DisplayPort da placa NVIDIA";
+        var guidance = (reboot ? " O Windows pediu reinicialização: reinicie e, se usa o som pelo monitor ou TV, teste de novo." : "")
+            + " Se continuar sem som, confira “Controladores de som, vídeo e jogos” no Gerenciador de Dispositivos ou encaminhe à TI.";
+        return Text("HdmiAudioStatus") switch
+        {
+            "vanished" => ("warning", "Atenção: o " + device + " funcionava antes da instalação e o Windows não o encontra mais. O som pela placa parou: a saída HDMI/DisplayPort para monitor ou TV ficou sem áudio." + guidance),
+            "failed" => ("warning", "Atenção: o " + device + " estava sem erro antes da instalação e agora o Windows informa erro (" + Describe(afterCode) + "). O som pela placa parou: a saída HDMI/DisplayPort para monitor ou TV ficou sem áudio." + guidance),
+            "preexisting" when afterCode == 0 => ("audioTest", "O " + device + " já estava desativado ou com erro antes da instalação (" + Describe(beforeCode) + ") e agora está sem erro"
+                + (version.Length > 0 ? " (driver " + version + ")" : "") + "." + SoundTestSteps),
+            "preexisting" => ("audioInfo", "O " + device + " já estava desativado ou com erro antes da instalação (" + Describe(beforeCode) + ") e continua assim ("
+                + (afterCode == -1 ? "não aparece mais no Windows" : Describe(afterCode)) + "). Esse estado não foi causado por esta instalação."),
+            "preserved" when afterCode == 0 => ("audioTest", "O " + device + " está sem erro no Windows"
+                + (version.Length > 0 ? " (driver " + version + ")" : " (versão do driver não informada)") + ". O Windows só informa o estado do dispositivo; quem confirma se o som sai é você." + SoundTestSteps),
+            _ => ("audioTest", "O Windows não informou o estado do " + device + " depois da instalação, então o Nexo não sabe se o áudio pela placa continua funcionando." + SoundTestSteps)
+        };
+    }
     private static string DriverInstallationScript(string updateId, string title, string hardwareId, int revision, string deviceId) => DriverSearchScript + "\n" + $$"""
         $targetId={{Quote(deviceId)}}
         $hardwareId={{Quote(hardwareId)}}
@@ -552,12 +657,16 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         if (!root.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.True || !root.TryGetProperty("data", out var data)
             || data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("Verification", out var verification)
             || verification.ValueKind != JsonValueKind.String) return output;
-        if (verification.GetString() != "unconfirmed") return output;
+        var audio = HdmiAudioReport(data);
+        if (verification.GetString() != "unconfirmed")
+            return audio is not { } report ? output
+                : JsonSerializer.Serialize(new Dictionary<string, object> { ["success"] = true, [report.Kind] = report.Message, ["data"] = data.Clone() });
         return JsonSerializer.Serialize(new
         {
             success = false,
             installationReported = true,
-            error = "O Windows relatou a instalação, mas ainda não foi possível confirmar a nova versão do driver no dispositivo. Confira o Gerenciador de Dispositivos antes de considerar a correção concluída.",
+            error = "O Windows relatou a instalação, mas ainda não foi possível confirmar a nova versão do driver no dispositivo. Confira o Gerenciador de Dispositivos antes de considerar a correção concluída."
+                + (audio is { } note ? " " + note.Message : ""),
             data = data.Clone()
         });
     }
@@ -625,6 +734,9 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         try { await tcp.ConnectAsync(host, port, deadline.Token); return Ok(new { host, port, addresses, dnsResolved = true, tcpConnected = true, elapsedMs = clock.ElapsedMilliseconds }); }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException) { token.ThrowIfCancellationRequested(); return Ok(new { host, port, addresses, dnsResolved = true, tcpConnected = false, error = ex.Message }); }
     }
+    // O mesmo invólucro do processo elevado é usado pelo teste que executa o script com cmdlets falsos.
+    internal static string ElevatedWrapper(string script, string output) =>
+        "$ErrorActionPreference='Stop'; try { $data=& { " + script + " }; $result=@{success=$true;data=$data} } catch { $result=@{success=$false;error=$_.Exception.Message} }; $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath " + Quote(output) + " -Encoding UTF8";
     private Task<string> Elevated(string script, CancellationToken token) => Elevated(script, ElevatedTimeout, token);
 
     private Task<string> ElevatedPreparation(string script, CancellationToken token) => Elevated(script, ElevatedTimeout, token, tracksResult: false);
@@ -635,7 +747,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         var operationId = Guid.NewGuid().ToString("N");
         var dir = PendingOperations.Folder(store.Root, operationId); Directory.CreateDirectory(dir);
         var output = Path.Combine(dir, "result.json");
-        var wrapped = "$ErrorActionPreference='Stop'; try { $data=& { " + script + " }; $result=@{success=$true;data=$data} } catch { $result=@{success=$false;error=$_.Exception.Message} }; $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath " + Quote(output) + " -Encoding UTF8";
+        var wrapped = ElevatedWrapper(script, output);
         var finished = false;
         var started = false;
         var registered = false;
