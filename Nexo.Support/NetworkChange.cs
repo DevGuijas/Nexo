@@ -30,7 +30,10 @@ public static class NetworkChange
         return new NetworkRequest(action, index, mode, [], address, prefix, gateway);
     }
 
-    public static async Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token)
+    public static Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token)
+        => Apply(request, store, confirm, progress, token, NetworkRecovery.StartElevated);
+
+    public static async Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token, Func<string, IElevatedProcess> start)
     {
         token.ThrowIfCancellationRequested();
         var dir = Path.Combine(store.Root, "operations", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
@@ -39,7 +42,10 @@ public static class NetworkChange
         using var reader = new StreamReader(source);
         var script = "$requestJson=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + parameters + "')); $operationDir=" + WindowsTools.Quote(dir) + ";\n" + await reader.ReadToEndAsync(token);
         token.ThrowIfCancellationRequested();
-        using var process = WindowsTools.StartElevated(script);
+        var record = new NetworkTransactionRecord(request.Action, request.Index, request.ExpectedGuid, DateTimeOffset.UtcNow);
+        NetworkRecovery.WriteRecord(dir, record);
+        using var process = start(script);
+        NetworkRecovery.WriteRecord(dir, record with { ProcessId = process.Id });
         var ready = Path.Combine(dir, "applied.json"); var final = Path.Combine(dir, "result.json"); var decision = Path.Combine(dir, "decision.txt");
         while (!process.HasExited && !File.Exists(final))
         {
@@ -57,7 +63,15 @@ public static class NetworkChange
             }
             await Task.Delay(250, CancellationToken.None);
         }
-        await process.WaitForExitAsync();
-        return File.Exists(final) ? await File.ReadAllTextAsync(final, CancellationToken.None) : JsonSerializer.Serialize(new { success = false, error = "Executor encerrado sem resultado. Verifique a rede; estado não confirmado.", recoveryFolder = dir });
+        await process.WaitForExitAsync(CancellationToken.None);
+        if (File.Exists(final)) return await File.ReadAllTextAsync(final, CancellationToken.None);
+        var backup = Path.Combine(dir, "before.json");
+        var interrupted = NetworkRecovery.Inspect(dir, DateTimeOffset.UtcNow, _ => false, exited: true);
+        if (interrupted == null) return JsonSerializer.Serialize(new { success = false, reverted = false, error = "Executor encerrado sem resultado. Verifique a rede; estado não confirmado.", backup, recoveryFolder = dir });
+        if (interrupted.Resolution == null) progress.Report("O executor de rede terminou sem resultado. Oferecendo a restauração da configuração anterior…");
+        var recovery = await NetworkRecovery.Recover(interrupted, confirm, start, NetworkRecovery.DefaultTimeout, CancellationToken.None);
+        using var recoveryResult = JsonDocument.Parse(recovery);
+        var unchanged = recoveryResult.RootElement.TryGetProperty("unchanged", out var flag) && flag.ValueKind == JsonValueKind.True;
+        return JsonSerializer.Serialize(new { success = false, changed = !unchanged, reverted = NetworkRecovery.Restored(recovery), error = "Executor encerrado sem resultado. " + NetworkRecovery.Explain(recovery), backup, recoveryFolder = dir, recovery = recoveryResult.RootElement.Clone() });
     }
 }

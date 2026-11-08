@@ -74,7 +74,9 @@ function Restore-Network {
         }
     }
     Restore-Dns
-    $restored = Snapshot
+    Assert-Restored (Snapshot)
+}
+function Assert-Restored($restored) {
     if ($request.Action -eq 'set_ipv4') {
         if ($restored.Dhcp -ne $before.Dhcp) { throw 'O modo DHCP anterior não foi restaurado.' }
         if ($before.Dhcp -eq 'Disabled') {
@@ -89,6 +91,28 @@ function Restore-Network {
     if ([string]::IsNullOrWhiteSpace($before.StaticDns)) {
         if (-not [string]::IsNullOrWhiteSpace($restored.StaticDns)) { throw 'DNS automático anterior não restaurado.' }
     } elseif ((@($restored.Dns) -join ',') -ne (@($before.Dns) -join ',')) { throw 'Os servidores DNS anteriores não foram restaurados.' }
+}
+if ($recoveryBeforeJson) {
+    $before = $recoveryBeforeJson | ConvertFrom-Json
+    $found = $null
+    try {
+        $adapter = Get-NetAdapter -InterfaceIndex $interfaceIndex -ErrorAction Stop
+        if ([guid]$adapter.InterfaceGuid -ne [guid]$before.Guid -or [guid]$adapter.InterfaceGuid -ne [guid]$request.ExpectedGuid) { throw 'A interface neste índice não é a mesma da transação interrompida. Nenhuma alteração foi feita.' }
+        $found = Snapshot
+        $alreadyRestored = $true
+        try { Assert-Restored $found } catch { $alreadyRestored = $false }
+        if ($alreadyRestored) {
+            Save-Result 'recovery-result.json' @{success=$true;restored=$false;alreadyRestored=$true;message='A configuração atual já corresponde ao estado anterior salvo. Nenhuma alteração foi feita.';found=$found}
+        } else {
+            Restore-Network
+            Save-Result 'recovery-result.json' @{success=$true;restored=$true;alreadyRestored=$false;message='Configuração anterior restaurada e conferida.';found=$found;after=(Snapshot)}
+        }
+    } catch {
+        $failure = $_.Exception.Message
+        try { $state = Snapshot } catch { $state = @{error=$_.Exception.Message} }
+        Save-Result 'recovery-result.json' @{success=$false;restored=$false;alreadyRestored=$false;error=$failure;found=$found;state=$state}
+    }
+    return
 }
 try {
     $adapter = Get-NetAdapter -InterfaceIndex $interfaceIndex

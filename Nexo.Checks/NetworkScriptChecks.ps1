@@ -72,7 +72,38 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
     if($variant -in 'native-error','mode-unchanged','no-lease' -and -not $result.failureState){throw 'Pre-rollback evidence was lost'}
     if($variant -eq 'native-error' -and $result.dhcpTransition.exitCode -ne 5){throw 'Native error code was lost'}
 }
+function StaticState($ip,$dns) { @{Dhcp='Disabled';StaticDns=$dns;Dns=@($dns);Addresses=@([pscustomobject]@{IPAddress=$ip;PrefixLength=24;PrefixOrigin=1;AddressState=4});Routes=@([pscustomobject]@{DestinationPrefix='0.0.0.0/0';NextHop='10.0.0.1';RouteMetric=256})} }
+function Recover($name,$action,$current,$expect,$variant='normal') {
+    $script:state=$current
+    $script:failOnce=$variant -eq 'restore-fails'
+    $script:noLease=$false; $script:leaseDelay=0; $script:renewOnly=$false; $script:transition84=$false; $script:transitionCalled=$false
+    $script:nativeError=$false; $script:modeUnchanged=$false; $script:virtual=$false; $script:adapterName='Adapter-Test'; $script:adapterDescription='Realtek Ethernet'
+    $guid=$(if($variant -eq 'identity-changed'){'{00000000-0000-0000-0000-000000000099}'}else{'{00000000-0000-0000-0000-000000000001}'})
+    $dhcpBefore=$variant -eq 'dhcp-before'
+    $recoveryBeforeJson=[pscustomobject]@{Index=10;Name='Adapter-Test';Guid=$guid;Dhcp=$(if($dhcpBefore){'Enabled'}else{'Disabled'});StaticDns=$(if($dhcpBefore){''}else{'10.0.0.2'});Dns=@($(if($dhcpBefore){'10.0.0.1'}else{'10.0.0.2'}));Addresses=$(if($dhcpBefore){@([pscustomobject]@{IPAddress='10.0.0.25';PrefixLength=24;PrefixOrigin='3';AddressState='4'})}else{@([pscustomobject]@{IPAddress='10.0.0.10';PrefixLength=24;PrefixOrigin='1';AddressState='4'})});Routes=$(if($dhcpBefore){@()}else{@([pscustomobject]@{NextHop='10.0.0.1';RouteMetric=256})})} | ConvertTo-Json -Depth 5
+    $operationDir=Join-Path $testRoot $name; New-Item -ItemType Directory -Path $operationDir | Out-Null
+    $requestJson=@{Action=$action;Index=10;ExpectedGuid=$guid.Trim('{}');Mode='';Servers=@();Address='';Prefix=0;Gateway=''} | ConvertTo-Json
+    $testSource=$source.Replace('"$env:WINDIR\System32\netsh.exe"','Invoke-TestNetsh')
+    & ([scriptblock]::Create($testSource))
+    if(Test-Path (Join-Path $operationDir 'result.json')){throw ($name+': recovery ran the normal transaction')}
+    $result=Get-Content -LiteralPath (Join-Path $operationDir 'recovery-result.json') -Raw | ConvertFrom-Json
+    switch($expect) {
+        'restored' { if(-not $result.success -or -not $result.restored -or -not $result.found -or -not $result.after){throw ($name+': restore not reported: '+($result | ConvertTo-Json -Depth 5))} }
+        'already' { if(-not $result.success -or $result.restored -or -not $result.alreadyRestored){throw ($name+': matching state was not detected')} }
+        'failed' { if($result.success -or $result.restored -or -not $result.error -or -not $result.state){throw ($name+': failure or uncertainty not recorded')} }
+    }
+    if($variant -eq 'dhcp-before') { if($script:state.Dhcp -ne 'Enabled' -or -not $script:transitionCalled){throw ($name+': DHCP was not restored')} }
+    elseif($variant -eq 'identity-changed') { if($script:state.Addresses[0].IPAddress -ne '10.0.0.20' -or $script:state.Dns[0] -ne '1.1.1.1'){throw ($name+': other interface was changed')} }
+    elseif($expect -ne 'failed') { if($script:state.Addresses[0].IPAddress -ne '10.0.0.10' -or $script:state.Dns[0] -ne '10.0.0.2'){throw ($name+': prior state not present after recovery')} }
+    Write-Output ('PASS: simulated network recovery '+$name)
+}
 try {
+    Recover 'recovery-static-after-crash' 'set_ipv4' (StaticState '10.0.0.20' '1.1.1.1') 'restored'
+    Recover 'recovery-dns-after-crash' 'set_dns' (StaticState '10.0.0.10' '1.1.1.1') 'restored'
+    Recover 'recovery-already-matching' 'set_ipv4' (StaticState '10.0.0.10' '10.0.0.2') 'already' 'restore-fails'
+    Recover 'recovery-dhcp-after-crash' 'set_ipv4' (StaticState '10.0.0.20' '1.1.1.1') 'restored' 'dhcp-before'
+    Recover 'recovery-identity-changed' 'set_ipv4' (StaticState '10.0.0.20' '1.1.1.1') 'failed' 'identity-changed'
+    Recover 'recovery-restore-fails' 'set_dns' (StaticState '10.0.0.10' '1.1.1.1') 'failed' 'restore-fails'
     Check 'dns-keep' 'set_dns' 'manual' 'keep'
     Check 'dns-rollback' 'set_dns' 'manual' 'rollback'
     Check 'dns-error-rollback' 'set_dns' 'manual' 'keep' $true

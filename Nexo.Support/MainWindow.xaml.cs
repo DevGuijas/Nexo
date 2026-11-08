@@ -43,6 +43,7 @@ public partial class MainWindow : Window
         try { healthStore = new OperationalStore(store.Root); }
         catch (Exception ex) { healthError = "Histórico operacional indisponível. " + ex.Message; }
         Loaded += (_, _) => StartHealthMonitoring();
+        Loaded += async (_, _) => await OfferNetworkRecovery();
         Closed += async (_, _) => { if (healthMonitor != null) { await healthMonitor.StopAsync(); healthMonitor.Dispose(); } healthStore?.Dispose(); };
         Closing += (_, e) =>
         {
@@ -577,6 +578,27 @@ public partial class MainWindow : Window
         CancelButton.IsEnabled = false;
         operation.Cancel();
         UpdateProgress("Cancelamento solicitado. Etapas ainda não iniciadas serão interrompidas. Se uma alteração do Windows já começou, aguarde o resultado registrado no chat para confirmar seu estado.");
+    }
+    private async Task OfferNetworkRecovery()
+    {
+        List<InterruptedNetworkTransaction> interrupted;
+        try { interrupted = NetworkRecovery.Scan(store.Root, DateTimeOffset.UtcNow); }
+        catch (Exception ex) { store.Log(user, "Verificação de transações de rede interrompidas indisponível: " + ex.Message); return; }
+        if (interrupted.Count == 0 || busy) return;
+        busy = true;
+        try
+        {
+            foreach (var item in interrupted)
+            {
+                string outcome;
+                try { outcome = await NetworkRecovery.Recover(item, ConfirmChange, NetworkRecovery.StartElevated, NetworkRecovery.DefaultTimeout, CancellationToken.None); }
+                catch (Exception ex) { outcome = System.Text.Json.JsonSerializer.Serialize(new { success = false, error = ex.Message }); }
+                var message = NetworkRecovery.Explain(outcome);
+                store.Log(user, "Transação de rede interrompida (" + Path.GetFileName(item.Directory) + "): " + message);
+                AddEntry("assistant", "Encontrei uma alteração de rede que não terminou.\n\n" + message, NetworkRecovery.Restored(outcome) ? "result" : "error");
+            }
+        }
+        finally { busy = false; }
     }
     private Task<bool> ConfirmChange(ChangeRequest request) => ConfirmChange(request, null);
     private Task<bool> ConfirmChange(ChangeRequest request, Action<Window>? onRendered)

@@ -18,4 +18,5 @@
 <ItemGroup><Compile Include="../Nexo.Support/HealthSettings.cs" Link="HealthSettings.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/RestorePointProtection.cs" Link="RestorePointProtection.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/ServiceEvents.cs" Link="ServiceEvents.cs"/></ItemGroup>
+<ItemGroup><Compile Include="../Nexo.Support/NetworkRecovery.cs" Link="NetworkRecovery.cs"/></ItemGroup>
 </Project>

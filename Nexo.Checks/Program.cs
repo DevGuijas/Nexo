@@ -217,6 +217,7 @@ try
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);
     await MultiInterfaceChecks.Run(Assert);
+    await NetworkRecoveryChecks.Run(Assert);
     await PeripheralRegressionChecks.Run(store, admin, Assert);
     if (args.Contains("--interface-probe-live"))
     {
