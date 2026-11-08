@@ -138,7 +138,7 @@ Experimente: “Meu Bluetooth não funciona”, “A câmera está desabilitada,
 
 ## Rede e recuperação
 
-Antes de alterar IP/DNS, o executor salva `%LOCALAPPDATA%\NexoSupport\operations\<operação>\before.json`. Após aplicar, consulta a interface e pede confirmação para manter a configuração. A janela tem 45 segundos; o processo elevado usa prazo independente de 60 segundos para restaurar se o aplicativo encerrar ou não confirmar. Falhas também acionam tentativa de restauração.
+Antes de alterar IP/DNS, o executor salva `%LOCALAPPDATA%\NexoSupport\operations\<operação>\before.json`. Após aplicar, consulta a interface e pede confirmação para manter a configuração. A janela tem 45 segundos; o processo elevado usa prazo independente de 60 segundos para restaurar se o aplicativo encerrar ou não confirmar. O texto da confirmação cita os 45 segundos porque é a janela que decide: ao fim deles, o aplicativo pede a restauração. Os 60 segundos só valem quando o aplicativo não responde. Falhas também acionam tentativa de restauração.
 
 A restauração pode falhar por indisponibilidade do dispositivo ou políticas do Windows; o erro é registrado junto ao backup. Consultar a configuração ou receber DHCP não comprova conectividade com todos os serviços. Teste a conexão antes de manter a mudança. A reconfiguração de IP/DNS permite interfaces físicas e vEthernet do host identificadas; VPN e Default Switch permanecem bloqueados. A ativação de uma interface virtual desativada é permitida com confirmação, sem recriar switches.
 

@@ -133,7 +133,8 @@ try
     store.Data.AiEnabled = false;
     var admin = store.Login("Guisbz", "1234");
     Assert(admin.Admin && admin.MustChangePassword, "Conta inicial e indicação de troca de senha");
-    Assert(!File.ReadAllText(Path.Combine(root, "data.json")).Contains("1234"), "Senha inicial não armazenada em texto");
+    // O data.json tem GUIDs, horários e o hash, que podem conter "1234" por acaso; o que não pode existir é a senha como valor.
+    Assert(!File.ReadAllText(Path.Combine(root, "data.json")).Contains("\"1234\"") && admin.PasswordHash != "1234", "Senha inicial não armazenada em texto");
     Reject(() => store.Login("Guisbz", "wrong"), "Senha incorreta recusada");
     Reject(() => store.Require(admin, a => a.Admin), "Conta inicial não usa permissões antes da troca de senha");
     Reject(() => store.UpdateProfile(admin, admin.Name, "", "", "", ""), "Primeiro acesso exige nova senha");
@@ -208,6 +209,8 @@ try
     WindowsTools.ValidateStatic("192.168.1.5", 24, "192.168.1.1"); Assert(true, "IPv4 estático e gateway válidos");
     await AgentChecks.Run(store, admin, Assert);
     await FinalAnswerChecks.Run(store, admin, Assert);
+    await TriageChecks.Run(store, admin, Assert);
+    await DnsRepairChecks.Run(store, admin, Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);
