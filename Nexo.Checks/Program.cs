@@ -206,6 +206,7 @@ try
     WindowsTools.ValidateStatic("192.168.1.5", 24, "192.168.1.1"); Assert(true, "IPv4 estático e gateway válidos");
     await AgentChecks.Run(store, admin, Assert);
     await FinalAnswerChecks.Run(store, admin, Assert);
+    await TriageChecks.Run(store, admin, Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);

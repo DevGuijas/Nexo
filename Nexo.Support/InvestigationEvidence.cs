@@ -128,7 +128,7 @@ public sealed class InvestigationEvidence
             return "Nenhuma alteração concluída foi registrada neste turno.";
         if (AgentProtocol.ClaimsExecution(message))
         {
-            var mentioned = SupportIntake.IncidentTopics(message);
+            var mentioned = SupportIntake.ComponentTopics(message);
             if (mentioned.Any(topic => !observedTopics.Contains(topic)))
                 return "A resposta descreve uma verificação de componente sem resultado bem sucedido dessa categoria.";
         }
@@ -161,7 +161,7 @@ public sealed class InvestigationEvidence
             {
                 case "get_network" or "test_connection" or "probe_network_interfaces" or "enable_network_adapter" or "set_dns" or "set_ipv4" or "flush_dns": observedTopics.Add("network"); break;
                 case "get_printers" or "clear_print_queue": observedTopics.Add("printer"); break;
-                case "get_processes" or "get_recent_errors": observedTopics.Add("system"); break;
+                case "get_processes" or "get_recent_errors" or "get_health_report": observedTopics.Add("system"); break;
                 case "enable_camera" or "allow_camera": observedTopics.Add("camera"); break;
             }
             if ((name is "diagnose_device" or "get_hardware_inventory") && args.ValueKind == JsonValueKind.Object
@@ -249,7 +249,7 @@ public sealed class InvestigationEvidence
             var groups = findings.Select(f => Group(f.Key)).Distinct().ToArray();
             var shown = groups.Take(MaxFindings).ToHashSet();
             foreach (var (key, text, guidance) in findings.Where(f => shown.Contains(Group(f.Key))))
-                lines.Add("• " + text + (key == "storage" && !findings.Any(f => f.Key is "system" or "health")
+                lines.Add("• " + text + (key == "storage" && !findings.Any(f => f.Key is "system" or "health:volumes")
                     ? " O espaço livre por disco aparece na verificação de memória e disco, que não foi feita neste turno." : "") + guidance);
             if (groups.Length > MaxFindings)
                 lines.Add($"• E mais {groups.Length - MaxFindings} {(groups.Length - MaxFindings == 1 ? "achado" : "achados")} nos cartões de resultado deste turno.");
@@ -300,7 +300,7 @@ public sealed class InvestigationEvidence
         _ => "a etapa “" + ToolCatalog.Label(name).TrimEnd('…') + "”"
     };
 
-    private static string Component(string topic) => topic switch
+    internal static string Component(string topic) => topic switch
     {
         "network" => "a rede ou a internet",
         "camera" => "a câmera",
@@ -310,6 +310,22 @@ public sealed class InvestigationEvidence
         "display" => "a placa de vídeo",
         _ => "esse componente"
     };
+
+    // A recomendação é a da REGRA que gerou o achado, com o texto do HealthRules. O relatório não traz o código da
+    // regra, então ela é reconhecida pela categoria (que abre a linha) e pelo começo fixo do problema, que vem do código;
+    // um nome de volume ou processo só aparece depois desse começo. Ficam de fora as regras cujo passo é do agente
+    // ("antes de propor reinício", serviço e rede) e as de memória sem identidade confirmada (#59, revisões do @qa).
+    private static (string Rule, string Text) Advice(string category, string problem) => category switch
+    {
+        "disk" when problem.StartsWith("Pouco espaço no volume ", StringComparison.Ordinal) => ("disk-low", "Revise o uso do disco antes de remover arquivos"),
+        "cpu" when problem == "Uso persistente de CPU" => ("cpu-high", "Identifique os processos ativos antes de fechar qualquer um"),
+        "memory" when problem == "Memória em crescimento persistente" => ("memory-growing", "Compare o uso por processo antes de intervir"),
+        "memory" when problem == "Processo com memória em crescimento persistente" => ("process-memory-growing", "Confirme se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção"),
+        _ => ("", "")
+    };
+
+    // Assunto do pedido do usuário ("space" ou "slowness"): a recomendação ligada a ele vem primeiro no limite de duas.
+    public string? Focus { get; set; }
 
     private void ForgetFindings() { findings.Clear(); topProcesses.Clear(); }
 
@@ -412,22 +428,31 @@ public sealed class InvestigationEvidence
             ? time.ToLocalTime().ToString("dd/MM 'às' HH:mm", CultureInfo.InvariantCulture) : null;
         // O relatório troca a vírgula decimal por "_"; aqui ela volta para o usuário ler o número.
         static string Readable(string text) => Regex.Replace(text.Replace(":_", ":"), @"(?<=\d)_(?=\d)", ",");
-        var occurrences = Regex.Matches(report, @"^Achado [^\n]*?, (?<status>persiste nas leituras atuais|ocorrência histórica; estado atual desconhecido \((?<why>[^)\n]*)\)|resolvida[^:\n]*): (?<problem>[^\n]+?)\. Evidência: (?<evidence>[^\n]+?)\. Causa:", RegexOptions.Multiline)
+        var occurrences = Regex.Matches(report, @"^Achado (?<category>[a-z]+) [^\n]*?, (?<status>persiste nas leituras atuais|ocorrência histórica; estado atual desconhecido \((?<why>[^)\n]*)\)|resolvida[^:\n]*): (?<problem>[^\n]+?)\. Evidência: (?<evidence>[^\n]+?)\. Causa:", RegexOptions.Multiline)
             .Where(match => !match.Groups["status"].Value.StartsWith("resolvida", StringComparison.Ordinal) && match.Groups["why"].Value != "há ocorrência mais recente do mesmo alerta")
             // A evidência pode trazer nome de adaptador, serviço ou processo: vai entre aspas, como todo nome vindo de ferramenta.
             .Select(match => (Active: match.Groups["status"].Value.StartsWith("persiste", StringComparison.Ordinal),
-                Text: Clean(Readable(match.Groups["problem"].Value)) + " (evidência: " + Quoted(Readable(match.Groups["evidence"].Value), MaxEvidenceLength) + ")"))
+                Text: Clean(Readable(match.Groups["problem"].Value)) + " (evidência: " + Quoted(Readable(match.Groups["evidence"].Value), MaxEvidenceLength) + ")",
+                Advice: Advice(match.Groups["category"].Value, match.Groups["problem"].Value)))
             .ToArray();
         var active = occurrences.Where(o => o.Active).Select(o => o.Text).ToArray();
+        // A recomendação das ocorrências ativas acompanha a linha (#59: "Revise o uso do disco antes de remover arquivos").
+        // Ela vem da regra, não do texto do relatório: um nome de adaptador, serviço ou volume pode imitar ". Recomendação: ..."
+        // na linha (@qa). No limite de duas, a do assunto do pedido vem antes ("sem espaço" -> disco; "lento" -> memória e CPU).
+        bool Related(string rule) => Focus == "space" ? rule == "disk-low" : Focus == "slowness" && rule is "cpu-high" or "memory-growing" or "process-memory-growing";
+        var advice = occurrences.Where(o => o.Active && o.Advice.Text.Length > 0).OrderBy(o => Related(o.Advice.Rule) ? 0 : 1)
+            .Select(o => o.Advice.Text).Distinct().Take(2).ToArray();
         var unknown = occurrences.Where(o => !o.Active).Select(o => o.Text).ToArray();
         var volumes = Regex.Matches(report, @"^Volume (?<name>[^\n]+?): (?<free>[\d.,]+% livre)\.", RegexOptions.Multiline)
-            .Select(match => Clean(match.Groups["name"].Value.TrimEnd('_')) + " " + match.Groups["free"].Value).ToArray();
+            // Letra de unidade sai como está; outro nome de volume é dado da ferramenta e vai entre aspas (@qa: nome que imita o relatório).
+            .Select(match => (Regex.IsMatch(match.Groups["name"].Value, @"^[A-Za-z]:_?$") ? match.Groups["name"].Value.TrimEnd('_') : Quoted(match.Groups["name"].Value)) + " " + match.Groups["free"].Value).ToArray();
         var when = sample == null ? "" : " (amostra de " + sample + ")";
         // Uma linha por parte, cada uma com o próprio orçamento por itens inteiros: nenhuma parte some porque a anterior é longa.
         Finding("health", stale
             ? "O relatório de saúde não tem leitura recente" + when + ": o estado atual é desconhecido."
             : active.Length == 0 ? "O monitor de saúde não mostra ocorrência ativa nas leituras atuais" + when + "."
-            : "Ocorrência ativa no monitor de saúde" + when + ": " + Within(active.Take(3), active.Length) + ".");
+            : "Ocorrência ativa no monitor de saúde" + when + ": " + Within(active.Take(3), active.Length) + ".",
+            advice.Length == 0 ? "" : " Recomendação do monitor: " + string.Join("; ", advice) + ". O Nexo não apaga arquivos nem encerra programas.");
         if (unknown.Length > 0) Finding("health:unknown", "Ocorrências do monitor com estado atual desconhecido: " + Within(unknown.Take(3), unknown.Length) + ".");
         if (volumes.Length > 0) Finding("health:volumes", (stale ? "Espaço livre por volume naquela amostra: " : "Espaço livre por volume: ") + Within(volumes.Take(4), volumes.Length) + ".");
     }
