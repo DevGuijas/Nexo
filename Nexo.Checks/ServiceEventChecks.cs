@@ -321,7 +321,9 @@ internal static class ServiceEventChecks
             _ => throw new Exception("Ferramenta inesperada: " + name)
         });
         var (notDone, _) = await Run(store, actor, broken, Call("restart_service", new { service = "Spooler" }));
-        assert(notDone.StartsWith("A alteração restart_service não foi concluída.", StringComparison.Ordinal)
+        // O serviço pode ter parado sem voltar: o resultado fica sem confirmação (#73), e a resposta não diz que nada mudou.
+        assert(notDone.StartsWith("A conclusão da etapa “Reiniciando e verificando o serviço” não foi confirmada: o Windows pode ter sido alterado.", StringComparison.Ordinal)
+            && notDone.EndsWith("\n\n" + TurnFacts.Prefix + " nenhuma confirmada. Sem confirmação do resultado: reinício do serviço “Spooler” — confira antes de continuar.", StringComparison.Ordinal)
             && notDone.Contains("O problema ainda não foi resolvido. Nenhum evento de falha do serviço Spooler nas últimas 24 h. Último registro: entrou no estado parado às 00:28 (evento 7036). Se persistir"),
             "Reinício com falha: a resposta diz que não foi concluído e cita os eventos do serviço");
 

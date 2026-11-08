@@ -35,11 +35,18 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private OfficialDriverSource.DriverOffer? observedNvidiaDriver;
     private DateTimeOffset? observedNvidiaDriverAt;
     private bool? lastApproval;
+    // Se alguma aprovação já foi concedida nesta execução (#73). Não volta a false: no set_dns/set_ipv4 a 2ª pergunta ("Manter a
+    // configuração?") vem DEPOIS de a mudança ser aplicada, e recusá-la não desfaz o que já foi feito.
+    private bool changeAuthorized;
     private InterventionRecord? currentIntervention;
     // Executa o script de eventos do serviço; os testes trocam o PowerShell por uma saída conhecida.
     internal Func<string, CancellationToken, Task<string>> ServiceEventsReader { get; init; } = (script, token) => SupportService.Powershell(script, token);
     // Relógio da validade da leitura de eventos (5 minutos); os testes avançam o tempo.
     internal Func<DateTimeOffset> ServiceEventsClock { get; init; } = () => DateTimeOffset.UtcNow;
+    // Consulta da rede, aplicação da mudança de rede e início do processo elevado; os testes trocam por versões sem Windows.
+    internal Func<string, CancellationToken, Task<string>> NetworkReader { get; init; } = (script, token) => SupportService.Powershell(script, token);
+    internal Func<NetworkRequest, Func<ChangeRequest, Task<bool>>, CancellationToken, Task<string>>? NetworkApplier { get; init; }
+    internal Func<string, Process> ElevatedStarter { get; init; } = StartElevated;
     private static readonly IReadOnlyDictionary<string, JsonElement> toolSchemas = ToolCatalog.ForScope(false)
         .Select(tool => JsonSerializer.SerializeToElement(tool))
         .ToDictionary(tool => tool.GetProperty("function").GetProperty("name").GetString()!, tool => tool.GetProperty("function").GetProperty("parameters").Clone(), StringComparer.Ordinal);
@@ -132,6 +139,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     {
         if (!ToolCatalog.IsMutation(name)) return await ExecuteCore(name, args, token);
         lastApproval = null;
+        changeAuthorized = false;
         currentIntervention = new InterventionRecord
         {
             Action = name, Target = args.ValueKind == JsonValueKind.Object ? args.GetRawText() : "{}",
@@ -141,6 +149,8 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         MoveIntervention("proposed", "Ação proposta; ainda não autorizada nem executada.");
         string? output = null;
         try { return output = await ExecuteCore(name, args, token); }
+        // Antes da aprovação nada foi alterado: validação, consulta prévia ou o próprio pedido de aprovação falharam (#73).
+        catch (Exception ex) when (!changeAuthorized) { ex.Data[TurnFacts.NotStartedKey] = true; throw; }
         finally
         {
             var state = ResultState(output);
@@ -229,7 +239,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             case "get_network":
                 observedInterfaces.Clear(); observedAdapters.Clear(); observedNetworkDetails.Clear(); configurableInterfaces.Clear(); physicalInterfaces.Clear();
                 observedNetworkAt = null;
-                var network = await SupportService.Powershell(NetworkQuery, token);
+                var network = await NetworkReader(NetworkQuery, token);
                 using (var document = JsonDocument.Parse(network))
                 {
                     foreach (var adapter in document.RootElement.GetProperty("Adapters").EnumerateArray())
@@ -364,7 +374,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 if (!configurableInterfaces.GetValueOrDefault(index)) throw new InvalidOperationException("Esta interface é gerenciada pelo Windows ou por VPN; reconfiguração de IP/DNS não permitida.");
                 var request = NetworkChange.Parse(name, args) with { ExpectedGuid = observedAdapters[index].Guid };
                 if (!await Approve(new ChangeRequest("Alterar configuração de rede", observedInterfaces[index] + "\n" + request.Description + "\nA conexão pode ser interrompida. O estado anterior será salvo e restaurado se você não confirmar a nova configuração."), token)) return Denied();
-                var change = await NetworkChange.Apply(request, store, next => Approve(next, token), progress, token);
+                var change = NetworkApplier is { } apply ? await apply(request, next => Approve(next, token), token) : await NetworkChange.Apply(request, store, next => Approve(next, token), progress, token);
                 using (var changeResult = JsonDocument.Parse(change))
                 {
                     if (!changeResult.RootElement.GetProperty("success").GetBoolean()) return change;
@@ -793,6 +803,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         {
             var result = await confirm(request);
             lastApproval = result;
+            changeAuthorized |= result;
             token.ThrowIfCancellationRequested();
             store.Require(actor, a => a.Repair);
             store.Log(actor, (result ? "Autorizado: " : "Recusado: ") + request.Title);
@@ -891,7 +902,11 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 PendingOperations.Register(operational, currentIntervention, operationId, DateTimeOffset.UtcNow);
                 registered = true;
             }
-            using var process = StartElevated(wrapped);
+            Process process;
+            // O processo elevado não iniciou (UAC cancelado, Windows recusou): o script não rodou e nada foi alterado (#73).
+            try { process = ElevatedStarter(wrapped); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { ex.Data[TurnFacts.NotStartedKey] = true; throw; }
+            using var elevated = process;
             started = true;
             var state = await OperationSupervisor.Wait(async () => { await process.WaitForExitAsync(); return process.ExitCode; }, timeout, token);
             finished = process.HasExited;

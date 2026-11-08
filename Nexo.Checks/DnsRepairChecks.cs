@@ -188,6 +188,32 @@ internal static class DnsRepairChecks
             && repeatedAnswer.Split("O Nexo não executou").Length == 2 && !repeatedAnswer.Contains("Não terminaram com sucesso") && !repeatedAnswer.Contains("Se o problema continuar"),
             "Cenário 3: a segunda tentativa de DNS inventado encerra o turno e explica o motivo uma vez");
 
+        // #73: barrado o DNS inventado, o modelo não pode dizer na resposta final que trocou o DNS.
+        var claimed = Tools();
+        var claimedModel = new ModelSequence([Call("get_network", new { }), invented,
+            Call("finish_support", new { message = "O DNS da Ethernet foi trocado para 8.8.8.8 e os sites voltam a abrir." })]);
+        var claimedAnswer = await Execute(store, actor, Conversation(actor, Sites), claimed, claimedModel);
+        assert(claimed.Calls.SequenceEqual(["get_network"]) && claimedModel.Calls == 3 && !claimedAnswer.Contains("foi trocado")
+            && claimedAnswer.EndsWith("\n\nAlterações feitas pelo Nexo neste turno: nenhuma. Não executadas: DNS manual “8.8.8.8” da interface 13 (barrada pelo Nexo).")
+            && claimedAnswer.Contains("O Nexo não executou a etapa “Configurando os servidores DNS” porque os servidores DNS escolhidos pela IA não foram informados por você"),
+            "#73: com o DNS inventado barrado, a resposta não afirma a troca e diz por que não foi feita");
+
+        // #73, gate do 8b4a260: falha da mudança de rede que pode ter alterado a interface. N1: mudou e não restaurou;
+        // N2: o executor terminou sem resultado. A linha não pode dizer "nenhuma".
+        foreach (var (label, result, start) in new[]
+        {
+            ("N1", JsonSerializer.Serialize(new { success = false, error = "A verificação depois da mudança falhou.", changed = true, reverted = false, backup = "before.json" }), "A alteração de rede não foi concluída."),
+            ("N2", JsonSerializer.Serialize(new { success = false, error = "Executor encerrado sem resultado. Verifique a rede; estado não confirmado.", recoveryFolder = "op" }),
+                "A conclusão da etapa “Configurando os servidores DNS” não foi confirmada: o Windows pode ter sido alterado."),
+        })
+        {
+            var failing = new FlowTools((name, _) => name switch { "get_network" => Network(), "set_dns" => result, _ => throw new Exception("Ferramenta inesperada: " + name) });
+            var failedAnswer = await Execute(store, actor, Conversation(actor, Sites), failing, new ModelSequence([Call("get_network", new { }), Call("set_dns", new { interface_index = 13, mode = "automatic" })]));
+            assert(failedAnswer.StartsWith(start, StringComparison.Ordinal)
+                && failedAnswer.EndsWith("\n\nAlterações feitas pelo Nexo neste turno: nenhuma confirmada. Sem confirmação do resultado: DNS automático da interface 13 — confira antes de continuar.", StringComparison.Ordinal),
+                "#73: " + label + ": mudança de rede sem restauração confirmada fica sem confirmação na linha de fatos (" + failedAnswer + ")");
+        }
+
         foreach (var (label, request, server, reaches) in new[]
         {
             ("servidor escrito no pedido", "Os sites não abrem; configure o DNS 1.1.1.1 na Ethernet", "1.1.1.1", true),

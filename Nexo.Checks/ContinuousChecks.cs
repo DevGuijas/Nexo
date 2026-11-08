@@ -14,7 +14,8 @@ internal static class ContinuousChecks
             using var social = new ScriptedModel([Text(reply)]);
             var socialConversation = Conversation(actor); socialConversation.Entries[0].Text = "Bom dia, Nexo!";
             var before = fake.Calls.Count;
-            assert(await RunModel(social, fake, socialConversation) == reply && social.Calls == 1 && fake.Calls.Count == before, "Texto de conversa aceito sem exigir ferramentas: " + reply);
+            // Até a conversa sem consulta fecha com a linha de fatos (#73, opção A).
+            assert(await RunModel(social, fake, socialConversation) == reply + "\n\n" + TurnFacts.Prefix + " nenhuma." && social.Calls == 1 && fake.Calls.Count == before, "Texto de conversa aceito sem exigir ferramentas: " + reply);
         }
         using (var unsupportedClaim = new ScriptedModel([Text("Corrigi sua câmera."), Call("diagnose_device", new { topic = "camera" }), Text("A consulta terminou. Teste a câmera no aplicativo.")]))
         {
@@ -41,7 +42,7 @@ internal static class ContinuousChecks
         assert(handler.Calls == 5 && fake.Calls.SequenceEqual(new[] { "get_network", "test_connection" }) && result.Contains("terminaram"), "Promessas de consultas e testes continuam sem Ok, inclusive conclusão inválida");
         assert(conversation.AgentHistory.Count(m => m.role == "user") == 1 && conversation.Entries.Count == 1, "Continuação não fabrica consentimento ou mensagens do usuário");
         using var textControl = new ScriptedModel([Text("finish_support\n{\"message\":\"Resultado confirmado.\"}")]);
-        assert((await RunModel(textControl, fake, Conversation(actor))) == "Resultado confirmado.", "Controle explícito em JSON aceito quando Qwen não emite tool_calls");
+        assert((await RunModel(textControl, fake, Conversation(actor))) == "Resultado confirmado.\n\nAlterações feitas pelo Nexo neste turno: nenhuma.", "Controle explícito em JSON aceito quando Qwen não emite tool_calls");
         assert(AgentProtocol.ParseControl("set_ipv4 {\"mode\":\"dhcp\"}") == null && AgentProtocol.ParseControl("finish_support {oops}") == null, "Parser de controle não converte texto em ação do Windows nem aceita JSON inválido");
 
         using var question = new ScriptedModel([Call("ask_user", new { reason = "missing_information", message = "O problema acontece em todos os sites ou apenas no aplicativo?" })]);
