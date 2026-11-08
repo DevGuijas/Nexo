@@ -34,10 +34,11 @@ public sealed class InvestigationEvidence
     public bool DeviceTargetUnambiguous(string id, string request, bool enabling)
     {
         if (!observedDevices.TryGetValue(id, out var target)) return false;
-        var candidates = observedDevices.Values.Where(device => device.Topic == target.Topic && (!enabling || device.Code == 22)).ToArray();
+        var candidates = observedDevices.Where(device => device.Value.Topic == target.Topic && (!enabling || device.Value.Code == 22)).ToArray();
         if (UncertainTarget(request) && observedDevices.Values.Count(device => device.Topic == target.Topic) > 1) return false;
-        if (candidates.Length == 1) return true;
-        return UserNamedExactlyOneTarget(request, candidates.Select(device => device.Name), target.Name);
+        // O alvo da ferramenta precisa ser o próprio candidato, pelo ID: outro dispositivo com o mesmo nome não conta.
+        if (candidates.Length == 1) return candidates[0].Key == id;
+        return UserNamedExactlyOneTarget(request, candidates.Select(device => (device.Key, device.Value.Name)), id, StringComparer.Ordinal);
     }
     public bool PrinterTargetUnambiguous(string name, string request)
     {
@@ -45,28 +46,51 @@ public sealed class InvestigationEvidence
         var candidates = PrinterCandidates();
         if (UncertainTarget(request) && candidates.Length > 1) return false;
         if (candidates.Length == 1) return candidates[0].Equals(name, StringComparison.OrdinalIgnoreCase);
-        return UserNamedExactlyOneTarget(request, candidates, name);
+        return UserNamedExactlyOneTarget(request, candidates.Select(candidate => (candidate, candidate)), name, StringComparer.OrdinalIgnoreCase);
     }
     private static bool UncertainTarget(string request) => Regex.IsMatch(AgentProtocol.Normalize(request),
         @"\b(nao sei qual|nao sei se|nao tenho certeza|qual deles|qual delas)\b");
 
-    private static bool UserNamedExactlyOneTarget(string request, IEnumerable<string> names, string target)
+    // Com mais de um alvo possível, só escolhe a mensagem que é apenas o nome de um candidato (#70): o nome inteiro, ou cortado
+    // como a pergunta o mostra, entre aspas ou não, com no máximo um prefixo curto ("é a", "foi na", "sim,") e ponto final.
+    // Qualquer outra palavra faz o Nexo perguntar de novo. Quatro revisões mostraram que uma lista de recusas ("não é a X",
+    // "esquece a X", "a X tá ok"...) nunca fecha, e cada frase que escapa autoriza o alvo errado; perguntar de novo custa pouco.
+    // A forma normalizada só encontra o candidato; a autorização compara a identidade dele (ID do dispositivo ou nome exato da
+    // impressora) com o alvo da ferramenta, para que outro observado com nome parecido não passe pelo escolhido.
+    private static bool UserNamedExactlyOneTarget(string request, IEnumerable<(string Key, string Name)> candidates, string target, StringComparer identity)
     {
-        var normalizedTarget = AgentProtocol.Normalize(target);
-        if (normalizedTarget.Length < 6) return false;
-        var normalizedRequest = AgentProtocol.Normalize(request);
-        var candidates = names.ToArray();
-        var mentioned = candidates.Select(AgentProtocol.Normalize)
-            .Where(name => name.Length >= 6 && normalizedRequest.Contains(name, StringComparison.Ordinal)).ToArray();
-        // Sem nome escrito por inteiro, vale o nome como a pergunta o mostrou: aspas trocadas por apóstrofo e corte em 60 caracteres.
-        // O nome inteiro tem prioridade, para que o prefixo de outro candidato não torne ambígua uma escolha exata.
-        if (mentioned.Length == 0)
+        if (ReplyForms(request) is not { Count: > 0 } replies) return false;
+        var chosen = candidates.Select(candidate => (candidate.Key, Full: NameForm(candidate.Name), Cut: CutNameForm(candidate.Name)))
+            .Where(candidate => candidate.Full.Length >= 6 && (replies.Contains(candidate.Full) || candidate.Cut is { Length: >= 6 } cut && replies.Contains(cut))).ToArray();
+        return chosen.Length == 1 && identity.Equals(chosen[0].Key, target);
+    }
+    private static readonly string[] ReplyPrefixes = (from yes in new[] { "", "sim ", "sim, " } from verb in new[] { "", "e ", "foi " }
+        from article in new[] { "", "a ", "o ", "na ", "no " } select yes + verb + article).Distinct().ToArray();
+    // As formas possíveis do nome na resposta, já sem o prefixo, as aspas em volta e o ponto final. Caractere de controle ou
+    // de formatação (largura zero, direção de texto) no meio da resposta não forma nome: a resposta não conta como escolha.
+    private static HashSet<string>? ReplyForms(string request)
+    {
+        var trimmed = request.Trim();
+        if (trimmed.EnumerateRunes().Any(rune => Rune.GetUnicodeCategory(rune) is UnicodeCategory.Control or UnicodeCategory.Format
+            or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator)) return null;
+        var form = AgentProtocol.Normalize(Clean(trimmed, quotes: true));
+        var forms = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var prefix in ReplyPrefixes.Where(prefix => form.StartsWith(prefix, StringComparison.Ordinal)))
         {
-            var shownRequest = AgentProtocol.Normalize(Clean(request, quotes: true));
-            mentioned = candidates.Where(name => AgentProtocol.Normalize(Shorten(Clean(name, quotes: true), MaxNameLength).TrimEnd('…')) is { Length: >= 6 } shown
-                && shownRequest.Contains(shown, StringComparison.Ordinal)).Select(AgentProtocol.Normalize).ToArray();
+            var rest = TrimReplyEnd(form[prefix.Length..]);
+            forms.Add(rest);
+            if (rest.Length > 2 && rest[0] == '\'' && rest[^1] == '\'') forms.Add(TrimReplyEnd(rest[1..^1].Trim()));
         }
-        return mentioned.Length == 1 && mentioned[0] == normalizedTarget;
+        forms.Remove("");
+        return forms;
+    }
+    private static string TrimReplyEnd(string text) => Regex.Replace(text, @"[\s.!…]+$", "");
+    private static string NameForm(string name) => TrimReplyEnd(AgentProtocol.Normalize(Clean(name, quotes: true)));
+    // O nome como a pergunta o mostrou, quando ela o cortou em 60 caracteres; sem o corte, só o nome inteiro vale.
+    private static string? CutNameForm(string name)
+    {
+        var clean = Clean(name, quotes: true);
+        return clean.Length > MaxNameLength ? TrimReplyEnd(AgentProtocol.Normalize(Shorten(clean, MaxNameLength))) : null;
     }
     private string[] PrinterCandidates()
     {
@@ -79,15 +103,16 @@ public sealed class InvestigationEvidence
         {
             var printerCandidates = PrinterCandidates();
             if (printerCandidates.Length <= 1 || printerCandidates.Any(name => PrinterTargetUnambiguous(name, request))) return null;
-            return "Encontrei mais de uma impressora com indício de falha: " + string.Join("; ", printerCandidates.Order(StringComparer.CurrentCultureIgnoreCase).Select(name => Quoted(name))) + ". Qual delas recebeu o documento que falhou?";
+            return "Encontrei mais de uma impressora com indício de falha: " + string.Join("; ", printerCandidates.Order(StringComparer.CurrentCultureIgnoreCase).Select(name => Quoted(name))) + ". Qual delas recebeu o documento que falhou? " + ReplyWithName;
         }
         var candidates = observedDevices.Where(device => device.Value.Topic == topic && device.Value.Code == 22).ToArray();
         if (candidates.Length <= 1 || candidates.Any(device => DeviceTargetUnambiguous(device.Key, request, true))) return null;
         var category = topic switch { "camera" => "câmera desabilitada", "audio" => "dispositivo de áudio desabilitado", "bluetooth" => "dispositivo Bluetooth desabilitado", _ => "dispositivo desabilitado" };
         var prefix = topic == "camera" ? "Encontrei mais de uma " : "Encontrei mais de um ";
         var pronoun = topic == "camera" ? "delas" : "deles";
-        return prefix + category + ": " + string.Join("; ", candidates.Select(device => device.Value.Name).Order(StringComparer.CurrentCultureIgnoreCase).Select(name => Quoted(name))) + ". Qual " + pronoun + " apresenta a falha no aplicativo?";
+        return prefix + category + ": " + string.Join("; ", candidates.Select(device => device.Value.Name).Order(StringComparer.CurrentCultureIgnoreCase).Select(name => Quoted(name))) + ". Qual " + pronoun + " apresenta a falha no aplicativo? " + ReplyWithName;
     }
+    private const string ReplyWithName = "Responda só com o nome, como está escrito acima.";
     public bool UpdateMatchesIncident(string id, HashSet<string> incidentTopics)
     {
         if (!observedUpdates.TryGetValue(id, out var update)) return false;
@@ -286,7 +311,7 @@ public sealed class InvestigationEvidence
         ControlBlock.UninformedDnsServers => "O Nexo não executou " + Describe(block.Name) + " porque os servidores DNS escolhidos pela IA não foram informados por você, e o Nexo não usa endereços de DNS inventados. Se o computador obtinha o DNS automaticamente, a correção indicada é voltar ao DNS automático, que continua dependendo da sua aprovação; para usar outro DNS, diga quais servidores a sua rede usa.",
         _ => block.Topic is { } topic
             ? "O Nexo não executou " + Describe(block.Name) + " porque o seu pedido não cita " + Component(topic) + ", a parte do Windows que essa alteração muda. Essa trava evita mexer em algo diferente do que você relatou. Se o problema for com " + Component(topic) + ", diga isso com suas palavras; a alteração continua dependendo da sua aprovação."
-            : "O Nexo não executou " + Describe(block.Name) + " porque o alvo não foi identificado sem ambiguidade nas consultas deste turno. Diga qual dispositivo ou impressora apresenta a falha."
+            : "O Nexo não executou " + Describe(block.Name) + " porque o alvo não foi identificado sem ambiguidade nas consultas deste turno. Diga qual dispositivo ou impressora apresenta a falha respondendo só com o nome dele, como aparece no cartão da consulta."
     };
 
     private static string Describe(string name) => name switch

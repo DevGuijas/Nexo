@@ -123,8 +123,11 @@ public static class SecurityChecks
         assert(!cameraEvidence.DeviceTargetUnambiguous("PCI\\CAMERA_TEST", "Tenho câmera interna e webcam USB; não sei qual falhou.", true)
             && cameraEvidence.AmbiguityQuestion("camera", "Tenho câmera interna e webcam USB; não sei qual falhou.") is not null,
             "Citar duas câmeras com alvo incerto não autoriza escolha arbitrária");
-        assert(cameraEvidence.DeviceTargetUnambiguous("USB\\WEBCAM_TEST", "A Webcam USB não aparece no Teams.", true),
-            "Uma câmera nomeada explicitamente distingue dois alvos observados");
+        // #70: com dois alvos, só a resposta que é apenas o nome escolhe; a frase que cita o nome faz o Nexo perguntar.
+        assert(!cameraEvidence.DeviceTargetUnambiguous("USB\\WEBCAM_TEST", "A Webcam USB não aparece no Teams.", true)
+            && cameraEvidence.AmbiguityQuestion("camera", "A Webcam USB não aparece no Teams.") is not null
+            && cameraEvidence.DeviceTargetUnambiguous("USB\\WEBCAM_TEST", "Webcam USB", true) && !cameraEvidence.DeviceTargetUnambiguous("PCI\\CAMERA_TEST", "Webcam USB", true),
+            "Com duas câmeras, só a resposta com o nome distingue os alvos observados");
 
         var printerEvidence = new InvestigationEvidence();
         printerEvidence.Observe("get_printers", "printers", Args(new { }), WindowsTools.Ok(JsonSerializer.Serialize(new[] {

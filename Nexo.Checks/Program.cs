@@ -212,6 +212,7 @@ try
     await TriageChecks.Run(store, admin, Assert);
     await DnsRepairChecks.Run(store, admin, Assert);
     await ServiceEventChecks.Run(store, admin, Assert);
+    TargetChoiceChecks.Run(Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);
