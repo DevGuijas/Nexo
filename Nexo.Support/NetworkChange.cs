@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.Json;
@@ -9,8 +10,15 @@ public sealed record NetworkRequest(string Action, int Index, string Mode, strin
     public string ExpectedGuid { get; init; } = "";
     public string Description => Action == "set_dns" ? $"Interface #{Index}: DNS {(Mode == "automatic" ? "automático (DHCP)" : string.Join(", ", Servers))}." : $"Interface #{Index}: {(Mode == "dhcp" ? "Obter um endereço IP automaticamente (DHCP). A rede precisa fornecer IP por DHCP; confirme se essa interface deve usar configuração automática" : $"IP {Address}/{Prefix}, gateway {(Gateway.Length == 0 ? "sem gateway" : Gateway)}")}. O DNS será preservado.";
 }
+public sealed record NetworkDeadlines(TimeSpan Applying, TimeSpan Confirming, TimeSpan Finishing)
+{
+    public static readonly NetworkDeadlines Default = new(TimeSpan.FromSeconds(150), TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(90));
+    public TimeSpan Total => Applying + Confirming + Finishing;
+}
 public static class NetworkChange
 {
+    public const string UnconfirmedFile = "unconfirmed.json";
+
     public static NetworkRequest Parse(string action, JsonElement args)
     {
         var index = WindowsTools.Number(args, "interface_index");
@@ -33,8 +41,9 @@ public static class NetworkChange
     public static Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token)
         => Apply(request, store, confirm, progress, token, NetworkRecovery.StartElevated);
 
-    public static async Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token, Func<string, IElevatedProcess> start)
+    public static async Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token, Func<string, IElevatedProcess> start, NetworkDeadlines? deadlines = null)
     {
+        deadlines ??= NetworkDeadlines.Default;
         token.ThrowIfCancellationRequested();
         var dir = Path.Combine(store.Root, "operations", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
         var parameters = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(request)));
@@ -47,9 +56,18 @@ public static class NetworkChange
         using var process = start(script);
         NetworkRecovery.WriteRecord(dir, record with { ProcessId = process.Id });
         var ready = Path.Combine(dir, "applied.json"); var final = Path.Combine(dir, "result.json"); var decision = Path.Combine(dir, "decision.txt");
+        var backup = Path.Combine(dir, "before.json");
+        var clock = Stopwatch.StartNew();
+        var deadline = deadlines.Applying;
+        var cancelled = false;
         while (!process.HasExited && !File.Exists(final))
         {
-            if (token.IsCancellationRequested) { await File.WriteAllTextAsync(decision, "rollback", CancellationToken.None); }
+            if (token.IsCancellationRequested && !cancelled)
+            {
+                cancelled = true;
+                if (!File.Exists(decision)) await File.WriteAllTextAsync(decision, "rollback", CancellationToken.None);
+                if (!File.Exists(ready)) deadline = deadlines.Applying + deadlines.Finishing;
+            }
             if (File.Exists(ready) && !File.Exists(decision))
             {
                 progress.Report("Configuração aplicada temporariamente. Conferindo o estado e aguardando sua confirmação…");
@@ -57,15 +75,25 @@ public static class NetworkChange
                 var keep = false;
                 // Os 45 s do texto são os da janela (MainWindow), que grava "rollback" ao expirar. Os 60 s do
                 // NetworkTransaction.ps1 são o prazo do processo elevado se o aplicativo não responder (README, Rede e recuperação).
-                try { if (!token.IsCancellationRequested) keep = await confirm(new ChangeRequest("Manter a configuração de rede?", request.Description + "\n\nEstado obtido após a mudança:\n" + state + "\n\nTeste a conexão. Se não confirmar em até 45 segundos, a configuração anterior será restaurada.", true)); }
+                try
+                {
+                    if (!token.IsCancellationRequested)
+                    {
+                        var answer = confirm(new ChangeRequest("Manter a configuração de rede?", request.Description + "\n\nEstado obtido após a mudança:\n" + state + "\n\nTeste a conexão. Se não confirmar em até 45 segundos, a configuração anterior será restaurada.", true));
+                        if (await Task.WhenAny(answer, Task.Delay(deadlines.Confirming, CancellationToken.None)) == answer) keep = await answer;
+                        else progress.Report("A confirmação não respondeu no prazo; restaurando a configuração anterior.");
+                    }
+                }
                 catch (Exception ex) { progress.Report("Confirmação indisponível; restaurando a configuração anterior. " + ex.Message); }
                 await File.WriteAllTextAsync(decision, keep && !token.IsCancellationRequested ? "keep" : "rollback", CancellationToken.None);
+                deadline = clock.Elapsed + deadlines.Finishing;
             }
+            if (clock.Elapsed >= deadline && !process.HasExited && !File.Exists(final)) return await Unconfirmed(dir, backup, decision, ready, cancelled || token.IsCancellationRequested, clock.Elapsed);
             await Task.Delay(250, CancellationToken.None);
         }
+        if (File.Exists(final)) return await File.ReadAllTextAsync(final, CancellationToken.None);
         await process.WaitForExitAsync(CancellationToken.None);
         if (File.Exists(final)) return await File.ReadAllTextAsync(final, CancellationToken.None);
-        var backup = Path.Combine(dir, "before.json");
         var interrupted = NetworkRecovery.Inspect(dir, DateTimeOffset.UtcNow, _ => false, exited: true);
         if (interrupted == null) return JsonSerializer.Serialize(new { success = false, reverted = false, error = "Executor encerrado sem resultado. Verifique a rede; estado não confirmado.", backup, recoveryFolder = dir });
         if (interrupted.Resolution == null) progress.Report("O executor de rede terminou sem resultado. Oferecendo a restauração da configuração anterior…");
@@ -73,5 +101,25 @@ public static class NetworkChange
         using var recoveryResult = JsonDocument.Parse(recovery);
         var unchanged = recoveryResult.RootElement.TryGetProperty("unchanged", out var flag) && flag.ValueKind == JsonValueKind.True;
         return JsonSerializer.Serialize(new { success = false, changed = !unchanged, reverted = NetworkRecovery.Restored(recovery), error = "Executor encerrado sem resultado. " + NetworkRecovery.Explain(recovery), backup, recoveryFolder = dir, recovery = recoveryResult.RootElement.Clone() });
+    }
+
+    private static async Task<string> Unconfirmed(string dir, string backup, string decision, string ready, bool cancelled, TimeSpan elapsed)
+    {
+        if (!File.Exists(decision)) await File.WriteAllTextAsync(decision, "rollback", CancellationToken.None);
+        var chosen = File.ReadAllText(decision).Trim();
+        var applied = File.Exists(ready);
+        var phase = chosen == "keep" ? "keeping" : applied ? "restoring" : "applying";
+        var seconds = (int)Math.Round(elapsed.TotalSeconds);
+        var error = (cancelled ? "Cancelamento registrado. " : "") + phase switch
+        {
+            "keeping" => $"Você confirmou manter a nova configuração, mas o executor de rede não registrou o resultado em {seconds} segundos e ainda está em execução. A configuração atual não foi conferida; consulte a rede antes de outra alteração.",
+            "restoring" => $"A restauração da configuração anterior não terminou em {seconds} segundos e o executor de rede ainda está em execução. Não há confirmação de que a configuração anterior voltou; o estado da rede não pôde ser confirmado.",
+            _ => $"O executor de rede não chegou à confirmação em {seconds} segundos e ainda está em execução. A mudança pode ter sido aplicada parcialmente; o estado da rede não pôde ser confirmado e nenhuma restauração foi confirmada. Se o executor ainda chegar à confirmação, ele restaura a configuração anterior."
+        } + " Se o executor terminar sem resultado, a restauração será oferecida na próxima abertura do Nexo.";
+        var outcome = JsonSerializer.Serialize(new { success = false, reverted = false, state = "unknown", timedOut = true, processRunning = true, cancelled, phase, error, backup, recoveryFolder = dir, recordedAt = DateTimeOffset.UtcNow });
+        var temporary = Path.Combine(dir, UnconfirmedFile + ".tmp");
+        await File.WriteAllTextAsync(temporary, outcome, CancellationToken.None);
+        File.Move(temporary, Path.Combine(dir, UnconfirmedFile), true);
+        return outcome;
     }
 }

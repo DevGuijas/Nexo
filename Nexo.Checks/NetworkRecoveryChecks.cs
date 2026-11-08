@@ -79,6 +79,68 @@ internal static class NetworkRecoveryChecks
             check(sanitized.Before != null && !sanitized.Before.Contains("Evil") && NetworkRecovery.Describe(sanitized).Contains("10.0.0.10/24"),
                 "Rede: somente campos de rede validados seguem para o processo elevado");
 
+            var quick = new NetworkDeadlines(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+            check(NetworkDeadlines.Default.Total == TimeSpan.FromMinutes(5) && NetworkDeadlines.Default.Confirming == TimeSpan.FromSeconds(60) && NetworkDeadlines.Default.Applying > TimeSpan.FromSeconds(63),
+                "Rede: prazo total de 5 minutos cobre aplicação com espera DHCP, confirmação de 60 s e conclusão");
+
+            prompts.Clear();
+            var clock = Stopwatch.StartNew();
+            var hung = await Apply(store, async (dir, stop) => { await Write(dir, "before.json", Before); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, deadlines: quick);
+            var hungElapsed = clock.Elapsed;
+            check(hungElapsed < TimeSpan.FromSeconds(10) && Text(hung.Result, "state") == "unknown" && Flag(hung.Result, "timedOut") && Flag(hung.Result, "processRunning") && Text(hung.Result, "phase") == "applying",
+                "Rede: executor elevado travado antes da confirmação encerra a espera no prazo com estado desconhecido");
+            check(!Flag(hung.Result, "reverted") && Bool(hung.Result, "success") == false && !Text(hung.Result, "error").Contains("restaurada") && Text(hung.Result, "error").Contains("não pôde ser confirmado"),
+                "Rede: prazo esgotado não anuncia restauração inexistente");
+            check(prompts.Count == 0 && hung.RecoveryStarts == 0 && Decision(hung.Directory) == "rollback" && File.Exists(Path.Combine(hung.Directory, NetworkChange.UnconfirmedFile)),
+                "Rede: prazo esgotado pede restauração ao executor ativo, registra a incerteza e não inicia restauração concorrente");
+            check(NetworkRecovery.Scan(root, DateTimeOffset.UtcNow, _ => true).All(i => i.Directory != hung.Directory)
+                && NetworkRecovery.Scan(root, DateTimeOffset.UtcNow, _ => false).Any(i => i.Directory == hung.Directory && i.Resolution == null),
+                "Rede: transação com executor ainda ativo só é oferecida para restauração depois que ele termina");
+
+            prompts.Clear();
+            using (var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
+            {
+                clock.Restart();
+                var cancelledHung = await Apply(store, async (dir, stop) => { await Write(dir, "before.json", Before); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, deadlines: quick, token: cancel.Token);
+                check(clock.Elapsed < TimeSpan.FromSeconds(10) && Flag(cancelledHung.Result, "cancelled") && Text(cancelledHung.Result, "state") == "unknown" && !Flag(cancelledHung.Result, "reverted")
+                    && Decision(cancelledHung.Directory) == "rollback" && Text(cancelledHung.Result, "error").StartsWith("Cancelamento registrado.") && prompts.Count == 0,
+                    "Rede: cancelamento com executor travado termina no prazo sem confirmar restauração");
+            }
+
+            prompts.Clear();
+            using (var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
+            {
+                var honoured = await Apply(store, async (dir, stop) =>
+                {
+                    await Write(dir, "before.json", Before);
+                    await WaitFor(Path.Combine(dir, "decision.txt"), stop);
+                    if (Decision(dir) == "rollback") await Write(dir, "result.json", "{\"success\":false,\"reverted\":true,\"message\":\"Configuração anterior restaurada por cancelamento ou ausência de confirmação.\"}");
+                }, prompts, true, deadlines: quick, token: cancel.Token);
+                check(Flag(honoured.Result, "reverted") && !honoured.Result.TryGetProperty("state", out _) && prompts.Count == 0,
+                    "Rede: cancelamento atendido pelo executor devolve a restauração registrada por ele");
+            }
+
+            prompts.Clear();
+            var keptHung = await Apply(store, async (dir, stop) => { await Write(dir, "before.json", Before); await Write(dir, "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, keep: true, deadlines: quick);
+            check(Text(keptHung.Result, "phase") == "keeping" && Decision(keptHung.Directory) == "keep" && Text(keptHung.Result, "error").Contains("não foi conferida") && !Flag(keptHung.Result, "reverted"),
+                "Rede: executor travado após confirmar manter preserva a escolha e informa que o estado não foi conferido");
+
+            prompts.Clear();
+            var restoringHung = await Apply(store, async (dir, stop) => { await Write(dir, "before.json", Before); await Write(dir, "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, keep: false, deadlines: quick);
+            check(Text(restoringHung.Result, "phase") == "restoring" && Text(restoringHung.Result, "error").Contains("Não há confirmação de que a configuração anterior voltou") && !Flag(restoringHung.Result, "reverted"),
+                "Rede: restauração do executor que não termina no prazo fica como estado desconhecido");
+
+            prompts.Clear();
+            clock.Restart();
+            var unanswered = await Apply(store, async (dir, stop) =>
+            {
+                await Write(dir, "before.json", Before); await Write(dir, "applied.json", "{}");
+                await WaitFor(Path.Combine(dir, "decision.txt"), stop);
+                await Write(dir, "result.json", Decision(dir) == "keep" ? "{\"success\":true}" : "{\"success\":false,\"reverted\":true}");
+            }, prompts, true, deadlines: quick, unanswered: true);
+            check(clock.Elapsed < TimeSpan.FromSeconds(10) && Decision(unanswered.Directory) == "rollback" && Flag(unanswered.Result, "reverted") && prompts.SequenceEqual(["Manter a configuração de rede?"]),
+                "Rede: confirmação sem resposta no prazo grava a restauração em vez de esperar indefinidamente");
+
             prompts.Clear();
             var killed = await ApplyWithRealProcess(store, prompts);
             check(killed.Killed && prompts.Contains("Restaurar configuração de rede anterior?") && Flag(killed.Result, "reverted"),
@@ -92,7 +154,7 @@ internal static class NetworkRecoveryChecks
 
     private sealed record Outcome(JsonElement Result, string Directory, int RecoveryStarts, string RecoveryScript, bool Killed = false);
 
-    private static async Task<Outcome> Apply(Store store, Func<string, CancellationToken, Task> executor, List<string> prompts, bool restore, bool keep = false, bool recoveryWrites = true)
+    private static async Task<Outcome> Apply(Store store, Func<string, CancellationToken, Task> executor, List<string> prompts, bool restore, bool keep = false, bool recoveryWrites = true, NetworkDeadlines? deadlines = null, CancellationToken token = default, bool unanswered = false)
     {
         string directory = "";
         var starts = 0;
@@ -108,8 +170,8 @@ internal static class NetworkRecoveryChecks
             directory = dir;
             return new SimulatedProcess(stop => executor(dir, stop));
         };
-        Func<ChangeRequest, Task<bool>> confirm = request => { prompts.Add(request.Title); return Task.FromResult(request.KeepNetwork ? keep : restore); };
-        var output = await NetworkChange.Apply(Request, store, confirm, new Silent(), CancellationToken.None, start);
+        Func<ChangeRequest, Task<bool>> confirm = request => { prompts.Add(request.Title); return unanswered && request.KeepNetwork ? new TaskCompletionSource<bool>().Task : Task.FromResult(request.KeepNetwork ? keep : restore); };
+        var output = await NetworkChange.Apply(Request, store, confirm, new Silent(), token, start, deadlines);
         using var document = JsonDocument.Parse(output);
         return new Outcome(document.RootElement.Clone(), directory, starts, recoveryScript);
     }
@@ -173,6 +235,7 @@ internal static class NetworkRecoveryChecks
         await Task.Delay(20, stop);
     }
 
+    private static string Decision(string dir) => File.Exists(Path.Combine(dir, "decision.txt")) ? File.ReadAllText(Path.Combine(dir, "decision.txt")).Trim() : "";
     private static bool? Bool(JsonElement value, string name) => value.TryGetProperty(name, out var item) && item.ValueKind is JsonValueKind.True or JsonValueKind.False ? item.GetBoolean() : null;
     private static bool Flag(JsonElement value, string name) => value.TryGetProperty(name, out var item) && item.ValueKind == JsonValueKind.True;
     private static string Text(JsonElement value, string name) => value.TryGetProperty(name, out var item) && item.ValueKind == JsonValueKind.String ? item.GetString() ?? "" : "";
