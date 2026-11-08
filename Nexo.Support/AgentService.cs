@@ -156,6 +156,8 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         }
         var toolCount = 0;
         var evidence = new InvestigationEvidence();
+        // Eventos de cada serviço lidos neste turno (#58), na frase curta que entra no pedido de aprovação e na resposta.
+        var serviceEvents = new Dictionary<string, string>();
         string restartContext = "";
         if (conversation.PendingRestartBoot != null)
         {
@@ -319,6 +321,17 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             }
             if (calls.Value.GetArrayLength() > 1 && calls.Value.EnumerateArray().Any(c => ToolCatalog.IsMutation(c.GetProperty("function").GetProperty("name").GetString()!) || c.GetProperty("function").GetProperty("name").GetString() is "finish_support" or "ask_user" or "prepare_restart" or "wait_for_reconnect"))
                 return Finish(evidence.Report("A IA agrupou uma alteração ou etapa final com outras chamadas. Nenhuma chamada dessa resposta foi executada; encaminhe este atendimento a uma pessoa."));
+            string? restartedService = null;
+            // #58: o reinício de um serviço só chega ao executor depois de uma leitura dos eventos desse serviço neste turno.
+            // Se o modelo não consultou, o controlador consulta antes da chamada; uma falha da consulta não bloqueia o reinício.
+            if (calls.Value.GetArrayLength() == 1 && calls.Value[0].GetProperty("function") is var proposed && proposed.GetProperty("name").GetString() == "restart_service"
+                && proposed.GetProperty("arguments") is var restartArguments && Text(restartArguments, "service") is { } restartTarget && ServiceEvents.IsAllowed(restartTarget)
+                && !serviceEvents.ContainsKey(restartTarget) && MutationMatchesIncident("restart_service", restartArguments))
+            {
+                serviceEvents[restartTarget] = ServiceEvents.Note(await ControllerCall("Eventos antes do reinício", "get_recent_errors", JsonSerializer.SerializeToElement(new { service = restartTarget })), restartTarget);
+                // A consulta automática não ocupa o limite de ações do turno, para não barrar o reinício logo depois dela.
+                toolCount--;
+            }
             history.Add(new AgentMessage { role = "assistant", content = content, tool_calls = calls });
             var repeatedFailure = false;
             var lockStop = false;
@@ -445,6 +458,8 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     }
                     else if (name is "enable_network_adapter" or "set_dns" or "set_ipv4") failedCalls.RemoveWhere(s => s.StartsWith("get_network:"));
                 }
+                if (name == "get_recent_errors" && Text(arguments, "service") is { } queried && ServiceEvents.IsAllowed(queried)) serviceEvents[queried] = ServiceEvents.Note(result, queried);
+                if (name == "restart_service") restartedService = Text(arguments, "service");
                 history.Add(new AgentMessage { role = "tool", tool_name = name, content = result });
                 evidence.Observe(name, signature, arguments, result, block);
                 record(ToolCatalog.Label(name), result); AuditTool("Ferramenta do agente", name, result, arguments, toolClock.ElapsedMilliseconds);
@@ -467,9 +482,11 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             }
             store.Save();
             if (networkFailure != null) return Finish(networkFailure);
-            if (deniedByUser) return Finish("Você recusou a alteração proposta. Essa alteração não foi executada e parei esta etapa. Os resultados já obtidos estão registrados acima; a resolução do problema ainda não foi confirmada.");
-            if (failedMutation != null) return Finish("A alteração " + failedMutation + " não foi concluída. Parei esta etapa; confira o erro no cartão do resultado. O problema ainda não foi resolvido. Se persistir, encaminhe os resultados a uma pessoa de suporte.");
-            if (functionalCheck != null) return Finish((changeOutcome ?? "A ferramenta retornou sucesso para a operação solicitada.") + " O funcionamento no aplicativo ainda não foi confirmado. Agora " + functionalCheck + ". Funcionou? Se continuar com problema, me diga o que acontece para investigarmos a próxima hipótese.");
+            // Depois de um pedido de reinício, a resposta repete o que os eventos do serviço mostraram (#58).
+            var restartEvents = restartedService != null && serviceEvents.TryGetValue(restartedService, out var note) ? " " + note : "";
+            if (deniedByUser) return Finish("Você recusou a alteração proposta. Essa alteração não foi executada e parei esta etapa. Os resultados já obtidos estão registrados acima; a resolução do problema ainda não foi confirmada." + restartEvents);
+            if (failedMutation != null) return Finish("A alteração " + failedMutation + " não foi concluída. Parei esta etapa; confira o erro no cartão do resultado. O problema ainda não foi resolvido." + restartEvents + " Se persistir, encaminhe os resultados a uma pessoa de suporte.");
+            if (functionalCheck != null) return Finish((changeOutcome ?? "A ferramenta retornou sucesso para a operação solicitada.") + restartEvents + " O funcionamento no aplicativo ainda não foi confirmado. Agora " + functionalCheck + ". Funcionou? Se continuar com problema, me diga o que acontece para investigarmos a próxima hipótese.");
             if (networkRecoveryNeeded)
             {
                 // Verification is mandatory even when the model chose the mutation outside
@@ -572,6 +589,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 "enable_device" or "restart_device" when args.TryGetProperty("device_id", out var device) && device.ValueKind == JsonValueKind.String => evidence.DeviceTopic(device.GetString() ?? ""),
                 _ => null
             };
+        static string? Text(JsonElement source, string key) => source.ValueKind == JsonValueKind.Object && source.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
         void AuditTool(string stage, string name, string output, JsonElement parameters, long elapsedMs)
         {
             using var result = JsonDocument.Parse(output);
@@ -672,7 +690,7 @@ public static class ToolCatalog
         Tool("get_hardware_inventory", "Detecta dispositivos PnP presentes, problemas, IDs de hardware e versão/provedor do driver. Consulte antes de procurar atualização. category=problem para dispositivos com erro; escolha uma categoria quando souber o componente.", new() { ["category"] = new { type = "string", @enum = new[] { "problem", "display", "network", "storage", "usb", "camera", "audio", "bluetooth", "printer" } } }, ["category"]),
         Tool("get_printers", "Consulta impressoras instaladas, drivers, portas e estado das filas sem ler os documentos."),
         Tool("get_services", "Consulta estado dos serviços de áudio, Bluetooth, impressão e Wi-Fi."),
-        Tool("get_recent_errors", "Consulta os últimos erros do log Sistema nas últimas 24h."),
+        Tool("get_recent_errors", "Consulta os últimos erros do log Sistema nas últimas 24h. Com service, lê só os eventos desse serviço (paradas inesperadas, términos com erro e mudanças de estado): consulte antes de propor restart_service.", new() { ["service"] = new { type = "string", @enum = new[] { "Audiosrv", "Spooler", "bthserv", "WlanSvc" } } }),
         Tool("get_processes", "Consulta processos com maior consumo de memória e se estão respondendo. Não encerra processos."),
         Tool("get_health_report", "Consulta métricas, achados e limitações do relatório local de saúde. Somente leitura; não confirma reparo."),
         Tool("get_driver_store", "Consulta o INF e a versão instalada de um dispositivo observado no inventário. Não busca nem instala drivers.", new() { ["device_id"] = Str("ID exato de get_hardware_inventory") }, ["device_id"]),

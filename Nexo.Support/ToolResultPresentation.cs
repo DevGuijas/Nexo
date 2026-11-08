@@ -59,6 +59,17 @@ public static class ToolResultPresentation
 
             if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object)
             {
+                // Eventos de um serviço (#58): a frase do executor e os eventos com o texto fixo do Nexo, sem a mensagem do Windows.
+                if (label.Contains("erros recentes", StringComparison.OrdinalIgnoreCase) && Text(data, "Summary", "") is { Length: > 0 } summary
+                    && data.TryGetProperty("Events", out var serviceEvents) && serviceEvents.ValueKind == JsonValueKind.Array)
+                {
+                    var listed = serviceEvents.EnumerateArray().Take(ServiceEvents.MaxFailures + ServiceEvents.MaxStates)
+                        .Select(entry => "• " + (DateTimeOffset.TryParse(Text(entry, "Time", ""), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var at) ? at.ToString("dd/MM HH:mm", System.Globalization.CultureInfo.InvariantCulture) : "hora não informada")
+                            + " · evento " + (entry.TryGetProperty("Id", out var id) && id.ValueKind == JsonValueKind.Number ? id.GetRawText() : "?") + " · " + Text(entry, "Event", "registro do serviço"));
+                    var failed = summary.StartsWith("Último evento de falha", StringComparison.Ordinal);
+                    var partial = !failed && summary.Contains("a leitura foi parcial", StringComparison.Ordinal);
+                    return (failed ? "Falha registrada do serviço" : partial ? "Leitura parcial dos eventos do serviço" : "Sem falha registrada do serviço", string.Join("\n", listed.Prepend(summary)), failed || partial);
+                }
                 if (label.Contains("drivers oficiais da NVIDIA", StringComparison.OrdinalIgnoreCase))
                 {
                     var available = data.TryGetProperty("Available", out var found) && found.ValueKind == JsonValueKind.True;

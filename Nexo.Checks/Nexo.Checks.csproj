@@ -17,4 +17,5 @@
 <ItemGroup><Compile Include="../Nexo.Support/PendingOperations.cs" Link="PendingOperations.cs"/><PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="8.10.0" /></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/HealthSettings.cs" Link="HealthSettings.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/RestorePointProtection.cs" Link="RestorePointProtection.cs"/></ItemGroup>
+<ItemGroup><Compile Include="../Nexo.Support/ServiceEvents.cs" Link="ServiceEvents.cs"/></ItemGroup>
 </Project>

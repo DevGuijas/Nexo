@@ -47,7 +47,7 @@ internal static class PeripheralRegressionChecks
                  Call("finish_support", new { message = "Reiniciei o áudio e resolvi o problema." }),
                  Call("finish_support", new { message = "A tentativa de reiniciar o serviço de áudio falhou. O som ainda não foi confirmado; encaminhe à equipe de TI se persistir." })],
                 "Falha da primeira correção: parar imediatamente ou rejeitar alegação falsa, sem resolução declarada",
-                (s, answer, model) => s.Reads == 2 && s.Attempts == 1 && s.Applied == 0
+                (s, answer, model) => s.Reads == 2 && s.EventReads == 1 && s.Attempts == 1 && s.Applied == 0
                     && (model.Calls == 2 || model.Calls == 4 && model.SawRejectedControl)
                     && (answer.Contains("falhou") || answer.Contains("não foi"))
                     && !answer.Contains("Reiniciei") && !answer.Contains("resolvi o problema"), assert);
@@ -56,14 +56,14 @@ internal static class PeripheralRegressionChecks
                 await Check(failure, "Estou sem som em todos os aplicativos.",
                     [Call("get_services", new { }), Call("restart_service", new { service = "Audiosrv" })],
                     "Falha da ferramenta, prazo excedido ou acesso negado: parar sem declarar reparo",
-                    (s, answer, model) => s.Reads == 2 && s.Attempts == 1 && s.Applied == 0 && model.Calls == 2
+                    (s, answer, model) => s.Reads == 2 && s.EventReads == 1 && s.Attempts == 1 && s.Applied == 0 && model.Calls == 2
                         && answer.Contains("não foi concluída") && !answer.Contains("Funcionou?"), assert);
 
             await Check("audio-success", "Estou sem som em todos os aplicativos.",
                 [Call("get_services", new { }), Call("restart_service", new { service = "Audiosrv" })],
                 "Serviço de áudio voltou a Running; solicitar teste de som no aplicativo",
-                (s, answer, model) => s.Reads == 2 && s.Attempts == 1 && s.Applied == 1 && s.Approvals == 1 && model.Calls == 2
-                    && answer.Contains("reproduza um áudio") && answer.Contains("Funcionou"), assert);
+                (s, answer, model) => s.Reads == 2 && s.EventReads == 1 && s.Attempts == 1 && s.Applied == 1 && s.Approvals == 1 && model.Calls == 2
+                    && answer.Contains("reproduza um áudio") && answer.Contains("Nenhum evento de falha do serviço Audiosrv nas últimas 24 h.") && answer.Contains("Funcionou"), assert);
 
             await Check("bluetooth-denied", "Meu Bluetooth desapareceu do Windows.",
                 [Call("enable_device", new { device_id = BluetoothId })],
@@ -140,7 +140,7 @@ internal static class PeripheralRegressionChecks
 
     private sealed class Scenario(string id) : IAgentTools
     {
-        internal int Reads, Attempts, Applied, Approvals;
+        internal int Reads, EventReads, Attempts, Applied, Approvals;
         internal bool Unexpected;
         public Task<string> Execute(string name, JsonElement args, CancellationToken token)
         {
@@ -164,6 +164,12 @@ internal static class PeripheralRegressionChecks
             {
                 Reads++;
                 return Task.FromResult(WindowsTools.Ok(JsonSerializer.Serialize(new[] { new { Name = "Audiosrv", Status = "Stopped" } })));
+            }
+            // #58: antes do reinício, o controlador lê os eventos do serviço.
+            if (name == "get_recent_errors" && id.StartsWith("audio") && args.TryGetProperty("service", out var service) && service.GetString() == "Audiosrv" && Attempts == 0)
+            {
+                EventReads++;
+                return Task.FromResult(ServiceEvents.Result(new ServiceEvents.Reading("Audiosrv", [], []), DateTimeOffset.Now));
             }
             if (name == "get_printers" && id.StartsWith("printer"))
             {
