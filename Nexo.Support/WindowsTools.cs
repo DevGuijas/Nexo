@@ -21,6 +21,8 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private readonly Dictionary<int, JsonElement> observedNetworkDetails = [];
     private readonly Dictionary<string, JsonElement> observedServiceDetails = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, JsonElement> observedPrinterDetails = new(StringComparer.OrdinalIgnoreCase);
+    // Última leitura dos eventos de cada serviço (#58), já na frase que vai para o pedido de aprovação do reinício.
+    private readonly Dictionary<string, (DateTimeOffset At, string Note)> observedServiceEvents = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<int, bool> configurableInterfaces = [];
     private readonly HashSet<int> physicalInterfaces = [];
     private readonly Dictionary<string, (string Topic, Device Device)> observedDevices = new(StringComparer.OrdinalIgnoreCase);
@@ -34,6 +36,10 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private DateTimeOffset? observedNvidiaDriverAt;
     private bool? lastApproval;
     private InterventionRecord? currentIntervention;
+    // Executa o script de eventos do serviço; os testes trocam o PowerShell por uma saída conhecida.
+    internal Func<string, CancellationToken, Task<string>> ServiceEventsReader { get; init; } = (script, token) => SupportService.Powershell(script, token);
+    // Relógio da validade da leitura de eventos (5 minutos); os testes avançam o tempo.
+    internal Func<DateTimeOffset> ServiceEventsClock { get; init; } = () => DateTimeOffset.UtcNow;
     private static readonly IReadOnlyDictionary<string, JsonElement> toolSchemas = ToolCatalog.ForScope(false)
         .Select(tool => JsonSerializer.SerializeToElement(tool))
         .ToDictionary(tool => tool.GetProperty("function").GetProperty("name").GetString()!, tool => tool.GetProperty("function").GetProperty("parameters").Clone(), StringComparer.Ordinal);
@@ -335,6 +341,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                     if (entry.TryGetProperty("Name", out var serviceName) && serviceName.ValueKind == JsonValueKind.String) observedServiceDetails[serviceName.GetString() ?? ""] = entry.Clone();
                 return Ok(serviceRaw);
             case "get_recent_errors":
+                if (args.TryGetProperty("service", out _)) return await ReadServiceEvents(Value(args, "service"), token);
                 return Ok(await SupportService.Powershell("$log=& \"$env:WINDIR\\System32\\wevtutil.exe\" qe System '/q:*[System[(Level=2) and TimeCreated[timediff(@SystemTime) <= 86400000]]]' /c:12 /rd:true /f:text; if($LASTEXITCODE -ne 0){throw 'Não foi possível ler os eventos do sistema'}; $text=$log -join \"`n\"; if($text.Length -gt 7000){$text.Substring(0,7000)}else{$text}", token));
             case "get_processes":
                 return Ok(ProcessesForModel(await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 12 Name,Id,@{N='MemoryMB';E={[math]::Round($_.WorkingSet64/1MB)}},Responding)", token)));
@@ -390,7 +397,15 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             case "restart_service":
                 var service = Value(args, "service");
                 if (service is not ("Audiosrv" or "Spooler" or "bthserv" or "WlanSvc")) throw new InvalidOperationException("Serviço não permitido.");
-                if (!await Approve(new ChangeRequest("Reiniciar serviço", "Reiniciar " + service + ". Áudio, impressão, Bluetooth ou Wi-Fi poderão ser interrompidos conforme o serviço escolhido."), token)) return Denied();
+                // O pedido cita os eventos do serviço (#58). Sem leitura recente, o executor consulta agora; se a consulta falhar,
+                // o reinício continua disponível e o pedido diz que os eventos não foram lidos.
+                if (!observedServiceEvents.TryGetValue(service, out var serviceEvents) || ServiceEventsClock() - serviceEvents.At > TimeSpan.FromMinutes(5))
+                {
+                    try { await ReadServiceEvents(service, token); }
+                    catch (Exception ex) when (ex is not OperationCanceledException) { /* A falha fica registrada como consulta indisponível. */ }
+                    serviceEvents = observedServiceEvents[service];
+                }
+                if (!await Approve(new ChangeRequest("Reiniciar serviço", ServiceEvents.RestartDetails(service, serviceEvents.Note)), token)) return Denied();
                 return await Elevated("$s=Get-Service -Name " + Quote(service) + "; if($s.StartType -eq 'Disabled'){throw 'Serviço desabilitado. Verifique a política da organização antes de mudar o modo de inicialização'}; Restart-Service -Name " + Quote(service) + " -ErrorAction Stop; $s=Get-Service -Name " + Quote(service) + "; $s.WaitForStatus('Running',[timespan]::FromSeconds(20)); [pscustomobject]@{Service=$s.Name;Status=[string]$s.Status}", token);
             case "clear_print_queue":
                 var printer = Value(args, "printer_name");
@@ -803,6 +818,21 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         currentIntervention!.RecoveryPointSequence = result.SequenceNumber;
         MoveIntervention("protected", "Ponto de restauração " + result.SequenceNumber + " confirmado antes da instalação.");
         return null;
+    }
+    private async Task<string> ReadServiceEvents(string service, CancellationToken token)
+    {
+        if (!ServiceEvents.IsAllowed(service)) throw new InvalidOperationException("Serviço não permitido.");
+        try
+        {
+            var result = ServiceEvents.Result(ServiceEvents.Parse(await ServiceEventsReader(ServiceEvents.Script(service), token), service), DateTimeOffset.Now);
+            observedServiceEvents[service] = (ServiceEventsClock(), ServiceEvents.Note(result, service));
+            return result;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            observedServiceEvents[service] = (ServiceEventsClock(), ServiceEvents.Unavailable(service));
+            throw new InvalidOperationException(ServiceEvents.Unavailable(service) + " " + (ex is JsonException ? "O Windows devolveu um resultado em formato inesperado." : ex.Message), ex);
+        }
     }
     private static string Denied() => JsonSerializer.Serialize(new { success = false, denied = true, message = "Ação recusada pelo usuário. Não executar nem repetir." });
     public static string Ok(object data) => JsonSerializer.Serialize(new { success = true, data });

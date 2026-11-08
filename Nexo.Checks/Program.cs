@@ -209,6 +209,7 @@ try
     await FinalAnswerChecks.Run(store, admin, Assert);
     await TriageChecks.Run(store, admin, Assert);
     await DnsRepairChecks.Run(store, admin, Assert);
+    await ServiceEventChecks.Run(store, admin, Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);
@@ -267,6 +268,9 @@ try
             var result = await tools.Execute(name, System.Text.Json.JsonSerializer.SerializeToElement(new { }), CancellationToken.None);
             Assert(result.Contains("\"success\":true"), "Ferramenta real somente leitura: " + name);
         }
+        // #58: leitura real dos eventos do Spooler; confere formato e filtro no Windows, sem reiniciar nada.
+        var spoolerEvents = await tools.Execute("get_recent_errors", System.Text.Json.JsonSerializer.SerializeToElement(new { service = "Spooler" }), CancellationToken.None);
+        Assert(spoolerEvents.Contains("\"success\":true") && ServiceEvents.Note(spoolerEvents, "Spooler") != ServiceEvents.Unavailable("Spooler"), "Ferramenta real somente leitura: get_recent_errors(service=Spooler) " + ServiceEvents.Note(spoolerEvents, "Spooler"));
         foreach (var topic in new[] { "bluetooth", "printer" })
         {
             var result = await tools.Execute("diagnose_device", System.Text.Json.JsonSerializer.SerializeToElement(new { topic }), CancellationToken.None);

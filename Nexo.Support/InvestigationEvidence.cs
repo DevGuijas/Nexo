@@ -551,9 +551,9 @@ public sealed class InvestigationEvidence
     }
     // Nome vindo de ferramenta (dispositivo, adaptador, impressora, serviço) é dado, não texto do Nexo: vai entre aspas,
     // sem caracteres de controle, de formatação (como U+202E) ou separadores de linha e parágrafo, e com tamanho limitado.
-    private static string Quoted(string name, int limit = MaxNameLength) => "“" + Shorten(Clean(name, quotes: true), limit) + "”";
+    internal static string Quoted(string name, int limit = MaxNameLength) => "“" + Shorten(Clean(name, quotes: true), limit) + "”";
     // Por rune, não por unidade UTF-16: tags como U+E0000-U+E007F (formatação fora do BMP) também saem.
-    private static string Clean(string text, bool quotes = false)
+    internal static string Clean(string text, bool quotes = false)
     {
         var clean = new StringBuilder(text.Length);
         foreach (var rune in text.EnumerateRunes())
