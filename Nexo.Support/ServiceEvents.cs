@@ -24,7 +24,7 @@ public static class ServiceEvents
     internal const int FailureScan = 100;
     internal const int StateScan = 400;
     internal const int MaxMessageLength = 160;
-    private static readonly string[] Allowed = ["Audiosrv", "Spooler", "bthserv", "WlanSvc"];
+    internal static readonly string[] Allowed = ["Audiosrv", "Spooler", "bthserv", "WlanSvc"];
     private static readonly int[] FailureIds = [7000, 7001, 7009, 7011, 7022, 7023, 7024, 7031, 7034, 7038];
     // Nome interno de serviço: letras, dígitos e _ . $ -. Outra coisa no Binary não identifica o serviço.
     private const string ServiceKeyPattern = "^[A-Za-z0-9_.$-]+$";

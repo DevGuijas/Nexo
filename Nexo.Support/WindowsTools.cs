@@ -82,7 +82,12 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         $searcher.ServerSelection=0
         $search=$searcher.Search("IsInstalled=0 and IsHidden=0 and Type='Driver'")
         """;
-    private static string HardwareFilter(string category) => category switch
+    internal static string DeviceClasses(string topic) => topic switch
+    {
+        "camera" => "'Camera','Image'", "audio" => "'AudioEndpoint','MEDIA'", "bluetooth" => "'Bluetooth'", "printer" => "'Printer','PrintQueue'",
+        _ => throw new InvalidOperationException("Categoria de dispositivo não permitida.")
+    };
+    internal static string HardwareFilter(string category) => category switch
     {
         "problem" => "[int]$_.ConfigManagerErrorCode -ne 0",
         "display" => "$_.PNPClass -eq 'Display'",
@@ -98,40 +103,67 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private static string HardwareTopic(string category) => category is "camera" or "audio" or "bluetooth" or "printer" or "network" ? category : "hardware";
 
     // The schema sent to Ollama is advisory. Enforce it again at the executor boundary.
+    // A recusa volta ao modelo como resultado da ferramenta: ela diz o que é aceito, para que a próxima chamada seja corrigida
+    // em vez de repetida (#83). As regras são as mesmas do esquema anunciado; nada passa a ser aceito por isso.
     internal static void ValidateArguments(string name, JsonElement args)
     {
-        if (!toolSchemas.TryGetValue(name, out var schema) || name is "finish_support" or "ask_user") throw new InvalidOperationException("Ferramenta não permitida: " + name);
-        if (args.ValueKind != JsonValueKind.Object) throw new InvalidOperationException("Os argumentos da ferramenta devem ser um objeto JSON.");
+        if (!toolSchemas.TryGetValue(name, out var schema) || name is "finish_support" or "ask_user") throw new InvalidOperationException("Ferramenta não permitida: " + InvestigationEvidence.Quoted(name, 40));
+        if (args.ValueKind != JsonValueKind.Object) throw new InvalidOperationException("Os argumentos de " + name + " devem ser um objeto JSON. " + Accepted(name, schema));
         var properties = schema.GetProperty("properties");
+        var required = schema.GetProperty("required").EnumerateArray().Select(r => r.GetString()!).ToHashSet(StringComparer.Ordinal);
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var argument in args.EnumerateObject())
         {
-            if (!seen.Add(argument.Name) || !properties.TryGetProperty(argument.Name, out var rule)) throw new InvalidOperationException("Argumento inesperado ou repetido: " + argument.Name);
-            ValidateArgument(argument.Name, argument.Value, rule);
+            if (!seen.Add(argument.Name)) throw new InvalidOperationException("Argumento repetido em " + name + ": " + InvestigationEvidence.Quoted(argument.Name, 40) + ". Envie cada argumento uma vez.");
+            if (!properties.TryGetProperty(argument.Name, out var rule)) throw new InvalidOperationException("Argumento inesperado em " + name + ": " + InvestigationEvidence.Quoted(argument.Name, 40) + ". " + Accepted(name, schema));
+            ValidateArgument(name, argument.Name, argument.Value, rule, !required.Contains(argument.Name));
         }
-        foreach (var required in schema.GetProperty("required").EnumerateArray())
-            if (!seen.Contains(required.GetString()!) && !(name == "set_dns" && required.GetString() == "servers" && args.TryGetProperty("mode", out var mode) && mode.ValueKind == JsonValueKind.String && mode.GetString() == "automatic"))
-                throw new InvalidOperationException("Argumento obrigatório ausente: " + required.GetString());
+        foreach (var missing in required.Where(r => !seen.Contains(r)))
+            throw new InvalidOperationException("Argumento obrigatório ausente em " + name + ": " + missing + ". " + Accepted(name, schema));
     }
 
-    private static void ValidateArgument(string name, JsonElement value, JsonElement rule)
+    // Serviços que get_services consulta. A mesma lista vai no script e na recusa de argumento (#83).
+    internal static readonly string[] ObservedServices = ["Audiosrv", "AudioEndpointBuilder", "Spooler", "bthserv", "WlanSvc"];
+
+    // O que a ferramenta aceita, no texto que volta ao modelo depois de uma recusa.
+    private static string Accepted(string tool, JsonElement schema)
     {
+        var properties = schema.GetProperty("properties").EnumerateObject().ToArray();
+        if (properties.Length == 0) return tool + " não recebe argumentos; chame com {}" + (tool == "get_services" ? ". Ela já traz " + string.Join(", ", ObservedServices[..^1]) + " e " + ObservedServices[^1] + "." : ".");
+        var required = schema.GetProperty("required").EnumerateArray().Select(r => r.GetString()!).ToHashSet(StringComparer.Ordinal);
+        return tool + " aceita: " + string.Join("; ", properties.Select(p => p.Name + " (" + (required.Contains(p.Name) ? "obrigatório" : "opcional") + ", " + Kind(p.Value) + ")")) + ".";
+    }
+
+    private static string Kind(JsonElement rule) => rule.GetProperty("type").GetString() switch
+    {
+        "string" when rule.TryGetProperty("enum", out var choices) => "um de: " + string.Join(", ", choices.EnumerateArray().Select(c => c.GetString())),
+        "string" => "texto",
+        "integer" => "número inteiro",
+        "array" => "lista" + (rule.TryGetProperty("maxItems", out var max) ? " de até " + max.GetInt32() + " itens" : "") + " de " + Kind(rule.GetProperty("items")),
+        var other => other ?? "?"
+    };
+
+    private static void ValidateArgument(string tool, string name, JsonElement value, JsonElement rule, bool optional)
+    {
+        var where = " em " + tool + ": " + name + ". ";
         switch (rule.GetProperty("type").GetString())
         {
             case "string":
-                if (value.ValueKind != JsonValueKind.String) throw new InvalidOperationException("Argumento de texto inválido: " + name);
+                if (value.ValueKind != JsonValueKind.String) throw new InvalidOperationException("Argumento de texto inválido" + where + "Envie " + Kind(rule) + ", entre aspas.");
                 var text = value.GetString()!;
-                if (text.Length > 1024 || text.Any(char.IsControl)) throw new InvalidOperationException("Argumento de texto inválido: " + name);
-                if (rule.TryGetProperty("enum", out var choices) && !choices.EnumerateArray().Any(choice => choice.GetString() == text)) throw new InvalidOperationException("Valor não permitido: " + name);
+                if (text.Length > 1024 || text.Any(char.IsControl)) throw new InvalidOperationException("Argumento de texto inválido" + where + "Use até 1024 caracteres, sem caracteres de controle.");
+                if (rule.TryGetProperty("enum", out var choices) && !choices.EnumerateArray().Any(choice => choice.GetString() == text))
+                    throw new InvalidOperationException("Valor não permitido para " + name + " em " + tool + ": " + InvestigationEvidence.Quoted(text, 40) + ". Valores aceitos: "
+                        + string.Join(", ", choices.EnumerateArray().Select(c => c.GetString())) + (optional ? "; ou omita " + name + "." : "."));
                 break;
             case "integer":
-                if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out _)) throw new InvalidOperationException("Número inteiro inválido: " + name);
+                if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out _)) throw new InvalidOperationException("Número inteiro inválido" + where + "Envie um número inteiro, sem aspas.");
                 break;
             case "array":
-                if (value.ValueKind != JsonValueKind.Array || rule.TryGetProperty("maxItems", out var max) && value.GetArrayLength() > max.GetInt32()) throw new InvalidOperationException("Lista inválida: " + name);
-                foreach (var item in value.EnumerateArray()) ValidateArgument(name, item, rule.GetProperty("items"));
+                if (value.ValueKind != JsonValueKind.Array || rule.TryGetProperty("maxItems", out var max) && value.GetArrayLength() > max.GetInt32()) throw new InvalidOperationException("Lista inválida" + where + "Envie " + Kind(rule) + ".");
+                foreach (var item in value.EnumerateArray()) ValidateArgument(tool, name, item, rule.GetProperty("items"), false);
                 break;
-            default: throw new InvalidOperationException("Esquema de argumento não permitido: " + name);
+            default: throw new InvalidOperationException("Esquema de argumento não permitido" + where);
         }
     }
 
@@ -310,7 +342,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 observedDevices.Clear();
                 observedDevicesAt = null;
                 if (topic == "system") return Ok((await support.Diagnose(actor, topic, progress, token)).Summary);
-                var classes = topic switch { "camera" => "'Camera','Image'", "audio" => "'AudioEndpoint','MEDIA'", "bluetooth" => "'Bluetooth'", "printer" => "'Printer','PrintQueue'", _ => throw new InvalidOperationException("Categoria de dispositivo não permitida.") };
+                var classes = DeviceClasses(topic);
                 var diagnosis = DriverStoreInventory.ParseDeviceDiagnosis(await SupportService.Powershell(DriverStoreInventory.DeviceDiagnosisScript(classes), token, 75));
                 var devices = diagnosis.Devices;
                 foreach (var device in devices.Where(d => !string.IsNullOrWhiteSpace(d.Id))) observedDevices[device.Id] = (topic, device);
@@ -345,7 +377,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 observedPrintersAt = DateTimeOffset.UtcNow;
                 return Ok(printers);
             case "get_services":
-                var serviceRaw = await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Service -Name Audiosrv,AudioEndpointBuilder,Spooler,bthserv,WlanSvc | Select-Object Name,@{N='Status';E={[string]$_.Status}},@{N='StartType';E={[string]$_.StartType}})", token);
+                var serviceRaw = await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Service -Name " + string.Join(",", ObservedServices) + " | Select-Object Name,@{N='Status';E={[string]$_.Status}},@{N='StartType';E={[string]$_.StartType}})", token);
                 observedServiceDetails.Clear();
                 using (var serviceDoc = JsonDocument.Parse(serviceRaw)) foreach (var entry in serviceDoc.RootElement.EnumerateArray())
                     if (entry.TryGetProperty("Name", out var serviceName) && serviceName.ValueKind == JsonValueKind.String) observedServiceDetails[serviceName.GetString() ?? ""] = entry.Clone();

@@ -114,7 +114,7 @@ public static class HealthRules
         var growing = observedGrowth.Where(growth => growth.Last.StartTime.HasValue).ToList();
         foreach (var growth in growing)
         {
-            var finding = Finding(ProcessKey("process-memory-growing", growth.Last), "memory", "Processo com memória em crescimento persistente", $"{ProcessLabel(growth.Last)}: de {Megabytes(growth.First)} MB para {Megabytes(growth.Last)} MB em {thresholds.ProcessMemorySamples} leituras e {growth.Points:F0} pontos da RAM", "Crescimento observado neste processo; vazamento e carga legítima não distinguidos", "warning", "Pode reduzir a memória disponível e causar lentidão", "Confirme se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção", 0.7);
+            var finding = Finding(ProcessKey("process-memory-growing", growth.Last), "memory", "Processo com memória em crescimento persistente", $"{ProcessLabel(growth.Last)}: de {Megabytes(growth.First)} MB para {Megabytes(growth.Last)} MB em {thresholds.ProcessMemorySamples} leituras e {growth.Points:F0} pontos da RAM", "Crescimento observado neste processo; vazamento e carga legítima não distinguidos", "warning", "Pode reduzir a memória disponível e causar lentidão", "Verifique se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção", 0.7);
             // A ocorrência guarda a subida para saber depois se o processo ainda segura essa memória (#60).
             finding.MemoryGrowth = new(SafeName(growth.Last.Name), growth.First.WorkingSetBytes, growth.Last.WorkingSetBytes);
             findings.Add(finding);
@@ -133,7 +133,7 @@ public static class HealthRules
                     : "Pode ter encerrado, reiniciado ou saído dos 12 maiores consumidores; não é possível concluir a causa";
                 var problem = unreadable ? "Processo que crescia ficou sem identidade confirmada" : "Processo que crescia deixou de ser observado";
                 var outcome = unreadable ? "e o PID segue na lista sem início legível" : "e não aparece na leitura mais recente";
-                findings.Add(Finding(ProcessKey("process-memory-left", growth.Last), "memory", problem, $"{ProcessLabel(growth.Last)} crescia até {Megabytes(growth.Last)} MB {outcome}", cause, "info", "A origem do crescimento anterior continua sem confirmação", "Confirme se o aplicativo ainda funciona antes de considerar o crescimento resolvido", 0.5));
+                findings.Add(Finding(ProcessKey("process-memory-left", growth.Last), "memory", problem, $"{ProcessLabel(growth.Last)} crescia até {Megabytes(growth.Last)} MB {outcome}", cause, "info", "A origem do crescimento anterior continua sem confirmação", "Verifique se o aplicativo ainda funciona antes de considerar o crescimento resolvido", 0.5));
             }
 
         var memory = Tail(3);
