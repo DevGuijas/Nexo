@@ -213,6 +213,7 @@ try
     await DnsRepairChecks.Run(store, admin, Assert);
     await ServiceEventChecks.Run(store, admin, Assert);
     TargetChoiceChecks.Run(Assert);
+    await DriverChoiceChecks.Run(store, admin, Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);

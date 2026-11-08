@@ -517,7 +517,7 @@ public partial class MainWindow : Window
             if (store.Data.AiEnabled)
             {
                 UpdateProgress("Conectando o agente ao executor do Windows…");
-                if (!DriverWorkflow.Matches(prompt) && (!user.Repair || AgentProtocol.RequestsReadOnly(prompt) || !NetworkWorkflow.Matches(prompt)))
+                if (!DriverWorkflow.Matches(prompt) && DriverWorkflow.ResumedRequest(conversation!, DateTime.UtcNow) == null && (!user.Repair || AgentProtocol.RequestsReadOnly(prompt) || !NetworkWorkflow.Matches(prompt)))
                 {
                     try { await LocalModel.EnsureRunning(token); }
                     catch (Exception ex) when (ex is IOException or HttpRequestException or InvalidOperationException or TimeoutException)

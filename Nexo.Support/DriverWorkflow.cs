@@ -31,7 +31,29 @@ public static class DriverWorkflow
         return matches.Count == 1 ? matches[0] : null;
     }
 
-    public static async Task<string> Run(string request, bool readOnly, Func<string, object, Task<JsonElement>> execute, CancellationToken token)
+    internal static readonly TimeSpan DeviceQuestionLifetime = TimeSpan.FromMinutes(30);
+    // O pedido de driver que a última mensagem do usuário retoma (#74), ou null. Retoma só quando a mensagem é apenas o nome
+    // de um dos dispositivos mostrados na pergunta (regra da #70), a pergunta é a última resposta do assistente e foi feita
+    // há no máximo 30 minutos. Qualquer outra mensagem ("deixa pra lá", "oi", uma dúvida, outro pedido) segue o caminho
+    // normal. Retomar não escolhe o alvo: Run consulta o inventário de novo e confere a escolha pelo ID.
+    // Usado pelo AgentService e pela MainWindow, que assim não exige o Ollama numa retomada.
+    public static string? ResumedRequest(Conversation conversation, DateTime nowUtc)
+    {
+        if (conversation.PendingDriverChoice is not { Question.Length: > 0, Request.Length: > 0, Names.Count: > 0 } pending) return null;
+        var age = nowUtc - pending.AskedUtc;
+        if (age < TimeSpan.Zero || age > DeviceQuestionLifetime) return null;
+        var lastUser = conversation.Entries.FindLastIndex(entry => entry.Role == "user");
+        if (lastUser < 1) return null;
+        var lastAssistant = conversation.Entries.FindLastIndex(lastUser - 1, entry => entry.Role == "assistant");
+        if (lastAssistant < 0 || !string.Equals(conversation.Entries[lastAssistant].Text, pending.Question, StringComparison.Ordinal)) return null;
+        return InvestigationEvidence.NamedCandidate(conversation.Entries[lastUser].Text, pending.Names.Select(name => (name, name))) != null ? pending.Request : null;
+    }
+
+    // choice: a resposta do usuário à pergunta de dispositivo (#74). Com ela, o alvo é o dispositivo do inventário
+    // desta consulta que a resposta nomeia pela regra da #70 (InvestigationEvidence.NamedCandidate), identificado pelo ID;
+    // nada da consulta anterior é reaproveitado. askedForDevice recebe os nomes mostrados quando a resposta é a pergunta.
+    public static async Task<string> Run(string request, bool readOnly, Func<string, object, Task<JsonElement>> execute, CancellationToken token,
+        string? choice = null, Action<IReadOnlyList<string>>? askedForDevice = null)
     {
         var category = Category(request);
         if (category == null) return "Para procurar um driver com segurança, diga qual componente apresenta o problema (por exemplo, placa de vídeo, áudio ou Bluetooth). Não alterei nenhum driver.";
@@ -45,22 +67,39 @@ public static class DriverWorkflow
         if (inventoryData.TryGetProperty("Truncated", out var truncated) && truncated.ValueKind == JsonValueKind.True)
             return "O inventário dessa categoria foi truncado. Não consigo escolher um alvo com segurança; informe o nome exato do dispositivo ou encaminhe à TI. Nenhum driver foi alterado.";
         if (devices.GetArrayLength() == 0) return "O Windows não encontrou um dispositivo presente dessa categoria. Não há alvo identificado para atualizar; nenhum driver foi alterado.";
-        if (devices.GetArrayLength() > 1)
+        var target = devices[0];
+        if (devices.GetArrayLength() > 1 || choice != null)
         {
-            var names = devices.EnumerateArray().Take(6).Select(device => Field(device, "Name")).Where(name => name.Length > 0);
-            return "Encontrei mais de um dispositivo possível: " + string.Join("; ", names) + ". Qual deles apresenta o problema? Nenhum driver foi alterado.";
+            var candidates = devices.EnumerateArray().Select(device => (Key: Field(device, "Id"), Name: Field(device, "Name")))
+                .Where(candidate => candidate.Key.Length > 0 && candidate.Name.Length > 0).ToArray();
+            var chosenId = choice == null ? null : InvestigationEvidence.NamedCandidate(choice, candidates);
+            var chosen = chosenId == null ? [] : devices.EnumerateArray().Where(device => Field(device, "Id") == chosenId).ToArray();
+            if (chosen.Length == 1) target = chosen[0];
+            else if (devices.GetArrayLength() == 1)
+                // O dispositivo indicado sumiu entre os turnos: o que restou não foi escolhido pelo usuário.
+                return "O dispositivo que você indicou não aparece mais nesta consulta; agora o Windows lista só " + InvestigationEvidence.Quoted(Field(target, "Name"))
+                    + ". Se o problema é nele, peça de novo a atualização do driver. Nenhum driver foi alterado.";
+            else if (candidates.Length == 0)
+                return "Encontrei mais de um dispositivo possível, mas o Windows não informou nome e identificação deles. Não consigo escolher um alvo com segurança; encaminhe o caso à TI. Nenhum driver foi alterado.";
+            else
+            {
+                var shown = candidates.Select(candidate => candidate.Name).Order(StringComparer.CurrentCultureIgnoreCase).ToArray();
+                askedForDevice?.Invoke(shown.Take(6).ToArray());
+                return "Encontrei mais de um dispositivo possível: " + string.Join("; ", shown.Take(6).Select(name => InvestigationEvidence.Quoted(name)))
+                    + (shown.Length > 6 ? " e mais " + (shown.Length - 6) : "") + ". Qual deles apresenta o problema? "
+                    + InvestigationEvidence.ReplyWithName + " Nenhum driver foi alterado.";
+            }
         }
 
-        var target = devices[0];
         var targetName = Field(target, "Name");
         var targetId = Field(target, "Id");
         var version = Field(target, "DriverVersion");
         var provider = Field(target, "DriverProvider");
         var ids = Ids(target, "HardwareIds").Concat(Ids(target, "CompatibleIds")).ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (targetId.Length == 0 || ids.Count == 0)
-            return "Identifiquei " + (targetName.Length > 0 ? targetName : "o dispositivo") + ", mas o Windows não forneceu IDs suficientes para associar uma oferta de driver com segurança. Nenhum driver foi alterado; encaminhe o caso à TI.";
+            return "Identifiquei " + (targetName.Length > 0 ? InvestigationEvidence.Quoted(targetName) : "o dispositivo") + ", mas o Windows não forneceu IDs suficientes para associar uma oferta de driver com segurança. Nenhum driver foi alterado; encaminhe o caso à TI.";
 
-        var observed = "Identifiquei " + targetName + (version.Length > 0 ? " (driver " + version + (provider.Length > 0 ? ", provedor " + provider : "") + ")" : "");
+        var observed = "Identifiquei " + InvestigationEvidence.Quoted(targetName) + (version.Length > 0 ? " (driver " + version + (provider.Length > 0 ? ", provedor " + provider : "") + ")" : "");
         var inspectPackage = Regex.IsMatch(Normalize(request), @"\b(inf|pacote|repositorio)\b");
         if (inspectPackage)
         {
@@ -150,22 +189,22 @@ public static class DriverWorkflow
             if (!Guid.TryParse(updateId, out _)) return observed + ". A oferta não tem identificação válida. Nenhum driver foi alterado.";
             var title = Field(offer, "Title");
             if (!allowInstall)
-                return observed + ". Encontrei a oferta “" + title + "” para esse hardware na fonte configurada no Windows. Fiz apenas a consulta; nenhum driver foi alterado.";
+                return observed + ". Encontrei a oferta " + InvestigationEvidence.Quoted(title) + " para esse hardware na fonte configurada no Windows. Fiz apenas a consulta; nenhum driver foi alterado.";
 
             token.ThrowIfCancellationRequested();
             var installed = await execute("install_driver_update", new { update_id = updateId });
             if (installed.TryGetProperty("denied", out var denied) && denied.ValueKind == JsonValueKind.True)
-                return observed + ". Você recusou a instalação de “" + title + "”. Nenhum driver foi instalado nesta etapa.";
+                return observed + ". Você recusou a instalação de " + InvestigationEvidence.Quoted(title) + ". Nenhum driver foi instalado nesta etapa.";
             if (!Succeeded(installed))
-                return observed + ". A instalação de “" + title + "” não foi confirmada: " + Error(installed) + " Confira o Gerenciador de Dispositivos antes de tentar novamente ou encaminhe à TI.";
+                return observed + ". A instalação de " + InvestigationEvidence.Quoted(title) + " não foi confirmada: " + Error(installed) + " Confira o Gerenciador de Dispositivos antes de tentar novamente ou encaminhe à TI.";
             if (!installed.TryGetProperty("data", out var result) || result.ValueKind != JsonValueKind.Object)
                 return observed + ". O Windows não retornou verificação suficiente após a instalação. Não considero o problema resolvido; confira o dispositivo e encaminhe à TI.";
             var verification = Field(result, "Verification");
             var afterVersion = Field(result, "AfterVersion");
             if (verification == "pending_restart")
-                return observed + ". O Windows relatou a instalação de “" + title + "”, mas requer reinicialização. Salve seus arquivos, reinicie manualmente e depois teste o dispositivo. A correção ainda não está confirmada.";
+                return observed + ". O Windows relatou a instalação de " + InvestigationEvidence.Quoted(title) + ", mas requer reinicialização. Salve seus arquivos, reinicie manualmente e depois teste o dispositivo. A correção ainda não está confirmada.";
             if (verification == "version_changed")
-                return observed + ". O Windows instalou “" + title + "” e a versão observada passou para " + afterVersion + ". Teste o dispositivo no aplicativo em que percebeu a falha e me diga se funcionou; a resolução funcional ainda não está confirmada.";
+                return observed + ". O Windows instalou " + InvestigationEvidence.Quoted(title) + " e a versão observada passou para " + afterVersion + ". Teste o dispositivo no aplicativo em que percebeu a falha e me diga se funcionou; a resolução funcional ainda não está confirmada.";
             return observed + ". O Windows relatou a instalação, mas a nova versão não foi confirmada. Não considero o problema resolvido; confira o Gerenciador de Dispositivos e encaminhe à TI se necessário.";
         }
     }

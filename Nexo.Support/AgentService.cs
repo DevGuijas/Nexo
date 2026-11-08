@@ -11,8 +11,9 @@ public interface IAgentTools
     Task<string> Execute(string name, JsonElement args, CancellationToken token);
 }
 
-public sealed class AgentService(Store store, IAgentTools tools, HttpClient? client = null, Func<int, CancellationToken, Task>? workflowDelay = null)
+public sealed class AgentService(Store store, IAgentTools tools, HttpClient? client = null, Func<int, CancellationToken, Task>? workflowDelay = null, Func<DateTime>? utcNow = null)
 {
+    private DateTime UtcNow() => (utcNow ?? (() => DateTime.UtcNow))();
     private static readonly HttpClient shared = new() { Timeout = TimeSpan.FromMinutes(3) };
     private TurnFacts facts = new();
     // Linha de fatos do turno em andamento ou do último (#73). Quem exibe uma interrupção (cancelamento, erro) a acrescenta.
@@ -188,9 +189,18 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         var incidentTopics = SupportIntake.ConversationTopics(conversation.Entries.Where(e => e.Role == "user").Reverse().Select(e => e.Text));
         var userConfirmedFunction = AgentProtocol.UserConfirmedFunction(userRequest);
         var observationOnly = System.Text.RegularExpressions.Regex.IsMatch(userRequest, @"(?i)(acompanhar|detecte|detectar).*(conect|cabo)|desconectar e conectar");
-        if (DriverWorkflow.Matches(userRequest))
+        // A pergunta de dispositivo do fluxo de driver (#74) vale só para a mensagem seguinte, e só a retoma a mensagem que é
+        // apenas o nome de um dos dispositivos mostrados (DriverWorkflow.ResumedRequest); qualquer outra descarta o pendente e
+        // segue o caminho normal. A escolha sai do inventário consultado de novo neste turno.
+        var pendingDriver = DriverWorkflow.ResumedRequest(conversation, UtcNow());
+        if (conversation.PendingDriverChoice != null) { conversation.PendingDriverChoice = null; store.Save(); }
+        var driverChoice = pendingDriver != null ? userRequest : null;
+        var driverRequest = pendingDriver ?? (DriverWorkflow.Matches(userRequest) ? userRequest : null);
+        if (driverRequest != null)
         {
-            var answer = await DriverWorkflow.Run(userRequest, readOnly, async (name, values) =>
+            var driverReadOnly = readOnly || AgentProtocol.RequestsReadOnly(driverRequest);
+            IReadOnlyList<string>? asked = null;
+            var answer = await DriverWorkflow.Run(driverRequest, driverReadOnly, async (name, values) =>
             {
                 token.ThrowIfCancellationRequested(); progress.Report(ToolCatalog.Label(name));
                 var parameters = JsonSerializer.SerializeToElement(values);
@@ -204,8 +214,15 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 record(ToolCatalog.Label(name), output); AuditTool("Fluxo de driver", name, output, parameters, driverClock.ElapsedMilliseconds); store.Save();
                 token.ThrowIfCancellationRequested();
                 return JsonSerializer.Deserialize<JsonElement>(output);
-            }, token);
-            return Finish(answer);
+            }, token, driverChoice, names => asked = names);
+            var final = Finish(answer);
+            // A pergunta guardada é o texto exato da resposta: só ela, como última resposta do assistente, abre a retomada.
+            if (asked != null)
+            {
+                conversation.PendingDriverChoice = new PendingDriverChoice { Request = driverRequest, Names = [.. asked], Question = final, AskedUtc = UtcNow() };
+                store.Save();
+            }
+            return final;
         }
         var initialObserved = false;
         var initialTopic = SupportIntake.InitialTopic(userRequest);
