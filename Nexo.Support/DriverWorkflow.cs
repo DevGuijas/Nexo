@@ -130,12 +130,16 @@ public static class DriverWorkflow
                     if (!installedVendor.TryGetProperty("data", out var installedData) || installedData.ValueKind != JsonValueKind.Object)
                         return observed + ". O instalador NVIDIA não retornou verificação suficiente. Não considero a correção concluída.";
                     var audioNote = new[] { "warning", "audioTest", "audioInfo" }.Select(key => Field(installedVendor, key)).FirstOrDefault(note => note.Length > 0) ?? "";
+                    // Só a versão que corresponde à oferta é dada como instalada; versão diferente chega como erro com installationReported.
+                    var installerWarning = Field(installedVendor, "installerWarning");
                     return Field(installedData, "Verification") switch
                     {
-                        "version_changed" => observed + ". Instalei o driver NVIDIA " + offeredVersion + " e o Windows agora informa a versão " + Field(installedData, "AfterVersion") + ". Teste a placa de vídeo no aplicativo em que percebeu a falha; a resolução funcional ainda precisa da sua confirmação.",
-                        "pending_restart" => observed + ". O instalador NVIDIA solicitou reinicialização. Salve seu trabalho, reinicie manualmente e teste a placa de vídeo. A correção ainda não está confirmada.",
-                        _ => observed + ". O instalador NVIDIA terminou, mas o Windows não confirmou a nova versão. Não considero a correção concluída; confira o Gerenciador de Dispositivos ou encaminhe à TI."
-                    } + (audioNote.Length == 0 ? "" : " " + audioNote);
+                        "expected_version_confirmed" => observed + ". Instalei o driver NVIDIA " + offeredVersion + " e o Windows agora informa a versão " + Field(installedData, "AfterVersion") + ", que corresponde a essa oferta. Teste a placa de vídeo no aplicativo em que percebeu a falha; a resolução funcional ainda precisa da sua confirmação.",
+                        "pending_restart" => observed + (Field(installedData, "RestartRequestedBy") == "windows"
+                            ? ". O Windows pediu reinicialização para concluir a instalação do driver NVIDIA " + offeredVersion + " (a placa está com código 14)."
+                            : ". O instalador NVIDIA solicitou reinicialização.") + " Salve seu trabalho, reinicie manualmente e teste a placa de vídeo. A correção ainda não está confirmada.",
+                        _ => observed + ". O instalador NVIDIA terminou, mas o Windows não confirmou a versão oferecida. Não considero a correção concluída; confira o Gerenciador de Dispositivos ou encaminhe à TI."
+                    } + (installerWarning.Length == 0 ? "" : " " + installerWarning) + (audioNote.Length == 0 ? "" : " " + audioNote);
                 }
                 return observed + ". A fonte de atualizações configurada no Windows não ofereceu driver compatível agora. Nenhuma alteração foi feita. Se o problema continuar, descreva o sintoma ou encaminhe este atendimento à TI.";
             }

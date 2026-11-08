@@ -105,7 +105,7 @@ internal static class AgentChecks
             "get_hardware_inventory" => nvidiaInventory,
             "scan_driver_updates" => WindowsTools.Ok("[]"),
             "find_official_nvidia_driver" => WindowsTools.Ok(new { Available = true, DriverId = "282412", Version = "621.01", Target = "NVIDIA GeForce RTX 5060 Ti" }),
-            "install_official_nvidia_driver" => WindowsTools.Ok(new { Verification = "version_changed", AfterVersion = "32.0.15.2101" }),
+            "install_official_nvidia_driver" => WindowsTools.Ok(new { Verification = "expected_version_confirmed", AfterVersion = "32.0.16.2101" }),
             _ => throw new Exception("Ferramenta inesperada")
         });
         var nvidiaAnswer = await Run(videoRequest, nvidiaFallback);
