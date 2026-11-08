@@ -160,7 +160,7 @@ Tutorial completo: [compilação, execução, publicação e evolução da IA](d
 
 Perguntas detalhadas sobre tecnologias, abertura do código, compilação, execução, segurança e limites: [perguntas e respostas sobre o Nexo](docs/PERGUNTAS-E-RESPOSTAS.md).
 
-Visão do código, fronteiras de autorização e limitações: [arquitetura e limites](docs/ARQUITETURA-E-LIMITES.md). Resultados de validação: [revisão do núcleo em 16/10/2026](docs/RELATORIO-TECNICO-VALIDACAO-2026-10-16.md) e [interface/hardware em 21/10/2026](docs/VALIDACAO-HARDWARE-2026-10-21.md).
+Visão do código, fronteiras de autorização e limitações: [arquitetura e limites](docs/ARQUITETURA-E-LIMITES.md). Resultados de validação: [revisão do núcleo em 16/10/2026](docs/RELATORIO-TECNICO-VALIDACAO-2026-10-16.md), [interface/hardware em 21/10/2026](docs/VALIDACAO-HARDWARE-2026-10-21.md) e [ensaio real de instalação NVIDIA em 07/11/2026](docs/ENSAIO-NVIDIA-2026-11-07.md).
 
 ```powershell
 dotnet build Nexo.Support/Nexo.Support.csproj -c Release

@@ -38,6 +38,8 @@ Para as sondagens, os testes simulam interface isolada, gateway sem resposta ICM
 
 Foram executadas leituras reais somente de CPU, memória, discos, serviços, interfaces e eventos. Essas leituras mostram que os sensores e canais funcionam neste Windows, sem demonstrar uma falha ou recuperação real. Os sete cenários de laboratório com alteração deliberada e a avaliação de precisão/recall em várias máquinas permanecem pendentes. Não houve treinamento ou ajuste dos pesos do modelo.
 
+Em 07/11/2026 houve um ensaio real de atualização do driver NVIDIA em PC físico, fora deste protocolo. Ele não substitui o cenário 6, porque o driver anterior funcionava e não foi usada VM. Resultado, achados e limites estão em [ENSAIO-NVIDIA-2026-11-07.md](ENSAIO-NVIDIA-2026-11-07.md).
+
 ## Indicadores para o TCC
 
 Por cenário, registre tempo até detecção, verdade da falha, alertas falsos, hipótese proposta, autorização, resultado do executor, teste funcional e necessidade de encaminhamento. Calcule precisão e recall somente após rotular casos reais; a suíte simulada mede comportamento do código e não deve entrar como resultado de eficácia no hardware.
