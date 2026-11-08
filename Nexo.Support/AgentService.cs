@@ -14,6 +14,9 @@ public interface IAgentTools
 public sealed class AgentService(Store store, IAgentTools tools, HttpClient? client = null, Func<int, CancellationToken, Task>? workflowDelay = null)
 {
     private static readonly HttpClient shared = new() { Timeout = TimeSpan.FromMinutes(3) };
+    private TurnFacts facts = new();
+    // Linha de fatos do turno em andamento ou do último (#73). Quem exibe uma interrupção (cancelamento, erro) a acrescenta.
+    public string TurnFactsLine => facts.Line();
     public const string DefaultModel = "qwen3:8b";
     private const string SystemPrompt = """
         Você é Nexo, um agente de suporte que OPERA este computador Windows por ferramentas.
@@ -142,10 +145,11 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
     public async Task<string> Run(Account actor, Conversation conversation, IProgress<string> progress, Action<string, string> record, CancellationToken token)
     {
         store.Require(actor, _ => true);
+        facts = new TurnFacts();
         if (!store.Data.AiEnabled) throw new InvalidOperationException("Ative o agente local nas configurações.");
         var history = conversation.AgentHistory;
         if (history.Count == 0)
-            history.AddRange(conversation.Entries.Where(e => e.Role is "user" or "assistant").TakeLast(12).Select(e => new AgentMessage { role = e.Role, content = e.Text }));
+            history.AddRange(conversation.Entries.Where(e => e.Role is "user" or "assistant").TakeLast(12).Select(e => new AgentMessage { role = e.Role, content = e.Role == "assistant" ? TurnFacts.ForHistory(e.Text) : e.Text }));
         else history.Add(new AgentMessage { role = "user", content = conversation.Entries.Last(e => e.Role == "user").Text });
         // Drop whole previous turns, so no tool result is orphaned by truncation.
         while (history.Count > 50)
@@ -193,7 +197,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 history.Add(new AgentMessage { role = "assistant", tool_calls = JsonSerializer.SerializeToElement(new[] { new { function = new { name, arguments = parameters } } }) });
                 var driverClock = Stopwatch.StartNew();
                 string output;
-                try { output = ValidToolResult(await tools.Execute(name, parameters, token)); }
+                try { output = ValidToolResult(await ExecuteTool(name, parameters, token)); }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex) { output = JsonSerializer.Serialize(new { success = false, error = ex.Message }); }
                 history.Add(new AgentMessage { role = "tool", tool_name = name, content = output });
@@ -230,7 +234,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 history.Add(new AgentMessage { role = "assistant", tool_calls = JsonSerializer.SerializeToElement(new[] { new { function = new { name, arguments = parameters } } }) });
                 var guidedClock = Stopwatch.StartNew();
                 string output;
-                try { output = ValidToolResult(await tools.Execute(name, parameters, token)); }
+                try { output = ValidToolResult(await ExecuteTool(name, parameters, token)); }
                 catch (OperationCanceledException)
                 {
                     history.Add(new AgentMessage { role = "tool", tool_name = name, content = JsonSerializer.Serialize(new { success = false, cancelled = true, message = "Operação cancelada. Consulte o estado antes de continuar." }) });
@@ -249,6 +253,10 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         var reconnectAttempted = false;
         string? control = observationOnly ? "O usuário pediu acompanhamento de desconexão/reconexão. Identifique o alvo por consulta e chame wait_for_reconnect; a ferramenta orienta o usuário e observa o evento. Estado PnP OK não atende esse pedido nem comprova funcionamento. Só pergunte se faltar informação para distinguir os alvos observados." : null;
         var failedCalls = new HashSet<string>();
+        // Alterações pedidas neste turno que não chegaram ao executor (barradas por uma trava, fora do escopo ou acima do limite)
+        // e que não foram concluídas depois com a mesma chamada (#73). Enquanto houver alguma, o texto do modelo não vira a
+        // resposta final: ele pode afirmar, com qualquer frase, uma alteração que não aconteceu. A resposta sai dos fatos do turno.
+        var refusedMutations = new HashSet<string>();
         // Alterações barradas porque o alvo ainda não apareceu em nenhuma consulta do turno. No 2º turno o histórico já traz o ID,
         // e o modelo pode pedir a alteração antes de consultar de novo: a primeira barrada assim não conta como falha, para que a
         // mesma chamada, depois da consulta, seja conferida pela trava em vez de cair na repetição. A segunda conta.
@@ -293,7 +301,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 // Tool calls are for observing/acting, not a mandatory format for conversation.
                 if ((!observationOnly || reconnectAttempted) && AgentProtocol.Validate(content.Contains('?') ? "ask_user" : "finish_support", JsonSerializer.SerializeToElement(new { reason = "manual_test" }), content, readOnly) == null
                     && evidence.ValidateStatement(content, userConfirmedFunction) == null)
-                    return Finish(content);
+                    return Finish(ModelAnswer(content));
                 // A narrated intention is not a completed operation. This is controller feedback,
                 // never a fabricated user message or consent to change Windows settings.
                 if (!string.IsNullOrWhiteSpace(content)) history.Add(new AgentMessage { role = "assistant", content = content });
@@ -319,6 +327,15 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     : "Ferramenta desconhecida ou indisponível neste escopo. Nenhuma chamada desta resposta foi executada.";
                 history.Add(new AgentMessage { role = "assistant", content = content, tool_calls = calls });
                 history.Add(new AgentMessage { role = "tool", tool_name = unavailableName, content = JsonSerializer.Serialize(new { success = false, error }) });
+                if (ToolCatalog.IsMutation(unavailableName))
+                {
+                    refusedMutations.Add(unavailableName + ":unavailable");
+                    foreach (var call in calls.Value.EnumerateArray().Where(c => c.GetProperty("function").GetProperty("name").GetString() == unavailableName))
+                    {
+                        var refusedArguments = call.GetProperty("function").GetProperty("arguments");
+                        facts.Record(InvestigationEvidence.ChangeKey(unavailableName, refusedArguments), evidence.ChangeDescription(unavailableName, refusedArguments), ChangeState.Refused);
+                    }
+                }
                 if (++protocolRetries > 3) return Finish(evidence.Report("A IA insistiu em uma ferramenta indisponível. Interrompi as ações; encaminhe os resultados a uma pessoa de suporte."));
                 control = "Controle de execução: " + error;
                 continue;
@@ -346,6 +363,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             string? changeOutcome = null;
             string? networkFailure = null;
             string? failedMutation = null;
+            string? failedKey = null;
             foreach (var call in calls.Value.EnumerateArray())
             {
                 var function = call.GetProperty("function"); var name = function.GetProperty("name").GetString() ?? "";
@@ -360,7 +378,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     if (error == null) error = evidence.ValidateStatement(text, userConfirmedFunction);
                     result = JsonSerializer.Serialize(new { success = error == null, error });
                     history.Add(new AgentMessage { role = "tool", tool_name = name, content = result });
-                    if (error == null) return Finish(text);
+                    if (error == null) return Finish(ModelAnswer(text));
                     if (++protocolRetries > 3) return Finish(evidence.Report("A IA não conseguiu selecionar a próxima etapa. Interrompi a tentativa; os resultados acima podem orientar a continuação do atendimento."));
                     control = "Controle de execução: " + error;
                     continue;
@@ -408,7 +426,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     if (failedCalls.Contains(signature)) { repeatedFailure = true; block = (ControlBlock.RepeatedFailure, null); throw new InvalidOperationException("Esta chamada já falhou ou foi recusada neste turno. Repetição bloqueada; revise o resultado anterior e não prometa uma nova consulta idêntica."); }
                     progress.Report(ToolCatalog.Label(name));
                     dispatched = true;
-                    result = ValidToolResult(await tools.Execute(name, arguments, token));
+                    result = ValidToolResult(await ExecuteTool(name, arguments, token));
                     if (name == "wait_for_reconnect") reconnectAttempted = true;
                     protocolRetries = 0;
                 }
@@ -456,11 +474,16 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                         networkFailure = "A alteração de rede não foi concluída. " + (root.TryGetProperty("error", out var err) ? err.GetString() : "Confira o resultado acima.") + "\n\n" +
                             (restored ? "A configuração anterior foi restaurada e conferida." : changed ? "A restauração automática não foi confirmada. O erro e o caminho do backup estão no cartão acima; é necessário conferir a configuração antes de tentar outra mudança." : "A operação foi interrompida antes de alterar a configuração.");
                     }
+                    if (ToolCatalog.IsMutation(name))
+                    {
+                        if (root.TryGetProperty("success", out var reached) && reached.ValueKind == JsonValueKind.True) refusedMutations.Remove(signature);
+                        else if (!dispatched) { refusedMutations.Add(signature); facts.Record(InvestigationEvidence.ChangeKey(name, arguments), evidence.ChangeDescription(name, arguments), ChangeState.Refused); }
+                    }
                     if (outcome.RootElement.TryGetProperty("denied", out var denied) && denied.ValueKind == JsonValueKind.True) deniedByUser = true;
                     if (outcome.RootElement.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False)
                     {
                         if (!awaitingEvidence) failedCalls.Add(signature);
-                        if (ToolCatalog.IsMutation(name) && dispatched) failedMutation = name;
+                        if (ToolCatalog.IsMutation(name) && dispatched) { failedMutation = name; failedKey = InvestigationEvidence.ChangeKey(name, arguments); }
                     }
                     else if (name is "enable_network_adapter" or "set_dns" or "set_ipv4") failedCalls.RemoveWhere(s => s.StartsWith("get_network:"));
                 }
@@ -491,7 +514,11 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             // Depois de um pedido de reinício, a resposta repete o que os eventos do serviço mostraram (#58).
             var restartEvents = restartedService != null && serviceEvents.TryGetValue(restartedService, out var note) ? " " + note : "";
             if (deniedByUser) return Finish("Você recusou a alteração proposta. Essa alteração não foi executada e parei esta etapa. Os resultados já obtidos estão registrados acima; a resolução do problema ainda não foi confirmada." + restartEvents);
-            if (failedMutation != null) return Finish("A alteração " + failedMutation + " não foi concluída. Parei esta etapa; confira o erro no cartão do resultado. O problema ainda não foi resolvido." + restartEvents + " Se persistir, encaminhe os resultados a uma pessoa de suporte.");
+            // Sem confirmação do resultado (#73), a resposta não diz que nada aconteceu: o Windows pode ter sido alterado.
+            if (failedMutation != null) return Finish((facts.State(failedKey!) == ChangeState.Unconfirmed
+                    ? "A conclusão d" + InvestigationEvidence.Describe(failedMutation) + " não foi confirmada: o Windows pode ter sido alterado. Parei esta etapa; confira o cartão do resultado e o estado no Windows antes de tentar de novo."
+                    : Capitalized(InvestigationEvidence.Describe(failedMutation)) + " não foi concluída. Parei esta etapa; confira o erro no cartão do resultado.")
+                + " O problema ainda não foi resolvido." + restartEvents + " Se persistir, encaminhe os resultados a uma pessoa de suporte.");
             if (functionalCheck != null) return Finish((changeOutcome ?? "A ferramenta retornou sucesso para a operação solicitada.") + restartEvents + " O funcionamento no aplicativo ainda não foi confirmado. Agora " + functionalCheck + ". Funcionou? Se continuar com problema, me diga o que acontece para investigarmos a próxima hipótese.");
             if (networkRecoveryNeeded)
             {
@@ -504,7 +531,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     history.Add(new AgentMessage { role = "assistant", tool_calls = JsonSerializer.SerializeToElement(new[] { new { function = new { name, arguments = parameters } } }) });
                     var verificationClock = Stopwatch.StartNew();
                     string output;
-                    try { output = ValidToolResult(await tools.Execute(name, parameters, token)); }
+                    try { output = ValidToolResult(await ExecuteTool(name, parameters, token)); }
                     catch (OperationCanceledException) { throw; }
                     catch (Exception ex) { output = JsonSerializer.Serialize(new { success = false, error = ex.Message }); }
                     history.Add(new AgentMessage { role = "tool", tool_name = name, content = output });
@@ -519,7 +546,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 var stopped = evidence.Report(lockStop ? "" : evidence.HasFindings
                     ? "Se o problema continuar, me diga o que ainda falha e desde quando, para direcionarmos a próxima verificação."
                     : "Me diga qual aplicativo ou atividade ainda apresenta o problema, para direcionarmos a próxima verificação.");
-                history.Add(new AgentMessage { role = "assistant", content = stopped }); store.Save(); return stopped;
+                return Finish(stopped);
             }
             // O nome não resolveu: o executor testa TCP por IP numérico para separar DNS de conectividade (#63, cenário 3),
             // em vez de depender do modelo, que no ensaio parou no teste do nome.
@@ -533,9 +560,29 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         }
         return Finish(evidence.Report("Cheguei ao limite de etapas desta investigação. Os resultados acima podem orientar o próximo teste ou o encaminhamento à TI."));
 
+        // O texto do modelo só é a resposta final quando nenhuma alteração pedida neste turno ficou sem chegar ao executor.
+        // Havendo alguma, a resposta é montada pelo Nexo: o que as consultas mostraram, as alterações concluídas e, pela trava,
+        // o que não foi feito e por quê. Reconhecer as frases do modelo não basta (#73): "a fila da X foi limpa" escapava.
+        string ModelAnswer(string text) => refusedMutations.Count == 0 ? text : evidence.Report("");
+        // Toda resposta final do turno passa por aqui e termina com a linha de fatos (#73, opção A).
         string Finish(string text)
         {
-            history.Add(new AgentMessage { role = "assistant", content = text }); store.Save(); return text;
+            text = TurnFacts.Compose(text, facts.Line());
+            history.Add(new AgentMessage { role = "assistant", content = TurnFacts.ForHistory(text) }); store.Save(); return text;
+        }
+        // Toda chamada ao executor passa por aqui: o resultado de cada alteração entra na linha de fatos.
+        async Task<string> ExecuteTool(string name, JsonElement arguments, CancellationToken cancel)
+        {
+            if (!ToolCatalog.IsMutation(name)) return await tools.Execute(name, arguments, cancel);
+            var key = InvestigationEvidence.ChangeKey(name, arguments);
+            var description = evidence.ChangeDescription(name, arguments);
+            string output;
+            // Enviada ao executor, uma exceção ou um cancelamento não dizem se algo mudou: fica "sem confirmação", a menos que
+            // o executor marque que a alteração nem começou.
+            try { output = await tools.Execute(name, arguments, cancel); }
+            catch (Exception ex) { facts.Record(key, description, TurnFacts.Thrown(ex)); throw; }
+            facts.Record(key, description, TurnFacts.Classify(name, output));
+            return output;
         }
         // Consulta feita pelo controlador, sem o modelo: aparece no histórico como uma chamada com o seu resultado.
         async Task<string> ControllerCall(string stage, string name, JsonElement parameters)
@@ -544,7 +591,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             history.Add(new AgentMessage { role = "assistant", tool_calls = JsonSerializer.SerializeToElement(new[] { new { function = new { name, arguments = parameters } } }) });
             var clock = Stopwatch.StartNew();
             string output;
-            try { output = ValidToolResult(await tools.Execute(name, parameters, token)); }
+            try { output = ValidToolResult(await ExecuteTool(name, parameters, token)); }
             catch (OperationCanceledException) { throw; }
             catch (Exception ex) { output = JsonSerializer.Serialize(new { success = false, error = ex.Message }); }
             history.Add(new AgentMessage { role = "tool", tool_name = name, content = output });
@@ -595,6 +642,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 "enable_device" or "restart_device" when args.TryGetProperty("device_id", out var device) && device.ValueKind == JsonValueKind.String => evidence.DeviceTopic(device.GetString() ?? ""),
                 _ => null
             };
+        static string Capitalized(string text) => text.Length == 0 ? text : char.ToUpperInvariant(text[0]) + text[1..];
         static string? Text(JsonElement source, string key) => source.ValueKind == JsonValueKind.Object && source.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
         void AuditTool(string stage, string name, string output, JsonElement parameters, long elapsedMs)
         {

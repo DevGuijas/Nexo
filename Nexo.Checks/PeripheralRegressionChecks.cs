@@ -57,7 +57,8 @@ internal static class PeripheralRegressionChecks
                     [Call("get_services", new { }), Call("restart_service", new { service = "Audiosrv" })],
                     "Falha da ferramenta, prazo excedido ou acesso negado: parar sem declarar reparo",
                     (s, answer, model) => s.Reads == 2 && s.EventReads == 1 && s.Attempts == 1 && s.Applied == 0 && model.Calls == 2
-                        && answer.Contains("não foi concluída") && !answer.Contains("Funcionou?"), assert);
+                        // Depois da autorização, sem o executor afirmar que nada mudou, o resultado fica sem confirmação (#73).
+                        && answer.Contains("não foi confirmada") && answer.EndsWith("Sem confirmação do resultado: reinício do serviço “Audiosrv” — confira antes de continuar.") && !answer.Contains("Funcionou?"), assert);
 
             await Check("audio-success", "Estou sem som em todos os aplicativos.",
                 [Call("get_services", new { }), Call("restart_service", new { service = "Audiosrv" })],

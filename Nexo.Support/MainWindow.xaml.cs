@@ -75,9 +75,11 @@ public partial class MainWindow : Window
         try { using var local = new OperationalStore(store.Root); return HealthReportPresentation.FromStore(local, healthSettings.Thresholds()); }
         catch (Exception ex) { return "O relatório de saúde local também está indisponível: " + ex.Message + ". O histórico de conversas permanece separado."; }
     }
+    private string? interruptedFacts;
+    private string InterruptedFacts() { var line = interruptedFacts; interruptedFacts = null; return line == null ? "" : "\n\n" + line; }
     private static string AnswerPresentation(string answer)
     {
-        var normalized = AgentProtocol.Normalize(answer);
+        var normalized = AgentProtocol.Normalize(TurnFacts.Body(answer));
         return normalized.Contains("nao consegui") || normalized.Contains("nao conseguiu selecionar") || normalized.Contains("resposta invalida")
             || normalized.Contains("limite de etapas") || normalized.Contains("interrompi as acoes")
             || normalized.Contains("nao foi concluida") || normalized.Contains("nao foi confirmada")
@@ -531,9 +533,11 @@ public partial class MainWindow : Window
                 try { answer = await agent.Run(user, conversation!, events, (label, result) => AddEntry("tool", label + "\n" + result), token); }
                 catch (Exception ex) when (ex is HttpRequestException or TimeoutException)
                 {
-                    AddEntry("assistant", "O agente Ollama ficou indisponível: " + ex.Message + "\n\n" + OfflineHealthReport(), "result", turnClock.ElapsedMilliseconds);
+                    AddEntry("assistant", "O agente Ollama ficou indisponível: " + ex.Message + "\n\n" + OfflineHealthReport() + "\n\n" + agent.TurnFactsLine, "result", turnClock.ElapsedMilliseconds);
                     return;
                 }
+                // Interrompido (cancelamento, erro): a mensagem de interrupção também diz o que o Nexo alterou no turno (#73).
+                catch { interruptedFacts = agent.TurnFactsLine; throw; }
                 AddEntry("assistant", answer, AnswerPresentation(answer), turnClock.ElapsedMilliseconds);
                 return;
             }
@@ -566,10 +570,10 @@ public partial class MainWindow : Window
         ProgressPanel.Visibility = Visibility.Visible;
         ProgressText.Text = "ACOMPANHAMENTO";
         try { await action(operation.Token); UpdateProgress("Resultado disponível no chat."); }
-        catch (OperationCanceledException) when (operation.IsCancellationRequested) { AddEntry("assistant", "Atendimento interrompido. As ações já concluídas permanecem registradas acima; cancelar não desfaz uma correção concluída.", "error"); UpdateProgress("Atendimento interrompido."); }
-        catch (OperationCanceledException) { AddEntry("assistant", "A etapa expirou ou foi interrompida antes de confirmar o resultado. Confira os resultados registrados acima antes de tentar novamente ou encaminhar à TI.", "error"); UpdateProgress("Etapa não concluída: resultado não confirmado."); store.Log(user, "Operação interrompida sem cancelamento do usuário"); }
-        catch (Exception ex) { AddEntry("assistant", "Não consegui concluir esta etapa. " + ex.Message + "\n\nVocê pode tentar novamente ou gerar um encaminhamento para a TI.", "error"); UpdateProgress("Etapa não concluída."); store.Log(user, "Operação não concluída: " + ex.GetType().Name); }
-        finally { busy = false; operation.Dispose(); operation = null; BusyBar.Visibility = Visibility.Collapsed; CancelButton.Visibility = Visibility.Collapsed; ProgressPanel.Visibility = Visibility.Collapsed; CancelButton.IsEnabled = true; SendButton.IsEnabled = Navigation.IsEnabled = NewChatButton.IsEnabled = Composer.IsEnabled = true; RefreshChatActions(); if (quickReplyPanel != null) quickReplyPanel.IsEnabled = true; ChatScroll.ScrollToEnd(); }
+        catch (OperationCanceledException) when (operation.IsCancellationRequested) { AddEntry("assistant", "Atendimento interrompido. As ações já concluídas permanecem registradas acima; cancelar não desfaz uma correção concluída." + InterruptedFacts(), "error"); UpdateProgress("Atendimento interrompido."); }
+        catch (OperationCanceledException) { AddEntry("assistant", "A etapa expirou ou foi interrompida antes de confirmar o resultado. Confira os resultados registrados acima antes de tentar novamente ou encaminhar à TI." + InterruptedFacts(), "error"); UpdateProgress("Etapa não concluída: resultado não confirmado."); store.Log(user, "Operação interrompida sem cancelamento do usuário"); }
+        catch (Exception ex) { AddEntry("assistant", "Não consegui concluir esta etapa. " + ex.Message + "\n\nVocê pode tentar novamente ou gerar um encaminhamento para a TI." + InterruptedFacts(), "error"); UpdateProgress("Etapa não concluída."); store.Log(user, "Operação não concluída: " + ex.GetType().Name); }
+        finally { interruptedFacts = null; busy = false; operation.Dispose(); operation = null; BusyBar.Visibility = Visibility.Collapsed; CancelButton.Visibility = Visibility.Collapsed; ProgressPanel.Visibility = Visibility.Collapsed; CancelButton.IsEnabled = true; SendButton.IsEnabled = Navigation.IsEnabled = NewChatButton.IsEnabled = Composer.IsEnabled = true; RefreshChatActions(); if (quickReplyPanel != null) quickReplyPanel.IsEnabled = true; ChatScroll.ScrollToEnd(); }
     }
     private void CancelClick(object sender, RoutedEventArgs e)
     {

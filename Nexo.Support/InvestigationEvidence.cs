@@ -306,7 +306,8 @@ public sealed class InvestigationEvidence
         }
         if (tests.Any(t => t.Tcp) && tests.Any(t => !t.Tcp)) lines.Add("Há conectividade parcial: os testes não permitem afirmar que toda a internet está indisponível ou que todos os serviços funcionam.");
         if (tests.Length > 0 && tests.All(t => t.Tcp)) lines.Add("Os destinos testados responderam. Confirme também o aplicativo em que percebeu o problema.");
-        lines.Add(changes.Count == 0 ? "Nenhuma alteração concluída pelo Nexo foi registrada neste turno." : "Operações concluídas neste turno: " + string.Join("; ", changes) + ".");
+        // Para o usuário, as alterações estão na linha de fatos do fim da resposta (#73), que é a fonte única.
+        if (!forUser) lines.Add(changes.Count == 0 ? "Nenhuma alteração concluída pelo Nexo foi registrada neste turno." : "Operações concluídas neste turno: " + string.Join("; ", changes) + ".");
         if (!forUser)
         {
             if (failedTools.Count > 0) lines.Add("Ferramentas sem conclusão bem sucedida: " + string.Join(", ", failedTools.Order()) + ". Confira os cartões de resultado para a causa.");
@@ -314,7 +315,8 @@ public sealed class InvestigationEvidence
         else
         {
             // Para o usuário, em português; a etapa barrada ou já falha é explicada pela trava logo abaixo.
-            var unexplained = failedTools.Where(tool => !blocks.Any(b => b.Name == tool && b.Kind is ControlBlock.Topic or ControlBlock.RepeatedFailure or ControlBlock.UninformedDnsServers)).Order().ToArray();
+            // As alterações não concluídas também já estão na linha de fatos; aqui ficam as consultas.
+            var unexplained = failedTools.Where(tool => !ToolCatalog.IsMutation(tool) && !blocks.Any(b => b.Name == tool && b.Kind is ControlBlock.Topic or ControlBlock.RepeatedFailure or ControlBlock.UninformedDnsServers)).Order().ToArray();
             if (unexplained.Length > 0) lines.Add("Não terminaram com sucesso: " + string.Join("; ", unexplained.Select(Describe)) + ". Confira os cartões de resultado para a causa.");
             lines.AddRange(blocks.Take(3).Select(BlockExplanation));
         }
@@ -345,7 +347,52 @@ public sealed class InvestigationEvidence
             + (forms.Any(form => form.Count() > 1) ? " Ofertas com o mesmo nome não se distinguem pela resposta; para essas, encaminhe à TI." : "");
     }
 
-    private static string Describe(string name) => name switch
+    // Identidade de uma alteração na linha de fatos (#73): a ferramenta e o alvo canônico, não o texto da descrição, que muda
+    // quando uma consulta traz o nome no lugar do ID.
+    public static string ChangeKey(string name, JsonElement args)
+    {
+        string Target(string key) => Text(args, key) is { } value ? value.ToUpperInvariant() : "";
+        var target = name switch
+        {
+            "clear_print_queue" => Target("printer_name"),
+            "restart_service" => Target("service"),
+            "enable_device" or "enable_camera" or "restart_device" => Target("device_id"),
+            "install_driver_update" => Target("update_id"),
+            "install_official_nvidia_driver" => Target("driver_id"),
+            "set_dns" or "set_ipv4" or "enable_network_adapter" => args.ValueKind == JsonValueKind.Object && args.TryGetProperty("interface_index", out var index) ? index.GetRawText() : "",
+            _ => ""
+        };
+        return name + "|" + target;
+    }
+
+    // Como uma alteração aparece na linha de fatos (#73): o que muda e em quê, com o nome vindo de ferramenta entre aspas.
+    public string ChangeDescription(string name, JsonElement args)
+    {
+        string? Argument(string key) => Text(args, key);
+        string Interface() => args.ValueKind == JsonValueKind.Object && args.TryGetProperty("interface_index", out var index) && index.ValueKind == JsonValueKind.Number
+            && index.TryGetInt32(out var number) ? " da interface " + number : "";
+        string Device(string key) => Argument(key) is { } id ? " " + Quoted(observedDevices.TryGetValue(id, out var device) && device.Name.Length > 0 ? device.Name : id) : "";
+        return name switch
+        {
+            "clear_print_queue" => "limpeza da fila" + (Argument("printer_name") is { } printer ? " de " + Quoted(printer) : " de impressão"),
+            "restart_service" => "reinício do serviço" + (Argument("service") is { } service ? " " + Quoted(service) : ""),
+            "enable_device" => "habilitação do dispositivo" + Device("device_id"),
+            "enable_camera" => "habilitação da câmera" + Device("device_id"),
+            "restart_device" => "reinício do dispositivo" + Device("device_id"),
+            "allow_camera" => "permissão de acesso à câmera",
+            "flush_dns" => "limpeza do cache DNS",
+            "set_dns" => (Argument("mode") == "automatic" ? "DNS automático" : "DNS manual" + (args.ValueKind == JsonValueKind.Object && args.TryGetProperty("servers", out var servers)
+                && servers.ValueKind == JsonValueKind.Array ? " " + string.Join(", ", servers.EnumerateArray().Where(v => v.ValueKind == JsonValueKind.String).Select(v => Quoted(v.GetString() ?? "", 45)).Take(MaxListed)) : "")) + Interface(),
+            "set_ipv4" => "configuração do IPv4" + Interface(),
+            "enable_network_adapter" => "ativação" + (Interface() is { Length: > 0 } adapter ? adapter : " da interface de rede"),
+            "install_driver_update" => "instalação do driver" + (Argument("update_id") is { } update ? " " + Quoted(observedUpdates.TryGetValue(update, out var offer) && offer.Title.Length > 0 ? offer.Title : update) : ""),
+            "install_official_nvidia_driver" => "instalação do driver NVIDIA" + (Argument("driver_id") is { } driver ? " " + Quoted(driver) : ""),
+            "download_nvidia_app" => "download do aplicativo da NVIDIA",
+            _ => ToolCatalog.Label(name).TrimEnd('…').ToLowerInvariant()
+        };
+    }
+
+    internal static string Describe(string name) => name switch
     {
         "get_processes" => "a consulta de processos",
         "diagnose_device" => "a verificação de dispositivos e sistema",
