@@ -113,7 +113,9 @@ public sealed class SupportService(Store store)
         var uri = topic switch { "camera" => "ms-settings:privacy-webcam", "audio" => "ms-settings:sound", "network" => "ms-settings:network-status", "updates" => "ms-settings:windowsupdate", _ => "ms-settings:about" };
         Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true });
     }
-    internal static string PowershellCommand(string script) => "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; try { " + script + " } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }";
+    // Texto exato que o powershell.exe recebe; exposto para as verificações executarem o mesmo invólucro.
+    internal static string PowershellCommand(string script)
+        => "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; try { " + script + " } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }";
     internal static Task<string> Powershell(string script, CancellationToken token, int timeoutSeconds = 45)
     {
         var wrapped = PowershellCommand(script);

@@ -18,6 +18,7 @@ try
     RecoveryChecks.Run(Assert);
     ScenarioChecks.Run(Assert);
     HealthOccurrenceChecks.Run(Assert);
+    MemoryOccurrenceChecks.Run(Assert);
     var freshDirectRoot = Path.Combine(root, "direct-fresh");
     var freshDirectStore = new Store(freshDirectRoot, directAccess: true);
     var directSession = freshDirectStore.GetLocalSession();
