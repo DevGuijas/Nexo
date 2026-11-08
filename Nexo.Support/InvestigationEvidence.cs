@@ -1,12 +1,26 @@
+using System.Globalization;
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace Nexo.Support;
 
+// Travas do controlador que impedem uma chamada de chegar ao executor.
+public enum ControlBlock { RepeatedEvidence, RepeatedFailure, Topic }
+
 public sealed class InvestigationEvidence
 {
+    private const int MaxFindings = 8;
+    private const int MaxFindingLength = 320;
+    private const int MaxNameLength = 60;
+    private const int MaxEvidenceLength = 120;
+    private const int MaxListed = 5;
     private readonly Dictionary<string, (string Result, int Count)> observations = [];
+    // O que as consultas observaram, já em texto curto para o usuário; a chave substitui a leitura anterior do mesmo assunto.
+    private readonly List<(string Key, string Text, string Guidance)> findings = [];
+    private readonly List<(string Name, long Megabytes, bool Responding)> topProcesses = [];
+    private readonly List<(string Name, ControlBlock Kind, string? Topic)> blocks = [];
     private readonly Dictionary<string, (string Host, bool Dns, bool Tcp)> connections = [];
     private readonly List<string> changes = [];
     private readonly HashSet<string> successfulTools = [];
@@ -41,8 +55,17 @@ public sealed class InvestigationEvidence
         var normalizedTarget = AgentProtocol.Normalize(target);
         if (normalizedTarget.Length < 6) return false;
         var normalizedRequest = AgentProtocol.Normalize(request);
-        var mentioned = names.Select(AgentProtocol.Normalize)
+        var candidates = names.ToArray();
+        var mentioned = candidates.Select(AgentProtocol.Normalize)
             .Where(name => name.Length >= 6 && normalizedRequest.Contains(name, StringComparison.Ordinal)).ToArray();
+        // Sem nome escrito por inteiro, vale o nome como a pergunta o mostrou: aspas trocadas por apóstrofo e corte em 60 caracteres.
+        // O nome inteiro tem prioridade, para que o prefixo de outro candidato não torne ambígua uma escolha exata.
+        if (mentioned.Length == 0)
+        {
+            var shownRequest = AgentProtocol.Normalize(Clean(request, quotes: true));
+            mentioned = candidates.Where(name => AgentProtocol.Normalize(Shorten(Clean(name, quotes: true), MaxNameLength).TrimEnd('…')) is { Length: >= 6 } shown
+                && shownRequest.Contains(shown, StringComparison.Ordinal)).Select(AgentProtocol.Normalize).ToArray();
+        }
         return mentioned.Length == 1 && mentioned[0] == normalizedTarget;
     }
     private string[] PrinterCandidates()
@@ -56,14 +79,14 @@ public sealed class InvestigationEvidence
         {
             var printerCandidates = PrinterCandidates();
             if (printerCandidates.Length <= 1 || printerCandidates.Any(name => PrinterTargetUnambiguous(name, request))) return null;
-            return "Encontrei mais de uma impressora com indício de falha: " + string.Join("; ", printerCandidates.Order(StringComparer.CurrentCultureIgnoreCase)) + ". Qual delas recebeu o documento que falhou?";
+            return "Encontrei mais de uma impressora com indício de falha: " + string.Join("; ", printerCandidates.Order(StringComparer.CurrentCultureIgnoreCase).Select(name => Quoted(name))) + ". Qual delas recebeu o documento que falhou?";
         }
         var candidates = observedDevices.Where(device => device.Value.Topic == topic && device.Value.Code == 22).ToArray();
         if (candidates.Length <= 1 || candidates.Any(device => DeviceTargetUnambiguous(device.Key, request, true))) return null;
         var category = topic switch { "camera" => "câmera desabilitada", "audio" => "dispositivo de áudio desabilitado", "bluetooth" => "dispositivo Bluetooth desabilitado", _ => "dispositivo desabilitado" };
         var prefix = topic == "camera" ? "Encontrei mais de uma " : "Encontrei mais de um ";
         var pronoun = topic == "camera" ? "delas" : "deles";
-        return prefix + category + ": " + string.Join("; ", candidates.Select(device => device.Value.Name).Order(StringComparer.CurrentCultureIgnoreCase)) + ". Qual " + pronoun + " apresenta a falha no aplicativo?";
+        return prefix + category + ": " + string.Join("; ", candidates.Select(device => device.Value.Name).Order(StringComparer.CurrentCultureIgnoreCase).Select(name => Quoted(name))) + ". Qual " + pronoun + " apresenta a falha no aplicativo?";
     }
     public bool UpdateMatchesIncident(string id, HashSet<string> incidentTopics)
     {
@@ -122,15 +145,18 @@ public sealed class InvestigationEvidence
         return false;
     }
     public bool Repeated(string signature) => observations.TryGetValue(signature, out var state) && state.Count >= 2;
-    public void Observe(string name, string signature, JsonElement args, string result)
+    public bool HasFindings => findings.Count > 0;
+    public void Observe(string name, string signature, JsonElement args, string result, (ControlBlock Kind, string? Topic)? block = null)
     {
         using var doc = JsonDocument.Parse(result);
         var root = doc.RootElement;
         if (root.ValueKind != JsonValueKind.Object) throw new JsonException("Resultado da ferramenta deve ser um objeto JSON.");
+        if (block is { } blocked && !blocks.Any(b => b.Name == name && b.Kind == blocked.Kind)) blocks.Add((name, blocked.Kind, blocked.Topic));
         if (root.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True)
         {
             failedTools.Remove(name);
             successfulTools.Add(name);
+            Remember(name, args, root);
             switch (name)
             {
                 case "get_network" or "test_connection" or "probe_network_interfaces" or "enable_network_adapter" or "set_dns" or "set_ipv4" or "flush_dns": observedTopics.Add("network"); break;
@@ -186,8 +212,8 @@ public sealed class InvestigationEvidence
             }
             if (name is "enable_device" or "restart_device" && args.ValueKind == JsonValueKind.Object && args.TryGetProperty("device_id", out var selected) && selected.ValueKind == JsonValueKind.String && observedDevices.TryGetValue(selected.GetString() ?? "", out var selectedDevice))
                 observedTopics.Add(selectedDevice.Topic);
-            if (ToolCatalog.IsMutation(name) && !ExplicitlyUnchanged(root)) { successfulChanges.Add(name); changes.Add(ToolCatalog.Label(name).TrimEnd('…')); observations.Clear(); connections.Clear(); }
-            if (name == "wait_for_reconnect" && root.TryGetProperty("data", out var watch) && watch.TryGetProperty("Reconnected", out var reconnect) && reconnect.ValueKind == JsonValueKind.True) { observations.Clear(); connections.Clear(); }
+            if (ToolCatalog.IsMutation(name) && !ExplicitlyUnchanged(root)) { successfulChanges.Add(name); changes.Add(ToolCatalog.Label(name).TrimEnd('…')); observations.Clear(); connections.Clear(); ForgetFindings(); }
+            if (name == "wait_for_reconnect" && root.TryGetProperty("data", out var watch) && watch.TryGetProperty("Reconnected", out var reconnect) && reconnect.ValueKind == JsonValueKind.True) { observations.Clear(); connections.Clear(); ForgetFindings(); }
             if (name == "test_connection" && root.TryGetProperty("data", out var data))
             {
                 var host = data.TryGetProperty("host", out var h) ? h.GetString() ?? "destino" : args.TryGetProperty("host", out h) ? h.GetString() ?? "destino" : "destino";
@@ -195,7 +221,8 @@ public sealed class InvestigationEvidence
                 connections[signature] = (host, Flag("dnsResolved"), Flag("tcpConnected"));
             }
         }
-        else failedTools.Add(name);
+        // Uma repetição barrada pelo controlador não chegou ao executor: a ferramenta não falhou se já concluiu neste turno.
+        else if (!((block?.Kind is ControlBlock.RepeatedEvidence or ControlBlock.RepeatedFailure) && successfulTools.Contains(name))) failedTools.Add(name);
         // Ignore durations: a new timestamp is not new diagnostic evidence.
         var fingerprint = name == "test_connection" && root.TryGetProperty("data", out var test)
             ? JsonSerializer.Serialize(new { dns = test.TryGetProperty("dnsResolved", out var d) ? d.ToString() : "", tcp = test.TryGetProperty("tcpConnected", out var t) ? t.ToString() : "" }) : result;
@@ -205,9 +232,28 @@ public sealed class InvestigationEvidence
         => source.TryGetProperty(name, out var values) && values.ValueKind == JsonValueKind.Array
             ? values.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String).Select(value => value.GetString() ?? "").Where(value => value.Length > 0).ToArray()
             : [];
-    public string Summary(string reason = "")
+    // Resumo para o modelo, a cada etapa: os resultados completos já estão no histórico da conversa.
+    public string Summary(string reason = "") => Compose(reason, forUser: false);
+
+    // Resposta final escrita pelo controlador, sem o modelo: inclui o que as consultas mostraram e por que o Nexo parou.
+    public string Report(string reason) => Compose(reason, forUser: true);
+
+    private string Compose(string reason, bool forUser)
     {
         var lines = new List<string>();
+        if (forUser && findings.Count > 0)
+        {
+            lines.Add("O que as consultas deste turno mostraram:");
+            // As linhas do relatório de saúde contam como um achado só; o que passar do limite é avisado, não cortado em silêncio.
+            static string Group(string key) => key.StartsWith("health", StringComparison.Ordinal) ? "health" : key;
+            var groups = findings.Select(f => Group(f.Key)).Distinct().ToArray();
+            var shown = groups.Take(MaxFindings).ToHashSet();
+            foreach (var (key, text, guidance) in findings.Where(f => shown.Contains(Group(f.Key))))
+                lines.Add("• " + text + (key == "storage" && !findings.Any(f => f.Key is "system" or "health")
+                    ? " O espaço livre por disco aparece na verificação de memória e disco, que não foi feita neste turno." : "") + guidance);
+            if (groups.Length > MaxFindings)
+                lines.Add($"• E mais {groups.Length - MaxFindings} {(groups.Length - MaxFindings == 1 ? "achado" : "achados")} nos cartões de resultado deste turno.");
+        }
         var tests = connections.Values.ToArray();
         foreach (var test in tests.Distinct())
         {
@@ -217,8 +263,287 @@ public sealed class InvestigationEvidence
         if (tests.Any(t => t.Tcp) && tests.Any(t => !t.Tcp)) lines.Add("Há conectividade parcial: os testes não permitem afirmar que toda a internet está indisponível ou que todos os serviços funcionam.");
         if (tests.Length > 0 && tests.All(t => t.Tcp)) lines.Add("Os destinos testados responderam. Confirme também o aplicativo em que percebeu o problema.");
         lines.Add(changes.Count == 0 ? "Nenhuma alteração concluída pelo Nexo foi registrada neste turno." : "Operações concluídas neste turno: " + string.Join("; ", changes) + ".");
-        if (failedTools.Count > 0) lines.Add("Ferramentas sem conclusão bem sucedida: " + string.Join(", ", failedTools.Order()) + ". Confira os cartões de resultado para a causa.");
+        if (!forUser)
+        {
+            if (failedTools.Count > 0) lines.Add("Ferramentas sem conclusão bem sucedida: " + string.Join(", ", failedTools.Order()) + ". Confira os cartões de resultado para a causa.");
+        }
+        else
+        {
+            // Para o usuário, em português; a etapa barrada ou já falha é explicada pela trava logo abaixo.
+            var unexplained = failedTools.Where(tool => !blocks.Any(b => b.Name == tool && b.Kind is ControlBlock.Topic or ControlBlock.RepeatedFailure)).Order().ToArray();
+            if (unexplained.Length > 0) lines.Add("Não terminaram com sucesso: " + string.Join("; ", unexplained.Select(Describe)) + ". Confira os cartões de resultado para a causa.");
+            lines.AddRange(blocks.Take(3).Select(BlockExplanation));
+        }
         if (reason.Length > 0) lines.Add(reason);
         return string.Join("\n", lines);
+    }
+
+    private static string BlockExplanation((string Name, ControlBlock Kind, string? Topic) block) => block.Kind switch
+    {
+        ControlBlock.RepeatedEvidence => "Parei a investigação porque a IA pediu de novo " + Describe(block.Name) + ", que já tinha trazido o mesmo resultado duas vezes; repetir não traria informação nova.",
+        ControlBlock.RepeatedFailure => "Parei a investigação porque a IA tentou repetir " + Describe(block.Name) + ", que já tinha falhado ou sido recusada neste turno; o motivo está no cartão desse resultado.",
+        _ => block.Topic is { } topic
+            ? "O Nexo não executou " + Describe(block.Name) + " porque o seu pedido não cita " + Component(topic) + ", a parte do Windows que essa alteração muda. Essa trava evita mexer em algo diferente do que você relatou. Se o problema for com " + Component(topic) + ", diga isso com suas palavras; a alteração continua dependendo da sua aprovação."
+            : "O Nexo não executou " + Describe(block.Name) + " porque o alvo não foi identificado sem ambiguidade nas consultas deste turno. Diga qual dispositivo ou impressora apresenta a falha."
+    };
+
+    private static string Describe(string name) => name switch
+    {
+        "get_processes" => "a consulta de processos",
+        "diagnose_device" => "a verificação de dispositivos e sistema",
+        "get_hardware_inventory" => "o inventário de hardware",
+        "get_network" => "a consulta de rede",
+        "test_connection" => "o teste de conexão",
+        "get_health_report" => "o relatório de saúde",
+        "get_services" => "a consulta de serviços",
+        "get_printers" => "a consulta de impressoras",
+        _ => "a etapa “" + ToolCatalog.Label(name).TrimEnd('…') + "”"
+    };
+
+    private static string Component(string topic) => topic switch
+    {
+        "network" => "a rede ou a internet",
+        "camera" => "a câmera",
+        "audio" => "o som ou o microfone",
+        "printer" => "a impressora",
+        "bluetooth" => "o Bluetooth",
+        "display" => "a placa de vídeo",
+        _ => "esse componente"
+    };
+
+    private void ForgetFindings() { findings.Clear(); topProcesses.Clear(); }
+
+    // Só a evidência é encurtada; a orientação de segurança que acompanha a linha nunca é cortada.
+    private void Finding(string key, string text, string guidance = "")
+    {
+        var line = (key, Shorten(text, MaxFindingLength), guidance);
+        var index = findings.FindIndex(f => f.Key == key);
+        if (index >= 0) findings[index] = line; else findings.Add(line);
+    }
+
+    // Guarda, em português curto, o que uma consulta bem sucedida mostrou. Formato inesperado não vira evidência.
+    private void Remember(string name, JsonElement args, JsonElement root)
+    {
+        if (!root.TryGetProperty("data", out var raw)) return;
+        try
+        {
+            using var parsed = raw.ValueKind == JsonValueKind.String && raw.GetString() is { } embedded && embedded.TrimStart().StartsWith('[') ? JsonDocument.Parse(embedded) : null;
+            var data = parsed?.RootElement ?? raw;
+            switch (name)
+            {
+                case "get_processes":
+                    RememberProcesses(data);
+                    break;
+                case "diagnose_device" when Argument(args, "topic") == "system":
+                    if (data.ValueKind != JsonValueKind.String) return;
+                    var readings = Regex.Matches(data.GetString() ?? "", @"^(Memória livre: .+|Disco .+ livres de .+)$", RegexOptions.Multiline)
+                        .Select(match => Clean(match.Value).Replace("::", ":")).Take(5).ToArray();
+                    if (readings.Length > 0) Finding("system", string.Join("; ", readings) + ".");
+                    break;
+                case "diagnose_device" or "get_hardware_inventory":
+                    RememberDevices(name, Argument(args, name == "diagnose_device" ? "topic" : "category") ?? "", data);
+                    break;
+                case "get_network":
+                    RememberNetwork(data);
+                    break;
+                case "get_health_report":
+                    if (data.ValueKind == JsonValueKind.String) RememberHealth(data.GetString() ?? "");
+                    break;
+            }
+        }
+        catch (JsonException) { /* Um resultado sem o formato esperado continua só no cartão. */ }
+    }
+
+    private void RememberProcesses(JsonElement list)
+    {
+        if (list.ValueKind != JsonValueKind.Array) return;
+        var top = list.EnumerateArray()
+            .Where(process => process.ValueKind == JsonValueKind.Object && process.TryGetProperty("MemoryMB", out var memory) && memory.ValueKind == JsonValueKind.Number && memory.TryGetInt64(out _))
+            .Select(process => (Name: ProcessName(Text(process, "Name") ?? ""), Megabytes: process.GetProperty("MemoryMB").GetInt64(),
+                Responding: !(process.TryGetProperty("Responding", out var responding) && responding.ValueKind == JsonValueKind.False)))
+            .OrderByDescending(process => process.Megabytes).Take(1).ToArray();
+        if (top.Length == 0) return;
+        topProcesses.Add(top[0]);
+        var (first, last) = (topProcesses[0], topProcesses[^1]);
+        var text = topProcesses.Count == 1 || first == last ? $"Processo que mais usa memória: “{last.Name}”, com {last.Megabytes} MB."
+            : first.Name == last.Name ? $"Processo que mais usa memória: “{last.Name}”, com {first.Megabytes} MB na primeira consulta e {last.Megabytes} MB na última."
+            : $"Processo que mais usa memória na última consulta: “{last.Name}”, com {last.Megabytes} MB (na primeira consulta era “{first.Name}”, com {first.Megabytes} MB).";
+        if (!last.Responding) text += " Ele não está respondendo.";
+        Finding("processes", text, " Se for um programa seu que não está em uso agora, salve o trabalho nele e feche-o; o Nexo não encerra processos.");
+    }
+
+    private void RememberDevices(string name, string topic, JsonElement data)
+    {
+        if (data.ValueKind != JsonValueKind.Object
+            || !(data.TryGetProperty("devices", out var list) || data.TryGetProperty("Devices", out list)) || list.ValueKind != JsonValueKind.Array) return;
+        var devices = list.EnumerateArray().Where(device => device.ValueKind == JsonValueKind.Object).ToArray();
+        var subject = topic switch
+        {
+            "camera" => "câmera", "audio" => "áudio", "bluetooth" => "Bluetooth", "printer" => "impressora", "storage" => "armazenamento",
+            "display" => "vídeo", "usb" => "USB", "network" => "rede", "problem" => "dispositivos com problema", _ => "dispositivos"
+        };
+        var faulty = devices.Select(device => (Name: Quoted(Text(device, "Name") ?? ""), Code: device.TryGetProperty("Code", out var code) && code.ValueKind == JsonValueKind.Number && code.TryGetInt32(out var value) ? value : 0))
+            .Where(device => device.Code > 0).ToArray();
+        var source = name == "diagnose_device" ? "Na verificação de " + subject : "No inventário de " + subject;
+        Finding("devices:" + topic, devices.Length == 0 ? source + ", o Windows não listou nenhum dispositivo."
+            : faulty.Length == 0 ? $"{source}, {(devices.Length == 1 ? "1 dispositivo apareceu" : devices.Length + " dispositivos apareceram")} sem código de erro do Windows."
+            : $"{source}, com código de erro do Windows: " + Within(faulty.Take(MaxListed).Select(device => $"{device.Name} (código {device.Code}{(device.Code == 22 ? ", desabilitado" : "")})"), faulty.Length) + ".");
+        if (name == "get_hardware_inventory" && topic == "storage")
+            Finding("storage", "O inventário de armazenamento lista discos e controladoras, mas não informa espaço livre.");
+    }
+
+    private void RememberNetwork(JsonElement data)
+    {
+        if (data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("Adapters", out var adapters) || adapters.ValueKind != JsonValueKind.Array) return;
+        var connected = adapters.EnumerateArray().Where(adapter => adapter.ValueKind == JsonValueKind.Object && Text(adapter, "Status") == "Up").ToArray();
+        Finding("network", connected.Length == 0 ? "Nenhum adaptador de rede aparece conectado na consulta."
+            : "Rede: " + Within(connected.Take(3).Select(adapter => $"{Quoted(Text(adapter, "Name") ?? "")} conectada, gateway {Addresses(adapter, "Gateways")}, DNS {Addresses(adapter, "Dns")}"), connected.Length) + ".");
+    }
+
+    private void RememberHealth(string report)
+    {
+        // Cada relatório substitui as três linhas do anterior; uma parte ausente agora não pode sobrar da leitura velha.
+        findings.RemoveAll(f => f.Key is "health" or "health:unknown" or "health:volumes");
+        if (report.StartsWith("Nenhuma amostra", StringComparison.Ordinal)) { Finding("health", "O relatório de saúde não tem leituras das últimas 24 horas."); return; }
+        // O relatório marca a amostra velha na linha de coleta, pelo mesmo critério de HealthOccurrences.CollectionNotice.
+        var stale = Regex.IsMatch(report, @"^Última coleta: [^\n]*Sem leitura recente: o estado atual das ocorrências é desconhecido\.", RegexOptions.Multiline);
+        var sample = Regex.Match(report, @"^Amostra: (?<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2});", RegexOptions.Multiline) is { Success: true } found
+            && DateTimeOffset.TryParseExact(found.Groups["time"].Value, "yyyy-MM-dd HH:mm:ss zzz", CultureInfo.InvariantCulture, DateTimeStyles.None, out var time)
+            ? time.ToLocalTime().ToString("dd/MM 'às' HH:mm", CultureInfo.InvariantCulture) : null;
+        // O relatório troca a vírgula decimal por "_"; aqui ela volta para o usuário ler o número.
+        static string Readable(string text) => Regex.Replace(text.Replace(":_", ":"), @"(?<=\d)_(?=\d)", ",");
+        var occurrences = Regex.Matches(report, @"^Achado [^\n]*?, (?<status>persiste nas leituras atuais|ocorrência histórica; estado atual desconhecido \((?<why>[^)\n]*)\)|resolvida[^:\n]*): (?<problem>[^\n]+?)\. Evidência: (?<evidence>[^\n]+?)\. Causa:", RegexOptions.Multiline)
+            .Where(match => !match.Groups["status"].Value.StartsWith("resolvida", StringComparison.Ordinal) && match.Groups["why"].Value != "há ocorrência mais recente do mesmo alerta")
+            // A evidência pode trazer nome de adaptador, serviço ou processo: vai entre aspas, como todo nome vindo de ferramenta.
+            .Select(match => (Active: match.Groups["status"].Value.StartsWith("persiste", StringComparison.Ordinal),
+                Text: Clean(Readable(match.Groups["problem"].Value)) + " (evidência: " + Quoted(Readable(match.Groups["evidence"].Value), MaxEvidenceLength) + ")"))
+            .ToArray();
+        var active = occurrences.Where(o => o.Active).Select(o => o.Text).ToArray();
+        var unknown = occurrences.Where(o => !o.Active).Select(o => o.Text).ToArray();
+        var volumes = Regex.Matches(report, @"^Volume (?<name>[^\n]+?): (?<free>[\d.,]+% livre)\.", RegexOptions.Multiline)
+            .Select(match => Clean(match.Groups["name"].Value.TrimEnd('_')) + " " + match.Groups["free"].Value).ToArray();
+        var when = sample == null ? "" : " (amostra de " + sample + ")";
+        // Uma linha por parte, cada uma com o próprio orçamento por itens inteiros: nenhuma parte some porque a anterior é longa.
+        Finding("health", stale
+            ? "O relatório de saúde não tem leitura recente" + when + ": o estado atual é desconhecido."
+            : active.Length == 0 ? "O monitor de saúde não mostra ocorrência ativa nas leituras atuais" + when + "."
+            : "Ocorrência ativa no monitor de saúde" + when + ": " + Within(active.Take(3), active.Length) + ".");
+        if (unknown.Length > 0) Finding("health:unknown", "Ocorrências do monitor com estado atual desconhecido: " + Within(unknown.Take(3), unknown.Length) + ".");
+        if (volumes.Length > 0) Finding("health:volumes", (stale ? "Espaço livre por volume naquela amostra: " : "Espaço livre por volume: ") + Within(volumes.Take(4), volumes.Length) + ".");
+    }
+
+    // Descreve a alteração concluída com o que a própria ferramenta devolveu e o estado consultado antes dela.
+    public string? ChangeOutcome(string name, JsonElement args, JsonElement root)
+    {
+        if (!root.TryGetProperty("data", out var data)) return null;
+        try
+        {
+            using var parsed = data.ValueKind == JsonValueKind.String && data.GetString() is { } embedded && embedded.TrimStart().StartsWith('{') ? JsonDocument.Parse(embedded) : null;
+            var result = parsed?.RootElement ?? data;
+            switch (name)
+            {
+                case "enable_device" or "enable_camera" or "restart_device":
+                    var known = observedDevices.TryGetValue(Argument(args, "device_id") ?? "", out var before);
+                    var reported = Text(result, "Name") ?? (known ? before.Name : null);
+                    if (reported == null) return null;
+                    var device = Quoted(reported);
+                    var text = name == "restart_device"
+                        ? $"O dispositivo {device} foi reiniciado" + (known && before.Code >= 0 ? $"; antes, o Windows informava código {before.Code}." : ".")
+                        : known && before.Code == 22 ? $"O dispositivo {device} estava desabilitado (código 22) e foi habilitado." : $"O dispositivo {device} foi habilitado.";
+                    if (result.ValueKind == JsonValueKind.Object && result.TryGetProperty("ConfigManagerErrorCode", out var after) && after.ValueKind == JsonValueKind.Number && after.TryGetInt32(out var code))
+                        text += $" Depois da alteração, o Windows informa código {code}" + (Text(result, "Status") is { } status ? " e status " + DeviceStatus(status) + "." : ".");
+                    return text;
+                case "restart_service":
+                    var service = Text(result, "Service") ?? Argument(args, "service");
+                    var state = Text(result, "Status");
+                    return service == null ? null : $"O serviço {Quoted(service)} foi reiniciado" + (state != null ? "; o Windows informa que ele está " + ServiceState(state) + "." : ".");
+                case "clear_print_queue":
+                    var printer = Text(result, "Printer") ?? Argument(args, "printer_name");
+                    if (printer == null) return null;
+                    var remaining = result.ValueKind == JsonValueKind.Object && result.TryGetProperty("RemainingJobs", out var jobs) && jobs.ValueKind == JsonValueKind.Number && jobs.TryGetInt32(out var count) ? count : (int?)null;
+                    // Fila com trabalhos restantes não foi limpa, mesmo com a ferramenta concluída.
+                    return remaining switch
+                    {
+                        0 => $"A fila da impressora {Quoted(printer)} foi limpa; o Windows informa 0 trabalhos na fila.",
+                        > 0 => $"O Nexo tentou limpar a fila da impressora {Quoted(printer)}, mas o Windows ainda informa {remaining} {(remaining == 1 ? "trabalho" : "trabalhos")} na fila.",
+                        _ => $"O Nexo pediu a limpeza da fila da impressora {Quoted(printer)}; o Windows não informou quantos trabalhos restam."
+                    };
+                case "allow_camera":
+                    return Text(result, "After") is { } allowed ? $"A permissão de câmera deste perfil passou de {Permission(Text(result, "Before"))} para {Permission(allowed)}." : null;
+                case "flush_dns":
+                    return "O Windows limpou o cache DNS.";
+                default:
+                    return null;
+            }
+        }
+        catch (JsonException) { return null; }
+    }
+
+    private static string ServiceState(string state) => state switch
+    {
+        "Running" => "em execução", "Stopped" => "parado", "StartPending" => "iniciando", "StopPending" => "parando", "Paused" => "pausado", _ => "no estado " + Quoted(state)
+    };
+    private static string DeviceStatus(string status) => status switch
+    {
+        "OK" => "OK", "Error" => "com erro", "Degraded" => "degradado", "Unknown" => "desconhecido", _ => Quoted(status)
+    };
+    private static string Permission(string? value) => value switch
+    {
+        null => "não definida", "Allow" => "permitido", "Deny" => "negado", _ => Quoted(value)
+    };
+
+    private static string? Argument(JsonElement args, string key) => Text(args, key);
+    private static string? Text(JsonElement source, string key) => source.ValueKind == JsonValueKind.Object && source.TryGetProperty(key, out var value)
+        && value.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(value.GetString()) ? value.GetString() : null;
+    private static string Addresses(JsonElement adapter, string key)
+    {
+        var values = adapter.TryGetProperty(key, out var list) && list.ValueKind == JsonValueKind.Array
+            ? list.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String).Select(value => value.GetString() ?? "").Where(IsAddress).Take(3).ToArray()
+            : [];
+        return values.Length == 0 ? "nenhum" : string.Join(", ", values);
+    }
+    // IPAddress.TryParse aceita "1" como 0.0.0.1; aqui só passa IPv4 com quatro partes ou IPv6 com escopo numérico.
+    private static bool IsAddress(string value) => Regex.IsMatch(value, @"^(\d{1,3}(\.\d{1,3}){3}|[0-9A-Fa-f]*:[0-9A-Fa-f:.]*(%\d+)?)$") && IPAddress.TryParse(value, out _);
+    // Junta itens até o limite da linha; o que não couber vira "e mais N", sem cortar um item no meio.
+    private static string Within(IEnumerable<string> items, int total)
+    {
+        var kept = new List<string>();
+        foreach (var item in items)
+        {
+            if (kept.Count > 0 && string.Join("; ", kept.Append(item)).Length > MaxFindingLength - 80) break;
+            kept.Add(item);
+        }
+        return string.Join("; ", kept) + (total > kept.Count ? $" e mais {total - kept.Count}" : "");
+    }
+    // Nome de executável é escolhido por quem o criou: mesmo filtro de WindowsTools.ProcessesForModel.
+    private static string ProcessName(string name)
+    {
+        var safe = new string(name.Take(40).Select(c => char.IsLetterOrDigit(c) || c is '.' or '-' or '_' ? c : '_').ToArray());
+        return safe.Length == 0 ? "processo" : safe;
+    }
+    // Nome vindo de ferramenta (dispositivo, adaptador, impressora, serviço) é dado, não texto do Nexo: vai entre aspas,
+    // sem caracteres de controle, de formatação (como U+202E) ou separadores de linha e parágrafo, e com tamanho limitado.
+    private static string Quoted(string name, int limit = MaxNameLength) => "“" + Shorten(Clean(name, quotes: true), limit) + "”";
+    // Por rune, não por unidade UTF-16: tags como U+E0000-U+E007F (formatação fora do BMP) também saem.
+    private static string Clean(string text, bool quotes = false)
+    {
+        var clean = new StringBuilder(text.Length);
+        foreach (var rune in text.EnumerateRunes())
+        {
+            var category = Rune.GetUnicodeCategory(rune);
+            if (category is UnicodeCategory.Control or UnicodeCategory.Format or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator) clean.Append(' ');
+            else if (quotes && (category is UnicodeCategory.InitialQuotePunctuation or UnicodeCategory.FinalQuotePunctuation || QuoteLike.Contains(rune.Value))) clean.Append('\'');
+            else clean.Append(rune.ToString());
+        }
+        return Regex.Replace(clean.ToString(), @"\s+", " ").Trim();
+    }
+    // Aspas que não são Pi/Pf no Unicode, mas que um leitor toma por aspas: " „ ‚ ″ ‴ ‶ ‷ ❛ ❜ ❝ ❞ 〝 〞 〟 ＂ ＇.
+    private static readonly HashSet<int> QuoteLike = ['"', 0x201E, 0x201A, 0x2033, 0x2034, 0x2036, 0x2037, 0x275B, 0x275C, 0x275D, 0x275E, 0x301D, 0x301E, 0x301F, 0xFF02, 0xFF07];
+    private static string Shorten(string text, int limit)
+    {
+        if (text.Length <= limit) return text;
+        var cut = limit - 1;
+        if (char.IsHighSurrogate(text[cut - 1])) cut--;
+        return text[..cut].TrimEnd() + "…";
     }
 }

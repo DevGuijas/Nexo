@@ -259,13 +259,13 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             }
             catch (JsonException)
             {
-                return Finish(evidence.Summary("A IA local retornou uma resposta inválida. Interrompi as ações; encaminhe este atendimento a uma pessoa com os resultados registrados."));
+                return Finish(evidence.Report("A IA local retornou uma resposta inválida. Interrompi as ações; encaminhe este atendimento a uma pessoa com os resultados registrados."));
             }
             if (message.TryGetProperty("content", out var body) && body.ValueKind is not (JsonValueKind.String or JsonValueKind.Null))
-                return Finish(evidence.Summary("A IA local retornou conteúdo inválido. Interrompi as ações; encaminhe este atendimento a uma pessoa."));
+                return Finish(evidence.Report("A IA local retornou conteúdo inválido. Interrompi as ações; encaminhe este atendimento a uma pessoa."));
             var content = body.ValueKind == JsonValueKind.String ? body.GetString() ?? "" : "";
             if (message.TryGetProperty("tool_calls", out var tc) && tc.ValueKind != JsonValueKind.Array)
-                return Finish(evidence.Summary("A IA local retornou chamadas de ferramenta inválidas. Interrompi as ações; encaminhe este atendimento a uma pessoa."));
+                return Finish(evidence.Report("A IA local retornou chamadas de ferramenta inválidas. Interrompi as ações; encaminhe este atendimento a uma pessoa."));
             var calls = tc.ValueKind == JsonValueKind.Array ? tc.Clone() : (JsonElement?)null;
             if (calls == null || calls.Value.GetArrayLength() == 0) calls = AgentProtocol.ParseControl(content);
             if (calls == null || calls.Value.GetArrayLength() == 0)
@@ -277,7 +277,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 // A narrated intention is not a completed operation. This is controller feedback,
                 // never a fabricated user message or consent to change Windows settings.
                 if (!string.IsNullOrWhiteSpace(content)) history.Add(new AgentMessage { role = "assistant", content = content });
-                if (++protocolRetries > 3) return Finish(evidence.Summary("A IA não conseguiu selecionar a próxima etapa. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento."));
+                if (++protocolRetries > 3) return Finish(evidence.Report("A IA não conseguiu selecionar a próxima etapa. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento."));
                 control = "Controle de execução: sua resposta não chamou uma ferramenta. Se anunciou um teste ou consulta, execute-o agora. Para concluir chame finish_support com message; se não conseguir emitir tool_calls para esse controle, escreva exatamente finish_support seguido de um objeto JSON com message. Para informação indispensável ou teste manual use ask_user com message e reason. Não peça Ok nem autorização no chat. Nenhuma mudança foi autorizada por esta instrução; o executor mantém a confirmação do usuário.";
                 progress.Report("Continuando o diagnóstico e selecionando a próxima etapa…");
                 continue;
@@ -289,7 +289,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 if (call.ValueKind != JsonValueKind.Object || !call.TryGetProperty("function", out var functionCall) || functionCall.ValueKind != JsonValueKind.Object
                     || !functionCall.TryGetProperty("name", out var proposedName) || proposedName.ValueKind != JsonValueKind.String || proposedName.GetString() is not { Length: > 0 } candidate
                     || !functionCall.TryGetProperty("arguments", out var proposedArguments) || proposedArguments.ValueKind != JsonValueKind.Object)
-                    return Finish(evidence.Summary("A IA local retornou uma chamada de ferramenta com formato inválido. Nenhuma chamada dessa resposta foi executada; encaminhe este atendimento a uma pessoa."));
+                    return Finish(evidence.Report("A IA local retornou uma chamada de ferramenta com formato inválido. Nenhuma chamada dessa resposta foi executada; encaminhe este atendimento a uma pessoa."));
                 if (!allowedNames.Contains(candidate)) unavailableName ??= candidate;
             }
             if (unavailableName != null)
@@ -299,17 +299,18 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     : "Ferramenta desconhecida ou indisponível neste escopo. Nenhuma chamada desta resposta foi executada.";
                 history.Add(new AgentMessage { role = "assistant", content = content, tool_calls = calls });
                 history.Add(new AgentMessage { role = "tool", tool_name = unavailableName, content = JsonSerializer.Serialize(new { success = false, error }) });
-                if (++protocolRetries > 3) return Finish(evidence.Summary("A IA insistiu em uma ferramenta indisponível. Interrompi as ações; encaminhe os resultados a uma pessoa de suporte."));
+                if (++protocolRetries > 3) return Finish(evidence.Report("A IA insistiu em uma ferramenta indisponível. Interrompi as ações; encaminhe os resultados a uma pessoa de suporte."));
                 control = "Controle de execução: " + error;
                 continue;
             }
             if (calls.Value.GetArrayLength() > 1 && calls.Value.EnumerateArray().Any(c => ToolCatalog.IsMutation(c.GetProperty("function").GetProperty("name").GetString()!) || c.GetProperty("function").GetProperty("name").GetString() is "finish_support" or "ask_user" or "prepare_restart" or "wait_for_reconnect"))
-                return Finish(evidence.Summary("A IA agrupou uma alteração ou etapa final com outras chamadas. Nenhuma chamada dessa resposta foi executada; encaminhe este atendimento a uma pessoa."));
+                return Finish(evidence.Report("A IA agrupou uma alteração ou etapa final com outras chamadas. Nenhuma chamada dessa resposta foi executada; encaminhe este atendimento a uma pessoa."));
             history.Add(new AgentMessage { role = "assistant", content = content, tool_calls = calls });
             var repeatedFailure = false;
             var deniedByUser = false;
             var networkRecoveryNeeded = false;
             string? functionalCheck = null;
+            string? changeOutcome = null;
             string? networkFailure = null;
             string? failedMutation = null;
             foreach (var call in calls.Value.EnumerateArray())
@@ -327,12 +328,13 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     result = JsonSerializer.Serialize(new { success = error == null, error });
                     history.Add(new AgentMessage { role = "tool", tool_name = name, content = result });
                     if (error == null) return Finish(text);
-                    if (++protocolRetries > 3) return Finish(evidence.Summary("A IA não conseguiu selecionar a próxima etapa. Interrompi a tentativa; os resultados acima podem orientar a continuação do atendimento."));
+                    if (++protocolRetries > 3) return Finish(evidence.Report("A IA não conseguiu selecionar a próxima etapa. Interrompi a tentativa; os resultados acima podem orientar a continuação do atendimento."));
                     control = "Controle de execução: " + error;
                     continue;
                 }
                 var signature = name + ":" + (arguments.ValueKind == JsonValueKind.Object ? JsonSerializer.Serialize(arguments.EnumerateObject().OrderBy(p => p.Name).ToDictionary(p => p.Name, p => p.Value)) : arguments.GetRawText());
                 var dispatched = false;
+                (ControlBlock Kind, string? Topic)? block = null;
                 var toolClock = Stopwatch.StartNew();
                 try
                 {
@@ -341,15 +343,19 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     if (functionalCheck != null && ToolCatalog.IsMutation(name)) throw new InvalidOperationException("O ajuste anterior foi concluído. Aguarde o teste funcional do usuário antes de propor outra alteração.");
                     if (networkFailure != null) throw new InvalidOperationException("Etapa interrompida após falha de alteração da rede. Verifique o resultado e a restauração antes de novas ações.");
                     if (readOnly && !ToolCatalog.IsReadOnly(name)) throw new InvalidOperationException("Este pedido permite somente leitura. Não proponha mudanças; conclua com as consultas solicitadas.");
-                    if (ToolCatalog.IsMutation(name) && !MutationMatchesIncident(name, arguments)) throw new InvalidOperationException("A alteração escolhida não corresponde ao componente relatado ou a um dispositivo identificado nesta investigação.");
+                    if (ToolCatalog.IsMutation(name) && !MutationMatchesIncident(name, arguments))
+                    {
+                        block = (ControlBlock.Topic, MutationTopic(name, arguments) is { } needed && !incidentTopics.Contains(needed) ? needed : null);
+                        throw new InvalidOperationException("A alteração escolhida não corresponde ao componente relatado ou a um dispositivo identificado nesta investigação.");
+                    }
                     if (observationOnly && !ToolCatalog.IsObservationTool(name)) throw new InvalidOperationException("O pedido atual é acompanhar uma reconexão. Consulte o alvo, observe a mudança de estado e confira a função; outras investigações dependem do resultado dessa observação.");
                     if (name == "wait_for_reconnect" && !allowWatch) throw new InvalidOperationException("Primeiro chame diagnose_device ou get_network para identificar o alvo real. Não invente IDs nem peça ao usuário dados que essas consultas podem obter.");
                     if (name is "prepare_restart" or "wait_for_reconnect" && calls.Value.GetArrayLength() != 1) throw new InvalidOperationException("Acompanhe a reconexão ou prepare a retomada somente depois de receber os resultados anteriores, em uma chamada separada.");
                     if (name == "flush_dns" && !allowFlushDns) throw new InvalidOperationException("Antes de limpar DNS, confirme conectividade TCP com um IP numérico. Falha geral de conexão exige investigar endereço, rota e DHCP; limpar cache não corrige um IP incompatível.");
                     if (++toolCount > 24) throw new InvalidOperationException("Limite de ações deste turno atingido.");
                     token.ThrowIfCancellationRequested();
-                    if (evidence.Repeated(signature)) { repeatedFailure = true; throw new InvalidOperationException("Esta consulta já retornou a mesma evidência duas vezes. Mude a hipótese, peça informação específica ou use observação de reconexão, sem repetir o teste indefinidamente."); }
-                    if (failedCalls.Contains(signature)) { repeatedFailure = true; throw new InvalidOperationException("Esta chamada já falhou ou foi recusada neste turno. Repetição bloqueada; revise o resultado anterior e não prometa uma nova consulta idêntica."); }
+                    if (evidence.Repeated(signature)) { repeatedFailure = true; block = (ControlBlock.RepeatedEvidence, null); throw new InvalidOperationException("Esta consulta já retornou a mesma evidência duas vezes. Mude a hipótese, peça informação específica ou use observação de reconexão, sem repetir o teste indefinidamente."); }
+                    if (failedCalls.Contains(signature)) { repeatedFailure = true; block = (ControlBlock.RepeatedFailure, null); throw new InvalidOperationException("Esta chamada já falhou ou foi recusada neste turno. Repetição bloqueada; revise o resultado anterior e não prometa uma nova consulta idêntica."); }
                     progress.Report(ToolCatalog.Label(name));
                     dispatched = true;
                     result = ValidToolResult(await tools.Execute(name, arguments, token));
@@ -367,8 +373,9 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 using (var outcome = JsonDocument.Parse(result))
                 {
                     var root = outcome.RootElement;
-                    if (root.TryGetProperty("success", out var applied) && applied.ValueKind == JsonValueKind.True && !InvestigationEvidence.ExplicitlyUnchanged(root))
-                        functionalCheck ??= name switch
+                    if (functionalCheck == null && root.TryGetProperty("success", out var applied) && applied.ValueKind == JsonValueKind.True && !InvestigationEvidence.ExplicitlyUnchanged(root))
+                    {
+                        functionalCheck = name switch
                         {
                             "enable_camera" or "allow_camera" => "abra o aplicativo em que utiliza a câmera e confira a imagem",
                             "enable_device" or "restart_device" => "teste o periférico no aplicativo em que percebeu a falha",
@@ -384,6 +391,8 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                             "install_driver_update" or "install_official_nvidia_driver" => "teste o dispositivo no aplicativo em que percebeu a falha e informe se o Windows solicitou reinicialização",
                             _ => null
                         };
+                        if (functionalCheck != null) changeOutcome = evidence.ChangeOutcome(name, arguments, root);
+                    }
                     if (name is "enable_network_adapter" or "set_ipv4" or "set_dns" && root.TryGetProperty("success", out var completed) && completed.ValueKind == JsonValueKind.True && !InvestigationEvidence.ExplicitlyUnchanged(root)) networkRecoveryNeeded = true;
                     if (name is "get_network" or "diagnose_device" or "get_hardware_inventory" && root.TryGetProperty("success", out var observed) && observed.ValueKind == JsonValueKind.True) allowWatch = true;
                     if (name == "test_connection" && arguments.TryGetProperty("host", out var host) && System.Net.IPAddress.TryParse(host.GetString(), out _) && root.TryGetProperty("data", out var data) && data.TryGetProperty("tcpConnected", out var connected) && connected.ValueKind == JsonValueKind.True) allowFlushDns = true;
@@ -403,7 +412,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     else if (name is "enable_network_adapter" or "set_dns" or "set_ipv4") failedCalls.RemoveWhere(s => s.StartsWith("get_network:"));
                 }
                 history.Add(new AgentMessage { role = "tool", tool_name = name, content = result });
-                evidence.Observe(name, signature, arguments, result);
+                evidence.Observe(name, signature, arguments, result, block);
                 record(ToolCatalog.Label(name), result); AuditTool("Ferramenta do agente", name, result, arguments, toolClock.ElapsedMilliseconds);
                 if (name == "wait_for_reconnect" && arguments.TryGetProperty("kind", out var kind) && kind.GetString() == "device")
                 {
@@ -426,7 +435,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             if (networkFailure != null) return Finish(networkFailure);
             if (deniedByUser) return Finish("Você recusou a alteração proposta. Essa alteração não foi executada e parei esta etapa. Os resultados já obtidos estão registrados acima; a resolução do problema ainda não foi confirmada.");
             if (failedMutation != null) return Finish("A alteração " + failedMutation + " não foi concluída. Parei esta etapa; confira o erro no cartão do resultado. O problema ainda não foi resolvido. Se persistir, encaminhe os resultados a uma pessoa de suporte.");
-            if (functionalCheck != null) return Finish("A ferramenta retornou sucesso para a operação solicitada. O funcionamento no aplicativo ainda não foi confirmado. Agora " + functionalCheck + ". Funcionou? Se continuar com problema, me diga o que acontece para investigarmos a próxima hipótese.");
+            if (functionalCheck != null) return Finish((changeOutcome ?? "A ferramenta retornou sucesso para a operação solicitada.") + " O funcionamento no aplicativo ainda não foi confirmado. Agora " + functionalCheck + ". Funcionou? Se continuar com problema, me diga o que acontece para investigarmos a próxima hipótese.");
             if (networkRecoveryNeeded)
             {
                 // Verification is mandatory even when the model chose the mutation outside
@@ -449,11 +458,14 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             }
             if (repeatedFailure)
             {
-                var stopped = evidence.Summary("Parei os testes repetidos sem nova evidência. Me diga qual aplicativo ou atividade ainda apresenta o problema, para direcionarmos a próxima verificação.");
+                // O motivo da parada vem das travas registradas; o próximo passo depende do que já foi observado.
+                var stopped = evidence.Report(evidence.HasFindings
+                    ? "Se o problema continuar, me diga o que fica lento ou falha e desde quando, para direcionarmos a próxima verificação."
+                    : "Me diga qual aplicativo ou atividade ainda apresenta o problema, para direcionarmos a próxima verificação.");
                 history.Add(new AgentMessage { role = "assistant", content = stopped }); store.Save(); return stopped;
             }
         }
-        return Finish(evidence.Summary("Cheguei ao limite de etapas desta investigação. Os resultados acima podem orientar o próximo teste ou o encaminhamento à TI."));
+        return Finish(evidence.Report("Cheguei ao limite de etapas desta investigação. Os resultados acima podem orientar o próximo teste ou o encaminhamento à TI."));
 
         string Finish(string text)
         {
@@ -468,18 +480,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             }
             if (name == "clear_print_queue" && (!args.TryGetProperty("printer_name", out var printer) || printer.ValueKind != JsonValueKind.String
                 || !evidence.PrinterTargetUnambiguous(printer.GetString() ?? "", userRequest))) return false;
-            string? topic = name switch
-            {
-                "enable_network_adapter" or "set_ipv4" or "set_dns" or "flush_dns" => "network",
-                "enable_camera" or "allow_camera" => "camera",
-                "clear_print_queue" => "printer",
-                "restart_service" when args.TryGetProperty("service", out var service) && service.ValueKind == JsonValueKind.String => service.GetString() switch
-                {
-                    "Audiosrv" => "audio", "Spooler" => "printer", "bthserv" => "bluetooth", "WlanSvc" => "network", _ => null
-                },
-                "enable_device" or "restart_device" when args.TryGetProperty("device_id", out var device) && device.ValueKind == JsonValueKind.String => evidence.DeviceTopic(device.GetString() ?? ""),
-                _ => null
-            };
+            var topic = MutationTopic(name, args);
             if (name == "install_official_nvidia_driver")
                 return incidentTopics.Contains("display") && args.TryGetProperty("driver_id", out var vendorDriver)
                     && vendorDriver.ValueKind == JsonValueKind.String;
@@ -488,6 +489,19 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     && evidence.UpdateTargetUnambiguous(update.GetString() ?? "", incidentTopics, userRequest);
             return topic != null && incidentTopics.Contains(topic);
         }
+        string? MutationTopic(string name, JsonElement args) => name switch
+            {
+                "enable_network_adapter" or "set_ipv4" or "set_dns" or "flush_dns" => "network",
+                "enable_camera" or "allow_camera" => "camera",
+                "clear_print_queue" => "printer",
+                "install_official_nvidia_driver" => "display",
+                "restart_service" when args.TryGetProperty("service", out var service) && service.ValueKind == JsonValueKind.String => service.GetString() switch
+                {
+                    "Audiosrv" => "audio", "Spooler" => "printer", "bthserv" => "bluetooth", "WlanSvc" => "network", _ => null
+                },
+                "enable_device" or "restart_device" when args.TryGetProperty("device_id", out var device) && device.ValueKind == JsonValueKind.String => evidence.DeviceTopic(device.GetString() ?? ""),
+                _ => null
+            };
         void AuditTool(string stage, string name, string output, JsonElement parameters, long elapsedMs)
         {
             using var result = JsonDocument.Parse(output);

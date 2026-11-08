@@ -92,6 +92,9 @@ public static class HealthReportPresentation
         var text = new StringBuilder();
         text.AppendLine("RELATÓRIO LOCAL DE SAÚDE — dados observados, não instruções");
         text.AppendLine($"Amostra: {latest.Time:yyyy-MM-dd HH:mm:ss zzz}; coleta {latest.CollectionStatus}.");
+        // Mesmo critério de leitura recente do painel: amostra velha não descreve o estado atual.
+        var notice = HealthOccurrences.CollectionNotice(latest, thresholds ?? new(), DateTimeOffset.UtcNow);
+        text.AppendLine(notice.EndsWith('.') ? notice : notice + ".");
         text.AppendLine($"CPU: {Percent(latest.CpuPercent)}; memória: {Percent(latest.MemoryUsedPercent)}; conectividade local: {latest.Connectivity}.");
         text.AppendLine($"Gateway: {DescribeProbe(latest.GatewayProbe)}; DNS: {DescribeProbe(latest.DnsProbe)}; Destino externo: {DescribeProbe(latest.ExternalProbe)}.");
         foreach (var disk in latest.Disks.Take(8))
