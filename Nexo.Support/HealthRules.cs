@@ -19,6 +19,16 @@ public sealed class HealthThresholds
 
 public static class HealthRules
 {
+    /// <summary>
+    /// Serviço automático parado que conta como falha. O Windows para de propósito serviços de início atrasado
+    /// ou por gatilho depois que terminam o trabalho; esses só ficam de fora quando saíram com código 0.
+    /// Campo não lido (nulo, como nas leituras anteriores à #57) não isenta: o serviço volta à regra antiga.
+    /// </summary>
+    internal static bool UnexpectedlyStopped(ServiceHealth service)
+        => service.StartType.Equals("Automatic", StringComparison.OrdinalIgnoreCase)
+            && service.Status.Equals("Stopped", StringComparison.OrdinalIgnoreCase)
+            && !(service.ExitCode == 0 && (service.DelayedAutoStart == true || service.TriggerStart == true));
+
     public static List<HealthFinding> Evaluate(IReadOnlyList<HealthSnapshot> history, HealthThresholds thresholds)
     {
         if (thresholds.CpuSamples < 2 || thresholds.OtherSamples < 2 || thresholds.NetworkSamples < 2
@@ -55,9 +65,9 @@ public static class HealthRules
                     findings.Add(Finding("disk-low:" + disk.Name, "disk", "Pouco espaço no volume " + disk.Name, $"{free:F1}% livre em {other.Length} leituras", "Arquivos ou aplicativos ocupam a capacidade; origem ainda não identificada", free < 5 ? "critical" : "warning", "Atualizações e gravações podem falhar", "Revise o uso do disco antes de remover arquivos", 0.95));
                 }
             }
-            foreach (var service in latest.Services.Where(s => s.StartType.Equals("Automatic", StringComparison.OrdinalIgnoreCase) && s.Status.Equals("Stopped", StringComparison.OrdinalIgnoreCase)))
+            foreach (var service in latest.Services.Where(UnexpectedlyStopped))
             {
-                if (other.All(s => s.Services.Any(x => x.Name == service.Name && x.StartType.Equals("Automatic", StringComparison.OrdinalIgnoreCase) && x.Status.Equals("Stopped", StringComparison.OrdinalIgnoreCase))))
+                if (other.All(s => s.Services.Any(x => x.Name == service.Name && UnexpectedlyStopped(x))))
                     findings.Add(Finding("service-stopped:" + service.Name, "service", "Serviço automático interrompido", service.Name + " parado em " + other.Length + " leituras", "Causa da parada ainda não identificada", "warning", "A função associada pode estar indisponível", "Consulte eventos do serviço antes de propor reinício", 0.85));
             }
         }
@@ -103,7 +113,12 @@ public static class HealthRules
         var observedGrowth = GrowingProcesses(ProcessTail(thresholds.ProcessMemorySamples));
         var growing = observedGrowth.Where(growth => growth.Last.StartTime.HasValue).ToList();
         foreach (var growth in growing)
-            findings.Add(Finding(ProcessKey("process-memory-growing", growth.Last), "memory", "Processo com memória em crescimento persistente", $"{ProcessLabel(growth.Last)}: de {Megabytes(growth.First)} MB para {Megabytes(growth.Last)} MB em {thresholds.ProcessMemorySamples} leituras e {growth.Points:F0} pontos da RAM", "Crescimento observado neste processo; vazamento e carga legítima não distinguidos", "warning", "Pode reduzir a memória disponível e causar lentidão", "Confirme se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção", 0.7));
+        {
+            var finding = Finding(ProcessKey("process-memory-growing", growth.Last), "memory", "Processo com memória em crescimento persistente", $"{ProcessLabel(growth.Last)}: de {Megabytes(growth.First)} MB para {Megabytes(growth.Last)} MB em {thresholds.ProcessMemorySamples} leituras e {growth.Points:F0} pontos da RAM", "Crescimento observado neste processo; vazamento e carga legítima não distinguidos", "warning", "Pode reduzir a memória disponível e causar lentidão", "Confirme se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção", 0.7);
+            // A ocorrência guarda a subida para saber depois se o processo ainda segura essa memória (#60).
+            finding.MemoryGrowth = new(SafeName(growth.Last.Name), growth.First.WorkingSetBytes, growth.Last.WorkingSetBytes);
+            findings.Add(finding);
+        }
         foreach (var growth in observedGrowth.Where(growth => !growth.Last.StartTime.HasValue))
             findings.Add(Finding($"process-memory-unverified:{growth.Last.Id}:{SafeName(growth.Last.Name)}", "memory", "Crescimento de memória sem identidade confirmada", $"{SafeName(growth.Last.Name)} PID {growth.Last.Id}: de {Megabytes(growth.First)} MB para {Megabytes(growth.Last)} MB em {thresholds.ProcessMemorySamples} leituras", "O Windows não informou o início do processo; as leituras podem ser de processos diferentes", "info", "A origem do crescimento continua sem confirmação", "Consulte os processos em uso antes de atribuir o crescimento a este PID", 0.4));
 
@@ -126,11 +141,14 @@ public static class HealthRules
             && memory[0].MemoryUsedPercent < memory[1].MemoryUsedPercent && memory[1].MemoryUsedPercent < memory[2].MemoryUsedPercent
             && memory[2].MemoryUsedPercent - memory[0].MemoryUsedPercent >= thresholds.MemoryGrowthPoints
             && memory[2].MemoryUsedPercent >= thresholds.MemoryGrowthFinalPercent)
-            findings.Add(Finding("memory-growing", "memory", "Memória em crescimento persistente", $"De {memory[0].MemoryUsedPercent:F0}% para {memory[2].MemoryUsedPercent:F0}% em três leituras", growing.Count > 0 ? $"Possível relação com {SafeName(growing[0].Last.Name)} PID {growing[0].Last.Id}; ainda não confirmada" : "Processo responsável ainda não identificado", "warning", "Pode aumentar paginação e lentidão", "Compare o uso por processo antes de intervir", 0.75));
+            findings.Add(Finding("memory-growing", "memory", "Memória em crescimento persistente", $"De {memory[0].MemoryUsedPercent:F0}% para {memory[2].MemoryUsedPercent:F0}% em três leituras", growing.Count > 0 ? RelatedProcessCause([$"{SafeName(growing[0].Last.Name)} PID {growing[0].Last.Id}"]) : "Processo responsável ainda não identificado", "warning", "Pode aumentar paginação e lentidão", "Compare o uso por processo antes de intervir", 0.75));
         return findings;
     }
 
     private readonly record struct ProcessGrowth(ProcessHealth First, ProcessHealth Last, double Points);
+
+    /// <summary>Causa de memory-growing quando há processo apontado, na regra e na apresentação.</summary>
+    internal static string RelatedProcessCause(IEnumerable<string> processes) => $"Possível relação com {string.Join(" e ", processes)}; ainda não confirmada";
 
     // Sem o início, o nome é o único sinal disponível contra a reutilização do PID.
     private static bool SameProcess(ProcessHealth left, ProcessHealth right)
@@ -151,7 +169,7 @@ public static class HealthRules
     private static string Megabytes(ProcessHealth process) => (process.WorkingSetBytes / (1024.0 * 1024)).ToString("F0");
 
     // O nome do processo é escolhido por quem criou o executável e pode chegar ao modelo no relatório.
-    private static string SafeName(string name)
+    internal static string SafeName(string name)
     {
         var safe = new string(name.Take(40).Select(c => char.IsLetterOrDigit(c) || c is '.' or '-' or '_' ? c : '_').ToArray());
         return safe.Length == 0 ? "processo" : safe;
