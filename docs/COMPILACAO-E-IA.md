@@ -1,6 +1,6 @@
 # Tutorial de compilação, execução e evolução da IA
 
-Este documento explica como preparar o ambiente, compilar, testar e publicar o Nexo a partir da branch `development`. O aplicativo está na versão 1.6.3 e o instalador na 1.0.0, conforme o `<Version>` de cada projeto. A segunda parte mostra como o modelo de IA é usado pelo projeto e como organizar um experimento de fine-tuning sem confundir treinamento com correções no código do aplicativo.
+Este documento explica como preparar o ambiente, compilar, testar e publicar o Nexo a partir da branch `development`. O aplicativo está na versão 1.7.0, ainda não publicada (a última publicada é a 1.6.3), e o instalador na 1.0.0, conforme o `<Version>` de cada projeto. O histórico e os hashes publicados ficam em [CHANGELOG.md](../CHANGELOG.md). A segunda parte mostra como o modelo de IA é usado pelo projeto e como organizar um experimento de fine-tuning sem confundir treinamento com correções no código do aplicativo.
 
 ## 1. Visão geral do projeto
 
@@ -226,7 +226,7 @@ Não execute `Nexo.Checks/DhcpLiveCheck.ps1` no computador de uso diário. Esse 
 Há duas formas principais de publicar só o aplicativo, sem o Ollama e sem o modelo. Defina a versão uma vez, igual ao `<Version>` de `Nexo.Support.csproj`:
 
 ```powershell
-$nexoVersion = "1.6.3"
+$nexoVersion = "1.7.0"
 ```
 
 A primeira publicação com `-r win-x64` baixa pacotes de runtime do NuGet: em um teste, o cache `~/.nuget/packages` cresceu cerca de 290 MB.

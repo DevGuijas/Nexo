@@ -22,6 +22,7 @@ try
     var freshDirectRoot = Path.Combine(root, "direct-fresh");
     var freshDirectStore = new Store(freshDirectRoot, directAccess: true);
     var directSession = freshDirectStore.GetLocalSession();
+    Assert(AppVersion.Format(new Version(1, 7, 0, 0)) == "1.7.0" && AppVersion.Format(new Version(1, 7)) == "desconhecida" && AppVersion.Format(null) == "desconhecida", "Versão exibida usa MAJOR.MINOR.PATCH do assembly e não inventa número ausente");
     Assert(freshDirectStore.Data.Accounts.Count == 0 && directSession.Name == Environment.UserName && !directSession.Admin, "Acesso direto usa a identidade Windows sem criar conta administrativa padrão");
     freshDirectStore.Require(directSession, a => a.Diagnose);
     freshDirectStore.Require(directSession, a => a.Repair);

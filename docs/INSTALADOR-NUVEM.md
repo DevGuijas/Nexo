@@ -12,9 +12,10 @@ Download público do instalador: [NexoSetup.exe](https://objectstorage.sa-saopau
 
 ## Gerar uma versão
 
-1. Altere `<Version>` em `Nexo.Support/Nexo.Support.csproj` e o título da janela. Não substitua os ZIPs de uma versão já publicada.
-2. Para a primeira publicação, confirme que `qwen3:8b` está instalado no Ollama local e obtenha `OllamaSetup.exe` do fornecedor oficial. Verifique a assinatura e o SHA-256. Para uma versão que reutiliza os mesmos pacotes imutáveis já publicados, use `-ReusePublishedDependencies`.
-3. Execute a suíte e crie os pacotes:
+1. Altere `<Version>` em `Nexo.Support/Nexo.Support.csproj` e abra a entrada da versão no [CHANGELOG.md](../CHANGELOG.md) como "não publicada". O título da janela lê a versão do projeto. Uma versão já publicada nunca é reaproveitada: o script consulta `releases/<versão>/nexo-app.zip` na Oracle e se recusa a continuar se ele existir.
+2. Conclua os itens de "Antes de publicar" da entrada e troque "não publicada" pela data da publicação (`## [1.7.0] — AAAA-MM-DD`). Sem a data, o script não gera os pacotes. Use o PowerShell 7 (`pwsh`). Altere a versão de `Nexo.Setup` só quando o código do instalador mudar.
+3. Para a primeira publicação, confirme que `qwen3:8b` está instalado no Ollama local e obtenha `OllamaSetup.exe` do fornecedor oficial. Verifique a assinatura e o SHA-256. Para uma versão que reutiliza os mesmos pacotes imutáveis já publicados, use `-ReusePublishedDependencies`.
+4. Execute a suíte e crie os pacotes:
 
 ```powershell
 dotnet run --project Nexo.Checks -c Release
@@ -23,10 +24,10 @@ dotnet run --project Nexo.Setup.Checks -c Release
   -OllamaInstallerPath artifacts/ollama-winget/Ollama_0.40.7_User_X64_inno_en-US.exe `
   -OllamaExpectedSha256 6394E61DAEDC2DE736C9F76CBC58F30F9241BA1EB4C2F79EF75E833168DB8A60
 dotnet publish Nexo.Setup/Nexo.Setup.csproj -c Release -r win-x64 --self-contained true `
-  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/NexoSetup-1.6.3
+  -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o artifacts/NexoSetup-1.0.0
 ```
 
-Os arquivos ficam em `artifacts/cloud-release/releases/<versão>/`, `latest.sig` e `latest.json`. Para reutilizar pacotes já publicados, rode `./scripts/Build-CloudRelease.ps1 -ReusePublishedDependencies` e envie apenas o ZIP novo do aplicativo. Envie os arquivos novos à Oracle e confira seus tamanhos. Envie `latest.sig` e **por último** `latest.json`; este último passo ativa a versão para novos instaladores. Depois execute `NexoSetup.exe --check` e confira o código de saída 0, que indica manifesto assinado e arquivos disponíveis por HTTPS com o tamanho esperado.
+O último comando só é necessário quando o instalador muda; a pasta leva a versão do `Nexo.Setup`, não a do aplicativo. Os arquivos ficam em `artifacts/cloud-release/releases/<versão>/`, `latest.sig` e `latest.json`. A pasta da versão também recebe `SHA256SUMS.txt`, com o SHA-256 do `Nexo.exe` de dentro do ZIP e do próprio ZIP. O script imprime esses hashes, os tamanhos e o commit: registre-os na tabela "Artefatos publicados" do CHANGELOG.md. Para reutilizar pacotes já publicados, rode `./scripts/Build-CloudRelease.ps1 -ReusePublishedDependencies` e envie apenas o ZIP novo do aplicativo. Envie os arquivos novos à Oracle e confira seus tamanhos. Envie `latest.sig` e **por último** `latest.json`; este último passo ativa a versão para novos instaladores. Depois execute `NexoSetup.exe --check` e confira o código de saída 0, que indica manifesto assinado e arquivos disponíveis por HTTPS com o tamanho esperado.
 
 O par de chaves de publicação é RSA 3072. A chave pública fica embutida no instalador em `Nexo.Setup/release-public.pem`; a privada deste ambiente fica em `%USERPROFILE%\.nexo-release-signing.pem` e **não deve entrar no Git nem no bucket**. Guarde backup seguro da chave privada. Caso ela seja perdida ou comprometida, publique um novo instalador com outra chave pública. O manifesto assinado evita que apenas alterar arquivos no bucket faça o instalador executar um pacote não autorizado.
 

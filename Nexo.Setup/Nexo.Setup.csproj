@@ -7,6 +7,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>NexoSetup</AssemblyName>
     <Version>1.0.0</Version>
+    <Product>Nexo</Product>
+    <Description>Instalador do Nexo que baixa a versão publicada no manifesto assinado.</Description>
   </PropertyGroup>
   <ItemGroup><EmbeddedResource Include="release-public.pem" /></ItemGroup>
 </Project>

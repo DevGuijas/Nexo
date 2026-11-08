@@ -74,6 +74,7 @@ try
     var corruptRoot = Path.Combine(root, "corrupt-model");
     try { await Installer.InstallModelArchive(corruptArchive, corruptRoot); throw new Exception("FAIL: blob inválido aceito"); }
     catch (InvalidDataException) { Check(!File.Exists(Path.Combine(corruptRoot, "manifests", "registry.ollama.ai", "library", "qwen3", "8b")), "Blob inválido bloqueia publicação do manifesto do modelo"); }
+    ReleaseChecks.Run(Check);
     Console.WriteLine($"{count} verificações do instalador aprovadas.");
 }
 finally { Directory.Delete(root, true); }
