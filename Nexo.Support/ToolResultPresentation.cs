@@ -43,6 +43,20 @@ public static class ToolResultPresentation
                 return (offers.Length == 1 ? "1 oferta compatível" : $"{offers.Length} ofertas compatíveis", "Ofertas encontradas para o hardware observado:\n" + string.Join("\n", names), false);
             }
 
+            if (label.Contains("dispositivos e sistema", StringComparison.OrdinalIgnoreCase)
+                && root.TryGetProperty("data", out var diagnosed) && diagnosed.ValueKind == JsonValueKind.Object
+                && diagnosed.TryGetProperty("drivers", out var faulty) && faulty.ValueKind == JsonValueKind.Array && faulty.GetArrayLength() > 0)
+            {
+                var entries = faulty.EnumerateArray().ToArray();
+                var lines = entries.Take(8).Select(device =>
+                {
+                    var code = device.TryGetProperty("Code", out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number) ? number : -1;
+                    var state = code switch { 22 => "desativado (código 22)", -1 => "com erro", _ => $"código {code}" };
+                    return $"• {Text(device, "Name", "Dispositivo sem nome")}: {state}\n  Driver: {Text(device, "Driver", "não informado")}";
+                });
+                return (entries.Length == 1 ? "1 dispositivo com erro" : $"{entries.Length} dispositivos com erro", string.Join("\n", lines), false);
+            }
+
             if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object)
             {
                 if (label.Contains("drivers oficiais da NVIDIA", StringComparison.OrdinalIgnoreCase))

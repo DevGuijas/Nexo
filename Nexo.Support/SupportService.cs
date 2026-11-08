@@ -15,6 +15,8 @@ public sealed record Device(string Name, string Id, int Code, string Status)
     public string Manufacturer { get; init; } = "";
     public string DriverProvider { get; init; } = "";
     public string DriverVersion { get; init; } = "";
+    public string InfName { get; init; } = "";
+    public bool Present { get; init; } = true;
 }
 public sealed record Diagnostic(string Topic, string Summary, List<Device> Devices);
 public sealed class SupportService(Store store)
