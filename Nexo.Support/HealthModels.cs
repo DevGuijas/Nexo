@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text.Json.Serialization;
 
 namespace Nexo.Support;
 
@@ -27,7 +28,15 @@ public sealed class HealthSnapshot
 
 public sealed record DiskHealth(string Name, long FreeBytes, long TotalBytes, string Health = "unavailable");
 public sealed record ProcessHealth(string Name, int Id, long WorkingSetBytes, double? CpuPercent, DateTimeOffset? StartTime = null);
-public sealed record ServiceHealth(string Name, string Status, string StartType);
+/// <summary>
+/// Serviço automático observado. Os três campos opcionais só são lidos para serviços que não estão em execução
+/// (Win32_Service.DelayedAutoStart, Win32_Service.ExitCode e a chave TriggerInfo do serviço no registro).
+/// Nulo quer dizer "não lido"; leituras gravadas antes da #57 não têm esses campos e continuam nulas.
+/// </summary>
+public sealed record ServiceHealth(string Name, string Status, string StartType,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? DelayedAutoStart = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? TriggerStart = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? ExitCode = null);
 public sealed record AdapterHealth(string Id, string Name, string Status, bool Enabled);
 public sealed record NetworkProbeReading(string State = "disabled", string Target = "", string Detail = "", string ConfigurationId = "");
 
@@ -47,7 +56,23 @@ public sealed class HealthFinding
     public string Source { get; set; } = "rules";
     public string ProbeTarget { get; set; } = "";
     public string ProbeConfigurationId { get; set; } = "";
+    /// <summary>Só em process-memory-growing gravado a partir da #60; nos demais e nos registros anteriores fica nulo e não é gravado.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ProcessMemoryGrowth? MemoryGrowth { get; set; }
+
+    /// <summary>Cópia para exibição: o registro gravado não muda.</summary>
+    public HealthFinding WithCause(string cause)
+    {
+        var copy = (HealthFinding)MemberwiseClone();
+        copy.Cause = cause;
+        return copy;
+    }
 }
+
+/// <summary>
+/// Subida que disparou o alerta de um processo: nome já filtrado e working set no início e no fim da janela.
+/// O PID e o horário de início continuam no identificador da ocorrência.
+/// </summary>
+public sealed record ProcessMemoryGrowth(string Name, long FromBytes, long ToBytes);
 
 public sealed class SystemEvent
 {

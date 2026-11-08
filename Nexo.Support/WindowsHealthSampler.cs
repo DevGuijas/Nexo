@@ -18,10 +18,27 @@ public sealed class WindowsHealthSampler : IHealthSampler
         connectivityProbe = probe ?? new ConnectivityProbe();
     }
 
-    private const string MetricsScript = """
+    // Para serviços Auto fora de execução, a coleta também lê o início atrasado e o código de saída (Win32_Service)
+    // e se há gatilho de início (Action=1 em alguma subchave de TriggerInfo, no registro, sem abrir processo).
+    // Serviços em execução não precisam disso para a regra, e o registro é lido só para os poucos que não estão.
+    // Erro ao ler o gatilho vira nulo, que não isenta o serviço do alerta, e não derruba o resto da coleta.
+    internal const string MetricsScript = """
         $os=Get-CimInstance Win32_OperatingSystem
         $cpu=Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average
-        $services=@(Get-CimInstance Win32_Service | Where-Object { $_.StartMode -eq 'Auto' } | Select-Object Name,State)
+        function Get-NexoTriggerStart([string]$Name){
+            $path='HKLM:\SYSTEM\CurrentControlSet\Services\'+$Name+'\TriggerInfo'
+            try{
+                if(-not (Test-Path -LiteralPath $path)){return $false}
+                foreach($trigger in @(Get-ChildItem -LiteralPath $path -ErrorAction Stop)){
+                    if((Get-ItemProperty -LiteralPath $trigger.PSPath -ErrorAction Stop).Action -eq 1){return $true}
+                }
+                return $false
+            }catch{return $null}
+        }
+        $services=@(Get-CimInstance Win32_Service | Where-Object { $_.StartMode -eq 'Auto' } | ForEach-Object {
+            if($_.State -eq 'Running'){[pscustomobject]@{ Name=$_.Name; State=$_.State }}
+            else{[pscustomobject]@{ Name=$_.Name; State=$_.State; DelayedAutoStart=$_.DelayedAutoStart; ExitCode=$_.ExitCode; TriggerStart=(Get-NexoTriggerStart $_.Name) }}
+        })
         [pscustomobject]@{ Cpu=$cpu.Average; TotalKb=$os.TotalVisibleMemorySize; FreeKb=$os.FreePhysicalMemory; Services=$services } | ConvertTo-Json -Compress -Depth 4
         """;
 
@@ -120,7 +137,10 @@ public sealed class WindowsHealthSampler : IHealthSampler
             .Select(service => new ServiceHealth(
                 service.GetProperty("Name").GetString() ?? "",
                 service.GetProperty("State").GetString() ?? "",
-                "Automatic"))
+                "Automatic",
+                OptionalBool(service, "DelayedAutoStart"),
+                OptionalBool(service, "TriggerStart"),
+                service.TryGetProperty("ExitCode", out var exit) && exit.ValueKind == JsonValueKind.Number && exit.TryGetInt64(out var code) ? code : null))
             .ToList();
 
         snapshot.Services = automatic
@@ -132,4 +152,7 @@ public sealed class WindowsHealthSampler : IHealthSampler
         if (automatic.Count > snapshot.Services.Count)
             snapshot.Warnings.Add($"Serviços automáticos: {snapshot.Services.Count} de {automatic.Count} coletados; os demais não foram avaliados.");
     }
+
+    private static bool? OptionalBool(JsonElement service, string name)
+        => service.TryGetProperty(name, out var value) ? value.ValueKind switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => null } : null;
 }
