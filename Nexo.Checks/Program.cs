@@ -207,6 +207,7 @@ try
     Reject(() => WindowsTools.ValidateStatic("192.168.1.5", 24, "192.168.2.1"), "Gateway fora da sub-rede rejeitado");
     WindowsTools.ValidateStatic("192.168.1.5", 24, "192.168.1.1"); Assert(true, "IPv4 estático e gateway válidos");
     await AgentChecks.Run(store, admin, Assert);
+    await FinalAnswerChecks.Run(store, admin, Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);
