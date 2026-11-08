@@ -20,6 +20,8 @@ internal static class FinalAnswerChecks
             StaleHealthReport(assert);
             MonitorAdvice(assert);
             await AmbiguousTargetScenario(store, actor, assert);
+            await AmbiguousOfferScenario(store, actor, assert);
+            await SecondTurnBeforeQuery(store, actor, assert);
             await MemoryScenario(store, actor, assert);
             await DisabledMicrophoneScenario(store, actor, assert);
             await StorageInventoryScenario(store, actor, assert);
@@ -484,6 +486,121 @@ internal static class FinalAnswerChecks
             Call("restart_device", new { device_id = "HDAUDIO\\SPK1" }), promise, promise, promise, promise);
         assert(tools.Calls.SequenceEqual(["diagnose_device"]) && answer.Contains("O Nexo não executou a etapa “Reiniciando e verificando o dispositivo” porque o alvo não foi identificado sem ambiguidade")
             && answer.Contains("Diga qual dispositivo ou impressora apresenta a falha respondendo só com o nome dele, como aparece no cartão da consulta.") && !answer.Contains("não cita"), "Alvo ambíguo explica a trava sem culpar o pedido");
+    }
+
+    // Duas ofertas de driver para a mesma placa (#72): a trava pergunta qual, e no turno seguinte só o título escolhe.
+    private static async Task AmbiguousOfferScenario(Store store, Account actor, Action<bool, string> assert)
+    {
+        const string hardwareId = "PCI\\VEN_1234&DEV_5678";
+        string Tools(string name, JsonElement args) => name switch
+        {
+            "get_hardware_inventory" => WindowsTools.Ok(new { Truncated = false, Devices = new[] { new Device("Placa gráfica", "PCI\\VEN_1234&DEV_5678\\A", 0, "OK") { HardwareIds = [hardwareId] } } }),
+            "scan_driver_updates" => WindowsTools.Ok(JsonSerializer.Serialize(new[] { new { Id = "00000000-0000-0000-0000-0000000000a1", Title = "Driver gráfico", HardwareID = hardwareId },
+                new { Id = "00000000-0000-0000-0000-0000000000a2", Title = "Driver gráfico Pro", HardwareID = hardwareId } })),
+            "install_driver_update" when args.GetProperty("update_id").GetString() == "00000000-0000-0000-0000-0000000000a2" => WindowsTools.Ok(new { Verification = "version_changed", AfterVersion = "2.0" }),
+            _ => throw new Exception("Oferta não escolhida chegou ao executor: " + name)
+        };
+        var promise = JsonSerializer.Serialize(new { message = new { role = "assistant", content = "Vou instalar o driver agora." } });
+        var first = new FlowTools(Tools);
+        var asked = await Run(store, actor, "A placa de vídeo está piscando.", first,
+            Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }), Call("install_driver_update", new { update_id = "00000000-0000-0000-0000-0000000000a1" }),
+            promise, promise, promise, promise);
+        assert(!first.Calls.Contains("install_driver_update") && asked.Contains("há mais de uma oferta para o dispositivo relatado: “Driver gráfico”; “Driver gráfico Pro”. Qual delas você quer instalar? Responda só com o nome"),
+            "Oferta ambígua: a trava não instala e pergunta qual oferta, pedindo só o nome");
+
+        async Task<(FlowTools Tools, string Answer)> Reply(string text, params string[] responses)
+        {
+            var tools = new FlowTools(Tools);
+            using var model = new ModelSequence(responses);
+            using var http = new HttpClient(model);
+            var conversation = new Conversation { UserId = actor.Id, Entries = [new Entry { Role = "user", Text = "A placa de vídeo está piscando." },
+                new Entry { Role = "assistant", Text = asked }, new Entry { Role = "user", Text = text }] };
+            return (tools, await new AgentService(store, tools, http).Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None));
+        }
+        var chosen = await Reply("Driver gráfico Pro", Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }),
+            Call("install_driver_update", new { update_id = "00000000-0000-0000-0000-0000000000a2" }), promise, promise, promise, promise);
+        assert(chosen.Tools.Calls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates", "install_driver_update"]),
+            "Oferta ambígua: no turno seguinte, a resposta só com o título instala a oferta escolhida");
+        var refused = await Reply("não, o Driver gráfico Pro", Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }),
+            Call("install_driver_update", new { update_id = "00000000-0000-0000-0000-0000000000a2" }), promise, promise, promise, promise);
+        assert(!refused.Tools.Calls.Contains("install_driver_update") && refused.Answer.Contains("Qual delas você quer instalar?"),
+            "Oferta ambígua: resposta com outras palavras não instala e pergunta de novo");
+    }
+
+    // Gate de QA do 9d255d4: no 2º turno o histórico já tem o ID, e o modelo pode pedir a alteração antes de consultar de novo.
+    // Barrada por falta de evidência no turno, a chamada não conta como falha: depois da consulta, a mesma chamada é executada.
+    private static async Task SecondTurnBeforeQuery(Store store, Account actor, Action<bool, string> assert)
+    {
+        var promise = JsonSerializer.Serialize(new { message = new { role = "assistant", content = "Vou fazer a alteração agora." } });
+        async Task<FlowTools> TwoTurns(string request, string reply, Func<string, JsonElement, string> execute, string[] first, string[] second)
+        {
+            var conversation = new Conversation { UserId = actor.Id, Entries = [new Entry { Role = "user", Text = request }] };
+            using (var model = new ModelSequence(first))
+            using (var http = new HttpClient(model))
+                conversation.Entries.Add(new Entry { Role = "assistant", Text = await new AgentService(store, new FlowTools(execute), http).Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None) });
+            conversation.Entries.Add(new Entry { Role = "user", Text = reply });
+            var tools = new FlowTools(execute);
+            using (var model = new ModelSequence(second))
+            using (var http = new HttpClient(model))
+                await new AgentService(store, tools, http).Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None);
+            return tools;
+        }
+
+        const string hardwareId = "PCI\\VEN_1234&DEV_5678";
+        const string basic = "00000000-0000-0000-0000-0000000000b1", pro = "00000000-0000-0000-0000-0000000000b2";
+        string Offers(string name, JsonElement args) => name switch
+        {
+            "get_hardware_inventory" => WindowsTools.Ok(new { Truncated = false, Devices = new[] { new Device("Placa gráfica", "PCI\\VEN_1234&DEV_5678\\A", 0, "OK") { HardwareIds = [hardwareId] } } }),
+            "scan_driver_updates" => WindowsTools.Ok(JsonSerializer.Serialize(new[] { new { Id = basic, Title = "Driver gráfico", HardwareID = hardwareId }, new { Id = pro, Title = "Driver gráfico Pro", HardwareID = hardwareId } })),
+            "install_driver_update" when args.GetProperty("update_id").GetString() == pro => WindowsTools.Ok(new { Verification = "version_changed", AfterVersion = "2.0" }),
+            _ => throw new Exception("Oferta não escolhida chegou ao executor: " + name)
+        };
+        var offer = await TwoTurns("A placa de vídeo está piscando.", "Driver gráfico Pro", Offers,
+            [Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }), Call("install_driver_update", new { update_id = basic }), promise, promise, promise, promise],
+            [Call("install_driver_update", new { update_id = pro }), Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }),
+                Call("install_driver_update", new { update_id = pro }), promise, promise, promise, promise]);
+        assert(offer.Calls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates", "install_driver_update"]),
+            "2º turno: instalação pedida antes da consulta não vira falha repetida; depois da consulta, a oferta escolhida é instalada (" + string.Join(",", offer.Calls) + ")");
+        var scannedFirst = await TwoTurns("A placa de vídeo está piscando.", "Driver gráfico Pro", Offers,
+            [Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }), Call("install_driver_update", new { update_id = basic }), promise, promise, promise, promise],
+            [Call("scan_driver_updates", new { }), Call("install_driver_update", new { update_id = pro }), Call("get_hardware_inventory", new { category = "display" }),
+                Call("install_driver_update", new { update_id = pro }), promise, promise, promise, promise]);
+        assert(scannedFirst.Calls.SequenceEqual(["scan_driver_updates", "get_hardware_inventory", "install_driver_update"]),
+            "2º turno: oferta consultada sem o hardware observado ainda é falta de evidência; depois do inventário, é instalada (" + string.Join(",", scannedFirst.Calls) + ")");
+
+        const string fifine = "USB\\FIFINE", headset = "USB\\HEADSET";
+        string Audio(string name, JsonElement args) => name switch
+        {
+            "diagnose_device" => WindowsTools.Ok(new { count = 2, devices = new[] { new Device("Microfone Fifine USB", fifine, 22, "Error"), new Device("Fone de ouvido USB", headset, 22, "Error") } }),
+            "enable_device" when args.GetProperty("device_id").GetString() == fifine => """{"success":true,"data":{"Name":"Microfone Fifine USB","ConfigManagerErrorCode":0,"Status":"OK"}}""",
+            _ => throw new Exception("Dispositivo não escolhido chegou ao executor: " + name)
+        };
+        var device = await TwoTurns("meu microfone parou de funcionar", "Microfone Fifine USB", Audio, [],
+            [Call("enable_device", new { device_id = fifine }), Call("diagnose_device", new { topic = "audio" }), Call("enable_device", new { device_id = fifine }), promise, promise, promise, promise]);
+        assert(device.Calls.SequenceEqual(["diagnose_device", "enable_device"]),
+            "2º turno: dispositivo habilitado antes da consulta não vira falha repetida; depois da consulta, o escolhido é habilitado (" + string.Join(",", device.Calls) + ")");
+
+        string Printers(string name, JsonElement args) => name switch
+        {
+            "get_printers" => WindowsTools.Ok(JsonSerializer.Serialize(new[] { new { Name = "Canon Sala", Jobs = 1, Status = "Normal" }, new { Name = "HP LaserJet Recepção", Jobs = 1, Status = "Normal" } })),
+            "clear_print_queue" when args.GetProperty("printer_name").GetString() == "Canon Sala" => WindowsTools.Ok(new { Printer = "Canon Sala", Remaining = 0 }),
+            _ => throw new Exception("Impressora não escolhida chegou ao executor: " + name)
+        };
+        var printer = await TwoTurns("a impressora não imprime", "Canon Sala", Printers, [],
+            [Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("get_printers", new { }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), promise, promise, promise, promise]);
+        assert(printer.Calls.SequenceEqual(["get_printers", "clear_print_queue"]),
+            "2º turno: fila limpa antes da consulta não vira falha repetida; depois da consulta, a fila escolhida é limpa (" + string.Join(",", printer.Calls) + ")");
+
+        // Barrada por alvo errado, a chamada conta como falha desde a primeira: repetida, a trava encerra o turno ali.
+        var wrong = await TwoTurns("a impressora não imprime", "Canon Sala", Printers, [],
+            [Call("get_printers", new { }), Call("clear_print_queue", new { printer_name = "HP LaserJet Recepção" }), Call("clear_print_queue", new { printer_name = "HP LaserJet Recepção" }),
+                Call("get_printers", new { }), promise, promise, promise, promise]);
+        assert(wrong.Calls.SequenceEqual(["get_printers"]), "2º turno: alteração barrada por alvo errado e repetida encerra o turno sem chegar ao executor (" + string.Join(",", wrong.Calls) + ")");
+        // Sem evidência, só a primeira tentativa é perdoada: a segunda conta como falha, e a terceira encerra o turno pela trava.
+        var thrice = await TwoTurns("a impressora não imprime", "Canon Sala", Printers, [],
+            [Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("clear_print_queue", new { printer_name = "Canon Sala" }),
+                Call("get_printers", new { }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), promise, promise, promise, promise]);
+        assert(thrice.Calls.Count == 0, "2º turno: a mesma alteração pedida três vezes sem consulta encerra o turno (" + string.Join(",", thrice.Calls) + ")");
     }
 
     // Cenário 5: lentidão com NexoMemTeste no topo e pouca memória livre; a investigação para na trava de repetição.

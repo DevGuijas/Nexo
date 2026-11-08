@@ -249,6 +249,10 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         var reconnectAttempted = false;
         string? control = observationOnly ? "O usuário pediu acompanhamento de desconexão/reconexão. Identifique o alvo por consulta e chame wait_for_reconnect; a ferramenta orienta o usuário e observa o evento. Estado PnP OK não atende esse pedido nem comprova funcionamento. Só pergunte se faltar informação para distinguir os alvos observados." : null;
         var failedCalls = new HashSet<string>();
+        // Alterações barradas porque o alvo ainda não apareceu em nenhuma consulta do turno. No 2º turno o histórico já traz o ID,
+        // e o modelo pode pedir a alteração antes de consultar de novo: a primeira barrada assim não conta como falha, para que a
+        // mesma chamada, depois da consulta, seja conferida pela trava em vez de cair na repetição. A segunda conta.
+        var unobservedCalls = new HashSet<string>();
         // Componentes cuja alteração a trava de tópico já barrou neste turno. O pedido não muda dentro do turno,
         // então uma segunda tentativa do mesmo componente seria barrada de novo: o turno para em vez de repetir (#63).
         var topicBlocked = new HashSet<string>();
@@ -363,6 +367,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 }
                 var signature = name + ":" + (arguments.ValueKind == JsonValueKind.Object ? JsonSerializer.Serialize(arguments.EnumerateObject().OrderBy(p => p.Name).ToDictionary(p => p.Name, p => p.Value)) : arguments.GetRawText());
                 var dispatched = false;
+                var awaitingEvidence = false;
                 (ControlBlock Kind, string? Topic)? block = null;
                 var toolClock = Stopwatch.StartNew();
                 try
@@ -376,6 +381,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     {
                         var missing = MutationTopic(name, arguments) is { } needed && !incidentTopics.Contains(needed) ? needed : null;
                         block = (ControlBlock.Topic, missing);
+                        awaitingEvidence = missing == null && !evidence.TargetObserved(name, arguments) && unobservedCalls.Add(signature);
                         // A mesma chamada barrada de novo, ou outra alteração do componente que o pedido não cita, encerra o turno:
                         // a trava daria a mesma resposta, e a explicação dela já diz ao usuário o próximo passo.
                         if (failedCalls.Contains(signature) || missing != null && !topicBlocked.Add(missing)) { repeatedFailure = true; lockStop = true; }
@@ -453,7 +459,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     if (outcome.RootElement.TryGetProperty("denied", out var denied) && denied.ValueKind == JsonValueKind.True) deniedByUser = true;
                     if (outcome.RootElement.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.False)
                     {
-                        failedCalls.Add(signature);
+                        if (!awaitingEvidence) failedCalls.Add(signature);
                         if (ToolCatalog.IsMutation(name) && dispatched) failedMutation = name;
                     }
                     else if (name is "enable_network_adapter" or "set_dns" or "set_ipv4") failedCalls.RemoveWhere(s => s.StartsWith("get_network:"));

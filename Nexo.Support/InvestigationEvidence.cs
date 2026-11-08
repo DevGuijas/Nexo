@@ -119,14 +119,32 @@ public sealed class InvestigationEvidence
         return update.HardwareId.Length > 0 && observedDevices.Values.Any(device => incidentTopics.Contains(device.Topic)
             && device.HardwareIds.Concat(device.CompatibleIds).Any(hardwareId => string.Equals(hardwareId, update.HardwareId, StringComparison.OrdinalIgnoreCase)));
     }
+    // Ofertas de driver seguem a regra das impressoras e dispositivos (#72): com mais de uma oferta para o hardware do incidente,
+    // só a resposta que é apenas o título de uma delas escolhe, e a autorização compara o update_id escolhido com o da chamada.
     public bool UpdateTargetUnambiguous(string id, HashSet<string> incidentTopics, string request)
     {
         if (!UpdateMatchesIncident(id, incidentTopics)) return false;
         var candidates = observedUpdates.Keys.Where(candidate => UpdateMatchesIncident(candidate, incidentTopics)).ToArray();
         if (candidates.Length == 1) return true;
-        var title = AgentProtocol.Normalize(observedUpdates[id].Title);
-        return title.Length >= 6 && AgentProtocol.Normalize(request).Contains(title, StringComparison.Ordinal)
-            && candidates.Count(candidate => AgentProtocol.Normalize(observedUpdates[candidate].Title) == title) == 1;
+        // Guardados para a explicação da trava durante o turno (a evidência é nova a cada turno): uma chamada posterior barrada
+        // por outro motivo não apaga a pergunta das ofertas.
+        ambiguousUpdateTitles = candidates.Select(candidate => observedUpdates[candidate].Title).Order(StringComparer.CurrentCultureIgnoreCase).ToArray();
+        return UserNamedExactlyOneTarget(request, candidates.Select(candidate => (candidate, observedUpdates[candidate].Title)), id, StringComparer.Ordinal);
+    }
+    private string[] ambiguousUpdateTitles = [];
+    // Se o alvo de uma alteração já apareceu numa consulta deste turno. Sem isso, a trava barra por falta de evidência, e não
+    // por alvo errado: o controlador não conta essa primeira tentativa como falha repetida.
+    public bool TargetObserved(string name, JsonElement args)
+    {
+        string? Argument(string key) => args.ValueKind == JsonValueKind.Object && args.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        return name switch
+        {
+            "enable_camera" or "enable_device" or "restart_device" => Argument("device_id") is { } device && observedDevices.ContainsKey(device),
+            "clear_print_queue" => Argument("printer_name") is { } printer && observedPrinters.ContainsKey(printer),
+            "install_driver_update" => Argument("update_id") is { } id && observedUpdates.TryGetValue(id, out var update) && observedDevices.Values.Any(device
+                => device.HardwareIds.Concat(device.CompatibleIds).Any(hardwareId => string.Equals(hardwareId, update.HardwareId, StringComparison.OrdinalIgnoreCase))),
+            _ => true
+        };
     }
     public bool HasSuccessfulTool(string name) => successfulTools.Contains(name);
     public bool HasSuccessfulMutation => successfulChanges.Count > 0;
@@ -304,8 +322,9 @@ public sealed class InvestigationEvidence
         return string.Join("\n", lines);
     }
 
-    private static string BlockExplanation((string Name, ControlBlock Kind, string? Topic) block) => block.Kind switch
+    private string BlockExplanation((string Name, ControlBlock Kind, string? Topic) block) => block.Kind switch
     {
+        ControlBlock.Topic when block.Topic == null && block.Name == "install_driver_update" && ambiguousUpdateTitles.Length > 1 => OfferQuestion(),
         ControlBlock.RepeatedEvidence => "Parei a investigação porque a IA pediu de novo " + Describe(block.Name) + ", que já tinha trazido o mesmo resultado duas vezes; repetir não traria informação nova.",
         ControlBlock.RepeatedFailure => "Parei a investigação porque a IA tentou repetir " + Describe(block.Name) + ", que já tinha falhado ou sido recusada neste turno; o motivo está no cartão desse resultado.",
         ControlBlock.UninformedDnsServers => "O Nexo não executou " + Describe(block.Name) + " porque os servidores DNS escolhidos pela IA não foram informados por você, e o Nexo não usa endereços de DNS inventados. Se o computador obtinha o DNS automaticamente, a correção indicada é voltar ao DNS automático, que continua dependendo da sua aprovação; para usar outro DNS, diga quais servidores a sua rede usa.",
@@ -313,6 +332,18 @@ public sealed class InvestigationEvidence
             ? "O Nexo não executou " + Describe(block.Name) + " porque o seu pedido não cita " + Component(topic) + ", a parte do Windows que essa alteração muda. Essa trava evita mexer em algo diferente do que você relatou. Se o problema for com " + Component(topic) + ", diga isso com suas palavras; a alteração continua dependendo da sua aprovação."
             : "O Nexo não executou " + Describe(block.Name) + " porque o alvo não foi identificado sem ambiguidade nas consultas deste turno. Diga qual dispositivo ou impressora apresenta a falha respondendo só com o nome dele, como aparece no cartão da consulta."
     };
+
+    // Ofertas com o mesmo nome (depois de ignorar caixa, acento e pontuação final) não se distinguem pela resposta: a pergunta
+    // diz isso em vez de pedir um nome que não resolve.
+    private string OfferQuestion()
+    {
+        var listed = "há mais de uma oferta para o dispositivo relatado: " + string.Join("; ", ambiguousUpdateTitles.Select(title => Quoted(title)));
+        var forms = ambiguousUpdateTitles.GroupBy(NameForm).ToArray();
+        if (forms.Length == 1)
+            return "O Nexo não instalou nenhum driver porque " + listed + ". As ofertas têm o mesmo nome, então a resposta com o nome não distingue uma da outra, e o Nexo não escolhe entre elas. Encaminhe à TI para avaliar qual instalar.";
+        return "O Nexo não instalou nenhum driver porque " + listed + ". Qual delas você quer instalar? " + ReplyWithName + " A instalação continua dependendo da sua aprovação."
+            + (forms.Any(form => form.Count() > 1) ? " Ofertas com o mesmo nome não se distinguem pela resposta; para essas, encaminhe à TI." : "");
+    }
 
     private static string Describe(string name) => name switch
     {
