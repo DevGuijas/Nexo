@@ -113,7 +113,12 @@ public static class HealthRules
         var observedGrowth = GrowingProcesses(ProcessTail(thresholds.ProcessMemorySamples));
         var growing = observedGrowth.Where(growth => growth.Last.StartTime.HasValue).ToList();
         foreach (var growth in growing)
-            findings.Add(Finding(ProcessKey("process-memory-growing", growth.Last), "memory", "Processo com memória em crescimento persistente", $"{ProcessLabel(growth.Last)}: de {Megabytes(growth.First)} MB para {Megabytes(growth.Last)} MB em {thresholds.ProcessMemorySamples} leituras e {growth.Points:F0} pontos da RAM", "Crescimento observado neste processo; vazamento e carga legítima não distinguidos", "warning", "Pode reduzir a memória disponível e causar lentidão", "Confirme se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção", 0.7));
+        {
+            var finding = Finding(ProcessKey("process-memory-growing", growth.Last), "memory", "Processo com memória em crescimento persistente", $"{ProcessLabel(growth.Last)}: de {Megabytes(growth.First)} MB para {Megabytes(growth.Last)} MB em {thresholds.ProcessMemorySamples} leituras e {growth.Points:F0} pontos da RAM", "Crescimento observado neste processo; vazamento e carga legítima não distinguidos", "warning", "Pode reduzir a memória disponível e causar lentidão", "Confirme se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção", 0.7);
+            // A ocorrência guarda a subida para saber depois se o processo ainda segura essa memória (#60).
+            finding.MemoryGrowth = new(SafeName(growth.Last.Name), growth.First.WorkingSetBytes, growth.Last.WorkingSetBytes);
+            findings.Add(finding);
+        }
         foreach (var growth in observedGrowth.Where(growth => !growth.Last.StartTime.HasValue))
             findings.Add(Finding($"process-memory-unverified:{growth.Last.Id}:{SafeName(growth.Last.Name)}", "memory", "Crescimento de memória sem identidade confirmada", $"{SafeName(growth.Last.Name)} PID {growth.Last.Id}: de {Megabytes(growth.First)} MB para {Megabytes(growth.Last)} MB em {thresholds.ProcessMemorySamples} leituras", "O Windows não informou o início do processo; as leituras podem ser de processos diferentes", "info", "A origem do crescimento continua sem confirmação", "Consulte os processos em uso antes de atribuir o crescimento a este PID", 0.4));
 
@@ -136,11 +141,14 @@ public static class HealthRules
             && memory[0].MemoryUsedPercent < memory[1].MemoryUsedPercent && memory[1].MemoryUsedPercent < memory[2].MemoryUsedPercent
             && memory[2].MemoryUsedPercent - memory[0].MemoryUsedPercent >= thresholds.MemoryGrowthPoints
             && memory[2].MemoryUsedPercent >= thresholds.MemoryGrowthFinalPercent)
-            findings.Add(Finding("memory-growing", "memory", "Memória em crescimento persistente", $"De {memory[0].MemoryUsedPercent:F0}% para {memory[2].MemoryUsedPercent:F0}% em três leituras", growing.Count > 0 ? $"Possível relação com {SafeName(growing[0].Last.Name)} PID {growing[0].Last.Id}; ainda não confirmada" : "Processo responsável ainda não identificado", "warning", "Pode aumentar paginação e lentidão", "Compare o uso por processo antes de intervir", 0.75));
+            findings.Add(Finding("memory-growing", "memory", "Memória em crescimento persistente", $"De {memory[0].MemoryUsedPercent:F0}% para {memory[2].MemoryUsedPercent:F0}% em três leituras", growing.Count > 0 ? RelatedProcessCause([$"{SafeName(growing[0].Last.Name)} PID {growing[0].Last.Id}"]) : "Processo responsável ainda não identificado", "warning", "Pode aumentar paginação e lentidão", "Compare o uso por processo antes de intervir", 0.75));
         return findings;
     }
 
     private readonly record struct ProcessGrowth(ProcessHealth First, ProcessHealth Last, double Points);
+
+    /// <summary>Causa de memory-growing quando há processo apontado, na regra e na apresentação.</summary>
+    internal static string RelatedProcessCause(IEnumerable<string> processes) => $"Possível relação com {string.Join(" e ", processes)}; ainda não confirmada";
 
     // Sem o início, o nome é o único sinal disponível contra a reutilização do PID.
     private static bool SameProcess(ProcessHealth left, ProcessHealth right)
@@ -161,7 +169,7 @@ public static class HealthRules
     private static string Megabytes(ProcessHealth process) => (process.WorkingSetBytes / (1024.0 * 1024)).ToString("F0");
 
     // O nome do processo é escolhido por quem criou o executável e pode chegar ao modelo no relatório.
-    private static string SafeName(string name)
+    internal static string SafeName(string name)
     {
         var safe = new string(name.Take(40).Select(c => char.IsLetterOrDigit(c) || c is '.' or '-' or '_' ? c : '_').ToArray());
         return safe.Length == 0 ? "processo" : safe;

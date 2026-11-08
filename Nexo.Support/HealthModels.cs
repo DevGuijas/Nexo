@@ -56,7 +56,23 @@ public sealed class HealthFinding
     public string Source { get; set; } = "rules";
     public string ProbeTarget { get; set; } = "";
     public string ProbeConfigurationId { get; set; } = "";
+    /// <summary>Só em process-memory-growing gravado a partir da #60; nos demais e nos registros anteriores fica nulo e não é gravado.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ProcessMemoryGrowth? MemoryGrowth { get; set; }
+
+    /// <summary>Cópia para exibição: o registro gravado não muda.</summary>
+    public HealthFinding WithCause(string cause)
+    {
+        var copy = (HealthFinding)MemberwiseClone();
+        copy.Cause = cause;
+        return copy;
+    }
 }
+
+/// <summary>
+/// Subida que disparou o alerta de um processo: nome já filtrado e working set no início e no fim da janela.
+/// O PID e o horário de início continuam no identificador da ocorrência.
+/// </summary>
+public sealed record ProcessMemoryGrowth(string Name, long FromBytes, long ToBytes);
 
 public sealed class SystemEvent
 {
