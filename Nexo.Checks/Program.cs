@@ -207,6 +207,7 @@ try
     await AgentChecks.Run(store, admin, Assert);
     await FinalAnswerChecks.Run(store, admin, Assert);
     await TriageChecks.Run(store, admin, Assert);
+    await DnsRepairChecks.Run(store, admin, Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);

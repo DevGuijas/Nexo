@@ -6,6 +6,9 @@ namespace Nexo.Support;
 
 public static class NetworkWorkflow
 {
+    // Destino do teste TCP por IP numérico, que separa falha de DNS de falta de conectividade.
+    internal const string NumericHost = "8.8.8.8";
+    internal const int NumericPort = 53;
     public static bool Matches(string message) => Regex.IsMatch(message, @"(?i)\b(sem internet|sem conex[aã]o|cabo desconectado)\b");
     private static bool Flag(JsonElement o, string k) => o.ValueKind == JsonValueKind.Object && o.TryGetProperty(k, out var p) && p.ValueKind == JsonValueKind.True;
     private static string Text(JsonElement o, string k) => o.ValueKind == JsonValueKind.Object && o.TryGetProperty(k, out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() ?? "" : "";
@@ -32,7 +35,7 @@ public static class NetworkWorkflow
         {
             var named = await execute("test_connection", new { host = "google.com", port = 443 });
             if (Flag(named, "success") && Flag(Data(named), "dnsResolved") && Flag(Data(named), "tcpConnected")) return (true, true);
-            var numeric = await execute("test_connection", new { host = "8.8.8.8", port = 53 });
+            var numeric = await execute("test_connection", new { host = NumericHost, port = NumericPort });
             return (false, Flag(numeric, "success") && Flag(Data(numeric), "tcpConnected"));
         }
         async Task<(bool Named, bool Numeric)> Stabilize()

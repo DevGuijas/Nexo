@@ -49,6 +49,8 @@ public static class NetworkChange
                 progress.Report("Configuração aplicada temporariamente. Conferindo o estado e aguardando sua confirmação…");
                 var state = await File.ReadAllTextAsync(ready, CancellationToken.None);
                 var keep = false;
+                // Os 45 s do texto são os da janela (MainWindow), que grava "rollback" ao expirar. Os 60 s do
+                // NetworkTransaction.ps1 são o prazo do processo elevado se o aplicativo não responder (README, Rede e recuperação).
                 try { if (!token.IsCancellationRequested) keep = await confirm(new ChangeRequest("Manter a configuração de rede?", request.Description + "\n\nEstado obtido após a mudança:\n" + state + "\n\nTeste a conexão. Se não confirmar em até 45 segundos, a configuração anterior será restaurada.", true)); }
                 catch (Exception ex) { progress.Report("Confirmação indisponível; restaurando a configuração anterior. " + ex.Message); }
                 await File.WriteAllTextAsync(decision, keep && !token.IsCancellationRequested ? "keep" : "rollback", CancellationToken.None);

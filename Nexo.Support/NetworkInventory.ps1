@@ -9,10 +9,17 @@ $addresses = @(Read-Optional 'Endereços' { Get-NetIPAddress -AddressFamily IPv4
 $routes = @(Read-Optional 'Rotas' { Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop })
 $dns = @(Read-Optional 'DNS' { Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction Stop })
 $profiles = @(Read-Optional 'Perfis' { Get-NetConnectionProfile -ErrorAction Stop })
+# Get-DnsClientServerAddress nao diz a origem do DNS. No registro do TCP/IP, NameServer guarda o DNS fixo e
+# DhcpNameServer o que o DHCP forneceu (o mesmo criterio do NetworkTransaction.ps1). Sem a chave, a origem fica desconhecida.
+$tcpip = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\'
+function Split-Servers($value) { @(([string]$value) -split '[,; ]+' | Where-Object {$_}) }
 $rows = @($adapters | ForEach-Object {
     $adapter = $_; $index = [int]$adapter.ifIndex
     $ip = @($interfaces | Where-Object {$_.InterfaceIndex -eq $index}) | Select-Object -First 1
     $disabled = [string]$adapter.Status -eq 'Disabled'
+    $registry = $null
+    try { $registry = Get-ItemProperty -LiteralPath ($tcpip + $adapter.InterfaceGuid) -ErrorAction Stop } catch { }
+    $staticDns = @(Split-Servers $registry.NameServer)
     [pscustomobject]@{
         Index = $index; Guid = [string]$adapter.InterfaceGuid; Name = $adapter.Name
         Description = $adapter.InterfaceDescription; Status = [string]$adapter.Status
@@ -26,6 +33,8 @@ $rows = @($adapters | ForEach-Object {
         HasSplitDefaultRoute = @($routes | Where-Object {$_.InterfaceIndex -eq $index -and $_.DestinationPrefix -in '0.0.0.0/1','128.0.0.0/1'}).Count -gt 0
         Gateways = @($routes | Where-Object {$_.InterfaceIndex -eq $index -and $_.DestinationPrefix -eq '0.0.0.0/0' -and $_.NextHop -ne '0.0.0.0'} | Select-Object -ExpandProperty NextHop -Unique)
         Dns = @($dns | Where-Object {$_.InterfaceIndex -eq $index} | ForEach-Object {$_.ServerAddresses})
+        DnsSource = $(if($null -eq $registry){'unknown'}elseif($staticDns.Count -gt 0){'manual'}else{'automatic'})
+        StaticDns = $staticDns; DhcpDns = @(Split-Servers $registry.DhcpNameServer)
         Profile = @($profiles | Where-Object {$_.InterfaceIndex -eq $index} | ForEach-Object {[string]$_.NetworkCategory})
     }
 })

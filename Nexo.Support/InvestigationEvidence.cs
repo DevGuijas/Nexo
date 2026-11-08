@@ -7,7 +7,7 @@ using System.Text.RegularExpressions;
 namespace Nexo.Support;
 
 // Travas do controlador que impedem uma chamada de chegar ao executor.
-public enum ControlBlock { RepeatedEvidence, RepeatedFailure, Topic }
+public enum ControlBlock { RepeatedEvidence, RepeatedFailure, Topic, UninformedDnsServers }
 
 public sealed class InvestigationEvidence
 {
@@ -146,6 +146,7 @@ public sealed class InvestigationEvidence
     }
     public bool Repeated(string signature) => observations.TryGetValue(signature, out var state) && state.Count >= 2;
     public bool HasFindings => findings.Count > 0;
+    public bool HasNumericConnectionTest => connections.Values.Any(test => IsAddress(test.Host));
     public void Observe(string name, string signature, JsonElement args, string result, (ControlBlock Kind, string? Topic)? block = null)
     {
         using var doc = JsonDocument.Parse(result);
@@ -270,7 +271,7 @@ public sealed class InvestigationEvidence
         else
         {
             // Para o usuário, em português; a etapa barrada ou já falha é explicada pela trava logo abaixo.
-            var unexplained = failedTools.Where(tool => !blocks.Any(b => b.Name == tool && b.Kind is ControlBlock.Topic or ControlBlock.RepeatedFailure)).Order().ToArray();
+            var unexplained = failedTools.Where(tool => !blocks.Any(b => b.Name == tool && b.Kind is ControlBlock.Topic or ControlBlock.RepeatedFailure or ControlBlock.UninformedDnsServers)).Order().ToArray();
             if (unexplained.Length > 0) lines.Add("Não terminaram com sucesso: " + string.Join("; ", unexplained.Select(Describe)) + ". Confira os cartões de resultado para a causa.");
             lines.AddRange(blocks.Take(3).Select(BlockExplanation));
         }
@@ -282,6 +283,7 @@ public sealed class InvestigationEvidence
     {
         ControlBlock.RepeatedEvidence => "Parei a investigação porque a IA pediu de novo " + Describe(block.Name) + ", que já tinha trazido o mesmo resultado duas vezes; repetir não traria informação nova.",
         ControlBlock.RepeatedFailure => "Parei a investigação porque a IA tentou repetir " + Describe(block.Name) + ", que já tinha falhado ou sido recusada neste turno; o motivo está no cartão desse resultado.",
+        ControlBlock.UninformedDnsServers => "O Nexo não executou " + Describe(block.Name) + " porque os servidores DNS escolhidos pela IA não foram informados por você, e o Nexo não usa endereços de DNS inventados. Se o computador obtinha o DNS automaticamente, a correção indicada é voltar ao DNS automático, que continua dependendo da sua aprovação; para usar outro DNS, diga quais servidores a sua rede usa.",
         _ => block.Topic is { } topic
             ? "O Nexo não executou " + Describe(block.Name) + " porque o seu pedido não cita " + Component(topic) + ", a parte do Windows que essa alteração muda. Essa trava evita mexer em algo diferente do que você relatou. Se o problema for com " + Component(topic) + ", diga isso com suas palavras; a alteração continua dependendo da sua aprovação."
             : "O Nexo não executou " + Describe(block.Name) + " porque o alvo não foi identificado sem ambiguidade nas consultas deste turno. Diga qual dispositivo ou impressora apresenta a falha."
@@ -413,7 +415,8 @@ public sealed class InvestigationEvidence
         if (data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("Adapters", out var adapters) || adapters.ValueKind != JsonValueKind.Array) return;
         var connected = adapters.EnumerateArray().Where(adapter => adapter.ValueKind == JsonValueKind.Object && Text(adapter, "Status") == "Up").ToArray();
         Finding("network", connected.Length == 0 ? "Nenhum adaptador de rede aparece conectado na consulta."
-            : "Rede: " + Within(connected.Take(3).Select(adapter => $"{Quoted(Text(adapter, "Name") ?? "")} conectada, gateway {Addresses(adapter, "Gateways")}, DNS {Addresses(adapter, "Dns")}"), connected.Length) + ".");
+            : "Rede: " + Within(connected.Take(3).Select(adapter => $"{Quoted(Text(adapter, "Name") ?? "")} conectada, gateway {Addresses(adapter, "Gateways")}, DNS {Addresses(adapter, "Dns")}"
+                + (Text(adapter, "DnsSource") == "manual" && Text(adapter, "Dhcp") == "Enabled" ? " (fixo, com DHCP ativo)" : "")), connected.Length) + ".");
     }
 
     private void RememberHealth(string report)

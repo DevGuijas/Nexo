@@ -57,6 +57,17 @@ public static class NetworkAssessment
                 if (address["AddressState"]?.GetValue<string>() == "Duplicate")
                 { findings.Add("Windows identificou endereço IPv4 duplicado."); inconsistent = true; }
             }
+            // DNS fixo numa interface que ainda usa DHCP (#63, cenário 3: 192.0.2.53 com o gateway 192.168.1.1 fornecido pelo DHCP).
+            // Pode ser intencional (DNS corporativo ou escolhido pelo usuário); só servidores iguais aos do DHCP não são achado.
+            var dnsSource = adapter["DnsSource"]?.GetValue<string>();
+            var staticDns = Texts(adapter["StaticDns"]);
+            var dhcpDns = Texts(adapter["DhcpDns"]);
+            var automaticDns = dhcp == "Enabled" && dnsSource == "manual" && staticDns.Length > 0
+                && !staticDns.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(dhcpDns);
+            if (automaticDns)
+                findings.Add("DNS IPv4 fixo (" + string.Join(", ", staticDns) + ") com DHCP ativo: "
+                    + (dhcpDns.Length > 0 ? "o DHCP desta rede fornece " + string.Join(", ", dhcpDns) + "." : "o DNS fornecido pelo DHCP não foi informado pelo Windows" + (gateways.Length > 0 ? "; o gateway é " + string.Join(", ", gateways) + "." : "."))
+                    + " Pode ser intencional. Se a resolução de nomes falhar e o TCP por IP numérico responder, voltar ao DNS automático (set_dns mode=automatic) é a correção a apresentar.");
             var configurable = CanConfigure(JsonSerializer.SerializeToElement(adapter));
             var candidate = fixedIp && inconsistent && adapter["Status"]?.GetValue<string>() == "Up" && configurable
                 && (routed.Length == 0 || gateways.Length > 0);
@@ -67,10 +78,12 @@ public static class NetworkAssessment
                 ["AddressMode"] = fixedIp ? "static" : dhcp == "Enabled" ? "dhcp" : "unknown",
                 ["Findings"] = JsonSerializer.SerializeToNode(findings), ["DhcpCandidate"] = candidate,
                 ["CanConfigureIpDns"] = configurable, ["HasDefaultGateway"] = gateways.Length > 0,
+                ["DnsMode"] = dnsSource is "manual" or "automatic" ? dnsSource : "unknown", ["DnsAutomaticCandidate"] = automaticDns && configurable,
                 ["NextStep"] = candidate
                     ? "Possível correção, se esta interface for usada para internet: Obter um endereço IP automaticamente (DHCP). Depende da finalidade da interface, disponibilidade de DHCP na rede e autorização para mudar. Disponibilidade de DHCP ainda não foi comprovada; DNS é preservado."
                     : fixedIp && gateways.Length > 0 && configurable ? "Interface com gateway padrão e IP fixo. Priorize-a na investigação da falta de internet, mesmo sendo vEthernet. Se os testes falharem, DHCP é uma alternativa a apresentar com confirmação e restauração. IP e gateway na mesma sub-rede não provam que são os valores corretos da rede."
                     : fixedIp ? "Se houver falha de conexão, avalie rota e testes; pergunte se a rede usava IP automático quando não houver evidência suficiente para propor uma alteração. Não substitua IP fixo válido só por ser fixo."
+                    : automaticDns && configurable ? "DNS fixo com DHCP ativo. Teste o nome e um IP numérico: se só o nome falhar, apresente set_dns(mode=automatic) nesta interface, com confirmação e restauração. Não proponha outro DNS manual sem servidores informados pelo usuário."
                     : "Investigue os achados e teste a conectividade conforme o problema."
             });
         }
@@ -78,6 +91,10 @@ public static class NetworkAssessment
         root["ConnectivityScope"] = "Inventário não comprova internet. test_connection usa a rota escolhida pelo Windows, não uma interface específica.";
         return JsonSerializer.SerializeToElement(root);
     }
+
+    private static string[] Texts(JsonNode? node) => node is JsonArray list
+        ? list.OfType<JsonValue>().Select(value => value.TryGetValue<string>(out var text) ? text : null).OfType<string>().Where(text => text.Length > 0).ToArray()
+        : node is JsonValue single && single.TryGetValue<string>(out var one) && one.Length > 0 ? [one] : [];
 
     private static bool OutsideSubnet(JsonObject address, string gateway)
     {
