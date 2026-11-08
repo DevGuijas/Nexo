@@ -58,12 +58,21 @@ public static class ToolResultPresentation
                 if (verification.Length > 0)
                 {
                     var after = Text(data, "AfterVersion", "não informada");
-                    return verification switch
+                    var described = verification switch
                     {
                         "version_changed" => ("Driver instalado; teste funcional pendente", $"O Windows confirmou a nova versão {after}. Abra o aplicativo que apresentou o problema e teste o dispositivo.", false),
                         "pending_restart" => ("Reinicialização necessária", "O Windows pediu reinicialização. A correção ainda precisa ser confirmada após reiniciar e testar o dispositivo.", false),
                         _ => ("Verificação incompleta", "A instalação não comprovou uma nova versão do driver. Confira o dispositivo antes de considerar o problema resolvido.", true)
                     };
+                    var videoInstalled = verification == "version_changed";
+                    var audioWarning = Text(root, "warning", "");
+                    if (audioWarning.Length > 0)
+                        return (videoInstalled ? "Driver instalado; som pela placa parou" : described.Item1 + "; som pela placa parou", described.Item2 + "\n" + audioWarning, true);
+                    var audioTest = Text(root, "audioTest", "");
+                    if (audioTest.Length > 0)
+                        return (videoInstalled ? "Driver instalado; teste o vídeo e, se usar, o som pelo monitor ou TV" : described.Item1 + "; se usar, teste o som pelo monitor ou TV", described.Item2 + "\n" + audioTest, described.Item3);
+                    var audioInfo = Text(root, "audioInfo", "");
+                    return audioInfo.Length == 0 ? described : (described.Item1, described.Item2 + "\n" + audioInfo, described.Item3);
                 }
             }
             return ("Executado", "A consulta ou operação retornou com sucesso. O resultado foi considerado nas próximas etapas do atendimento.", false);
