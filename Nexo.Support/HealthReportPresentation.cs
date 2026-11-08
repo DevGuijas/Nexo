@@ -71,7 +71,7 @@ public static class HealthOccurrences
             "disk-low" => new(limits.OtherSamples, limits.MaxSampleGap, s => s.Disks.FirstOrDefault(d => d.Name.Equals(subject, StringComparison.OrdinalIgnoreCase)) is { TotalBytes: > 0 } disk
                 && 100.0 * disk.FreeBytes / disk.TotalBytes >= limits.DiskLowFreePercent),
             "service-stopped" => new(limits.OtherSamples, limits.MaxSampleGap, s => s.Services.FirstOrDefault(x => x.Name == subject) is { } service
-                && !(service.StartType.Equals("Automatic", StringComparison.OrdinalIgnoreCase) && service.Status.Equals("Stopped", StringComparison.OrdinalIgnoreCase))),
+                && !HealthRules.UnexpectedlyStopped(service)),
             "adapter-disabled" => new(limits.OtherSamples, limits.MaxSampleGap, s => s.Adapters.FirstOrDefault(a => a.Id == subject) is { } adapter
                 && (s.Connectivity == "local" || !adapter.Status.Equals("Disabled", StringComparison.OrdinalIgnoreCase))),
             _ => null

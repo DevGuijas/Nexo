@@ -117,6 +117,7 @@ internal static class MonitoringChecks
         }
         finally { if (Directory.Exists(slowRoot)) Directory.Delete(slowRoot, true); }
         CheckServiceCollection(check);
+        ServiceStopChecks.Run(check);
         if (Environment.GetEnvironmentVariable("NEXO_LIVE_SAMPLE") == "1")
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));

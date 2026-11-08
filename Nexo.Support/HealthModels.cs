@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Text.Json.Serialization;
 
 namespace Nexo.Support;
 
@@ -27,7 +28,15 @@ public sealed class HealthSnapshot
 
 public sealed record DiskHealth(string Name, long FreeBytes, long TotalBytes, string Health = "unavailable");
 public sealed record ProcessHealth(string Name, int Id, long WorkingSetBytes, double? CpuPercent, DateTimeOffset? StartTime = null);
-public sealed record ServiceHealth(string Name, string Status, string StartType);
+/// <summary>
+/// Serviço automático observado. Os três campos opcionais só são lidos para serviços que não estão em execução
+/// (Win32_Service.DelayedAutoStart, Win32_Service.ExitCode e a chave TriggerInfo do serviço no registro).
+/// Nulo quer dizer "não lido"; leituras gravadas antes da #57 não têm esses campos e continuam nulas.
+/// </summary>
+public sealed record ServiceHealth(string Name, string Status, string StartType,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? DelayedAutoStart = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? TriggerStart = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? ExitCode = null);
 public sealed record AdapterHealth(string Id, string Name, string Status, bool Enabled);
 public sealed record NetworkProbeReading(string State = "disabled", string Target = "", string Detail = "", string ConfigurationId = "");
 

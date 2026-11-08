@@ -19,6 +19,16 @@ public sealed class HealthThresholds
 
 public static class HealthRules
 {
+    /// <summary>
+    /// Serviço automático parado que conta como falha. O Windows para de propósito serviços de início atrasado
+    /// ou por gatilho depois que terminam o trabalho; esses só ficam de fora quando saíram com código 0.
+    /// Campo não lido (nulo, como nas leituras anteriores à #57) não isenta: o serviço volta à regra antiga.
+    /// </summary>
+    internal static bool UnexpectedlyStopped(ServiceHealth service)
+        => service.StartType.Equals("Automatic", StringComparison.OrdinalIgnoreCase)
+            && service.Status.Equals("Stopped", StringComparison.OrdinalIgnoreCase)
+            && !(service.ExitCode == 0 && (service.DelayedAutoStart == true || service.TriggerStart == true));
+
     public static List<HealthFinding> Evaluate(IReadOnlyList<HealthSnapshot> history, HealthThresholds thresholds)
     {
         if (thresholds.CpuSamples < 2 || thresholds.OtherSamples < 2 || thresholds.NetworkSamples < 2
@@ -55,9 +65,9 @@ public static class HealthRules
                     findings.Add(Finding("disk-low:" + disk.Name, "disk", "Pouco espaço no volume " + disk.Name, $"{free:F1}% livre em {other.Length} leituras", "Arquivos ou aplicativos ocupam a capacidade; origem ainda não identificada", free < 5 ? "critical" : "warning", "Atualizações e gravações podem falhar", "Revise o uso do disco antes de remover arquivos", 0.95));
                 }
             }
-            foreach (var service in latest.Services.Where(s => s.StartType.Equals("Automatic", StringComparison.OrdinalIgnoreCase) && s.Status.Equals("Stopped", StringComparison.OrdinalIgnoreCase)))
+            foreach (var service in latest.Services.Where(UnexpectedlyStopped))
             {
-                if (other.All(s => s.Services.Any(x => x.Name == service.Name && x.StartType.Equals("Automatic", StringComparison.OrdinalIgnoreCase) && x.Status.Equals("Stopped", StringComparison.OrdinalIgnoreCase))))
+                if (other.All(s => s.Services.Any(x => x.Name == service.Name && UnexpectedlyStopped(x))))
                     findings.Add(Finding("service-stopped:" + service.Name, "service", "Serviço automático interrompido", service.Name + " parado em " + other.Length + " leituras", "Causa da parada ainda não identificada", "warning", "A função associada pode estar indisponível", "Consulte eventos do serviço antes de propor reinício", 0.85));
             }
         }
