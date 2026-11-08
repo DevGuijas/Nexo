@@ -65,7 +65,8 @@ internal static class RecoveryChecks
         check(withAudio.Concat(withoutAudio).All(argument => !argument.Contains(' ')),
             "Cada componente do instalador NVIDIA vai como argumento separado");
 
-        var script = NvidiaAudioScriptChecks.Script();
+        // Sem .gitattributes, o checkout no Windows grava o .cs com CRLF e a string raw do script herda essa quebra.
+        var script = NvidiaAudioScriptChecks.Script().ReplaceLineEndings("\n");
         int At(string text) => script.IndexOf(text, StringComparison.Ordinal);
         var enumeration = At("$audioBefore=@(Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object {[string]$_.PNPDeviceID -like 'HDAUDIO\\FUNC_01&VEN_10DE&*' -and $_.Present -eq $true})");
         var failure = At("}catch{throw ('Não foi possível consultar o áudio HDMI da placa antes da instalação. O instalador NVIDIA não foi iniciado e nenhum driver foi alterado. Detalhe: '+$_.Exception.Message)}");
