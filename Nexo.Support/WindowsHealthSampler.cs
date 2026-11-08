@@ -112,6 +112,13 @@ public sealed class WindowsHealthSampler : IHealthSampler
         catch (Exception ex) { result.Warnings.Add("CPU, memória ou serviços indisponíveis: " + ex.Message); }
         try
         {
+            using var sensors = JsonDocument.Parse(await SupportService.Powershell(HardwareSensors.Script, token, 20));
+            HardwareSensors.Read(sensors.RootElement, result, DateTimeOffset.UtcNow);
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (Exception ex) { HardwareSensors.Unavailable(result, DateTimeOffset.UtcNow, ex.Message); }
+        try
+        {
             var readings = await connectivityProbe.Run(settings, result.Connectivity == "local", gateways, token);
             result.GatewayProbe = readings.Gateway;
             result.DnsProbe = readings.Dns;

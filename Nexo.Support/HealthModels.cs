@@ -13,7 +13,9 @@ public sealed class HealthSnapshot
     public double? MemoryUsedPercent { get; set; }
     public long? MemoryUsedBytes { get; set; }
     public long? MemoryTotalBytes { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public TemperatureReading? CpuTemperature { get; set; }
     public string StorageHealth { get; set; } = "unavailable";
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public StorageReading? Storage { get; set; }
     public string Connectivity { get; set; } = "unknown";
     public NetworkProbeReading GatewayProbe { get; set; } = new();
     public NetworkProbeReading DnsProbe { get; set; } = new();

@@ -187,6 +187,9 @@ public static class HealthReportPresentation
         text.AppendLine(notice.EndsWith('.') ? notice : notice + ".");
         text.AppendLine($"CPU: {Percent(latest.CpuPercent)}; memória: {Percent(latest.MemoryUsedPercent)}; conectividade local: {latest.Connectivity}.");
         text.AppendLine($"Gateway: {DescribeProbe(latest.GatewayProbe)}; DNS: {DescribeProbe(latest.DnsProbe)}; Destino externo: {DescribeProbe(latest.ExternalProbe)}.");
+        text.AppendLine("Temperatura da CPU: " + DescribeTemperature(latest, true) + ".");
+        text.AppendLine("Discos físicos: " + DescribeStorage(latest, true) + ".");
+        foreach (var physical in latest.Storage?.Disks.Take(8) ?? []) text.AppendLine(DescribeDisk(physical, true) + ".");
         foreach (var disk in latest.Disks.Take(8))
             text.AppendLine($"Volume {Safe(disk.Name)}: {(disk.TotalBytes > 0 ? 100.0 * disk.FreeBytes / disk.TotalBytes : 0):F1}% livre.");
         if (report.Findings.Count == 0) text.AppendLine("Nenhum achado sustentado foi registrado nos dados disponíveis.");
@@ -208,6 +211,40 @@ public static class HealthReportPresentation
     };
 
     private static string Percent(double? value) => value.HasValue ? value.Value.ToString("F0") + "%" : "indisponível";
+    public const string StorageScope = "O estado dos discos é o informado pelo Windows Storage (HealthStatus e OperationalStatus); não é uma leitura SMART completa nem inclui contadores de confiabilidade.";
+    public static string DescribeTemperature(HealthSnapshot snapshot, bool sanitize = false)
+    {
+        string Clean(string value) => sanitize ? Safe(value) : value;
+        var reading = snapshot.CpuTemperature;
+        if (reading == null) return snapshot.CpuTemperatureC is { } legacy ? legacy.ToString("F0", CultureInfo.InvariantCulture) + " °C, origem não registrada" : "indisponível, leitura anterior à coleta de sensores";
+        var at = reading.Time is { } time ? ", lida às " + time.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture) : "";
+        return reading.State == "read" && reading.Celsius is { } celsius
+            ? celsius.ToString("F0", CultureInfo.InvariantCulture) + " °C, sensor " + Clean(reading.Sensor) + ", fonte " + reading.Source + at
+            : "indisponível, " + Clean(reading.Detail).TrimEnd('.') + at;
+    }
+    public static string StorageLabel(string state) => state switch
+    {
+        "healthy" => "sem alerta informado pelo Windows",
+        "warning" => "atenção informada pelo Windows",
+        "unhealthy" => "falha informada pelo Windows",
+        "unknown" => "não confirmado",
+        _ => "indisponível"
+    };
+    public static string DescribeStorage(HealthSnapshot snapshot, bool sanitize = false)
+    {
+        string Clean(string value) => sanitize ? Safe(value) : value;
+        var storage = snapshot.Storage;
+        if (storage == null) return snapshot.StorageHealth == "unavailable" ? "indisponível, leitura anterior à coleta do estado dos discos" : StorageLabel(snapshot.StorageHealth) + ", origem não registrada";
+        var at = ", lido às " + storage.Time.ToLocalTime().ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+        if (storage.Total == 0) return "indisponível, " + Clean(storage.Detail).TrimEnd('.') + at;
+        return StorageLabel(storage.State) + $", {storage.Disks.Count} de {storage.Total} discos físicos, fonte " + storage.Source + at + (storage.Detail.Length > 0 ? ". " + Clean(storage.Detail).TrimEnd('.') : "");
+    }
+    public static string DescribeDisk(PhysicalDiskReading disk, bool sanitize = false)
+    {
+        string Clean(string value) => sanitize ? Safe(value) : value;
+        var kind = string.Join(", ", new[] { disk.MediaType, disk.BusType }.Where(v => v.Length > 0 && !v.Equals("Unspecified", StringComparison.OrdinalIgnoreCase)).Select(Clean));
+        return $"Disco {Clean(disk.Device)} {Clean(disk.Name)}{(kind.Length > 0 ? " (" + kind + ")" : "")}: {StorageLabel(disk.State)}; HealthStatus {Clean(disk.Health)}, OperationalStatus {(disk.OperationalStatus.Length == 0 ? "não informado" : string.Join(", ", disk.OperationalStatus.Select(Clean)))}";
+    }
     public static string DescribeProbe(NetworkProbeReading? reading)
     {
         if (reading == null) return "indisponível";
