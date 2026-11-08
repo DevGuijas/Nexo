@@ -295,12 +295,12 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 observedDevicesAt = null;
                 if (topic == "system") return Ok((await support.Diagnose(actor, topic, progress, token)).Summary);
                 var classes = topic switch { "camera" => "'Camera','Image'", "audio" => "'AudioEndpoint','MEDIA'", "bluetooth" => "'Bluetooth'", "printer" => "'Printer','PrintQueue'", _ => throw new InvalidOperationException("Categoria de dispositivo não permitida.") };
-                var json = await SupportService.Powershell("ConvertTo-Json -Depth 5 -Compress -InputObject @(Get-CimInstance Win32_PnPEntity | Where-Object { $_.PNPClass -in " + classes + " } | ForEach-Object { [pscustomobject]@{ Name=$_.Name; Id=$_.PNPDeviceID; Code=[int]$_.ConfigManagerErrorCode; Status=$_.Status; HardwareIds=@($_.HardwareID); CompatibleIds=@($_.CompatibleID) } })", token);
-                var devices = JsonSerializer.Deserialize<List<Device>>(json) ?? [];
+                var diagnosis = DriverStoreInventory.ParseDeviceDiagnosis(await SupportService.Powershell(DriverStoreInventory.DeviceDiagnosisScript(classes), token, 75));
+                var devices = diagnosis.Devices;
                 foreach (var device in devices.Where(d => !string.IsNullOrWhiteSpace(d.Id))) observedDevices[device.Id] = (topic, device);
                 var extra = topic == "camera" ? await SupportService.Powershell("Get-ItemProperty -LiteralPath 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -ErrorAction SilentlyContinue | Select-Object Value | ConvertTo-Json -Compress", token) : "";
                 observedDevicesAt = DateTimeOffset.UtcNow;
-                return Ok(new { count = devices.Count, devices, privacy = extra, note = devices.Count == 0 ? "Nenhum dispositivo desta categoria foi encontrado. Não existe dispositivo identificado para habilitar. Pode estar ausente, desconectado ou sem reconhecimento; não afirme que está desabilitado sem evidência." : "Code 22 = desabilitado; Code 0 = sem erro de PnP, não comprova funcionamento no aplicativo." });
+                return DeviceDiagnosisResult(diagnosis, extra);
             case "get_hardware_inventory":
                 var category = Value(args, "category");
                 observedNvidiaDriver = null; observedNvidiaDriverAt = null;
@@ -806,6 +806,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     }
     private static string Denied() => JsonSerializer.Serialize(new { success = false, denied = true, message = "Ação recusada pelo usuário. Não executar nem repetir." });
     public static string Ok(object data) => JsonSerializer.Serialize(new { success = true, data });
+    public static string DeviceDiagnosisResult(DeviceDiagnosis diagnosis, string privacy) => Ok(new { count = diagnosis.Devices.Count, devices = diagnosis.Devices, drivers = DriverStoreInventory.FaultyDrivers(diagnosis), privacy, note = diagnosis.Devices.Count == 0 ? "Nenhum dispositivo desta categoria foi encontrado. Não existe dispositivo identificado para habilitar. Pode estar ausente, desconectado ou sem reconhecimento; não afirme que está desabilitado sem evidência." : "Code 22 = desabilitado; Code 0 = sem erro de PnP, não comprova funcionamento no aplicativo. Em drivers, cada dispositivo com erro traz o INF, a versão e o fornecedor ligados ao ID exato; \"sem driver instalado\" significa que o Windows não tem driver para esse ID." });
 
     // O nome de um executável é escolhido por quem o criou: é dado não confiável, e o filtro só limita o que chega ao modelo.
     public static string ProcessesForModel(string json)
