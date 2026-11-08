@@ -516,12 +516,11 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         $arguments=if($audioIds.Count -gt 0){ {{PowerShellArray(NvidiaInstallerArguments(hdmiAudio: true))}} }else{ {{PowerShellArray(NvidiaInstallerArguments(hdmiAudio: false))}} }
         $process=Start-Process -FilePath $installer -ArgumentList $arguments -PassThru -ErrorAction Stop
         if(-not $process.WaitForExit({{(long)NvidiaInstallerTimeout.TotalMilliseconds}})){$process.WaitForExit()}
-        if($process.ExitCode -notin @(0,1)){throw ('O instalador NVIDIA terminou com código '+$process.ExitCode)}
+        $exitCode=if($null -eq $process.ExitCode){$null}else{[int]$process.ExitCode}
         Start-Sleep -Seconds 3
         $after=@(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | Where-Object {$_.PNPDeviceID -eq $targetId -and $_.Present -eq $true})
         $afterDriver=@(Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | Where-Object {$_.DeviceID -eq $targetId})
         $afterVersion=if($afterDriver.Count -eq 1){[string]$afterDriver[0].DriverVersion}else{''}
-        $verification=if($process.ExitCode -eq 1){'pending_restart'}elseif($after.Count -eq 1 -and [int]$after[0].ConfigManagerErrorCode -eq 0 -and $afterVersion -and $afterVersion -ne $expectedVersion){'version_changed'}else{'unconfirmed'}
         $audioAfterCodes=@{}
         $audioVanished=@(); $audioFailed=@(); $audioUnknown=@()
         $audioWorking=@($audioIds | Where-Object {$audioBeforeCodes[$_] -eq 0})
@@ -547,7 +546,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         $audioPreserved=if($audioIds.Count -eq 0){$null}else{$audioStatus -eq 'preserved'}
         $audioDriverVersion=''
         if($audioKey){$audioDriver=@(Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | Where-Object {[string]$_.DeviceID -eq $audioKey}); if($audioDriver.Count -eq 1){$audioDriverVersion=[string]$audioDriver[0].DriverVersion} }
-        [pscustomobject]@{Driver='NVIDIA '+{{Quote(offer.Version)}};Target=[string]$before[0].Name;BeforeVersion=$expectedVersion;AfterVersion=$afterVersion;DeviceCodeAfter=$(if($after.Count -eq 1){[int]$after[0].ConfigManagerErrorCode}else{-1});RebootRequired=($process.ExitCode -eq 1);Verification=$verification;Source='NVIDIA';InstallerExitCode=[int]$process.ExitCode;HdmiAudioBefore=($audioIds.Count -gt 0);HdmiAudioStatus=$audioStatus;HdmiAudioBeforeCode=$audioBeforeCode;HdmiAudioAfterCode=$audioAfterCode;HdmiAudioPreserved=$audioPreserved;HdmiAudioDriverVersion=$audioDriverVersion}
+        [pscustomobject]@{Driver='NVIDIA '+{{Quote(offer.Version)}};OfferedVersion={{Quote(offer.Version)}};Target=[string]$before[0].Name;BeforeVersion=$expectedVersion;AfterVersion=$afterVersion;AfterDriverCount=$afterDriver.Count;DeviceCodeAfter=$(if($after.Count -eq 1 -and $null -ne $after[0].ConfigManagerErrorCode){[int]$after[0].ConfigManagerErrorCode}else{-1});RebootRequired=($exitCode -eq 1);Source='NVIDIA';InstallerExitCode=$exitCode;HdmiAudioBefore=($audioIds.Count -gt 0);HdmiAudioStatus=$audioStatus;HdmiAudioBeforeCode=$audioBeforeCode;HdmiAudioAfterCode=$audioAfterCode;HdmiAudioPreserved=$audioPreserved;HdmiAudioDriverVersion=$audioDriverVersion}
         """;
     // Instalar só Display.Driver faz o setup da NVIDIA remover o nvhda.inf (áudio HDMI/DisplayPort da placa).
     // Os IDs vêm do cache do instalador: HDAudio.nvi (name="HDAudio.Driver") e setup.cfg (Display.Driver).
@@ -650,13 +649,114 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         $verification=if([bool]$result.RebootRequired){'pending_restart'}elseif($after.Count -eq 1 -and [int]$after[0].ConfigManagerErrorCode -eq 0 -and $afterVersion -and $afterVersion -ne $beforeVersion){'version_changed'}else{'unconfirmed'}
         [pscustomobject]@{Driver=[string]$update.Title;Target=[string]$before[0].Name;BeforeVersion=$beforeVersion;AfterVersion=$afterVersion;DeviceCodeAfter=$(if($after.Count -eq 1){[int]$after[0].ConfigManagerErrorCode}else{-1});RebootRequired=[bool]$result.RebootRequired;Verification=$verification;Source='Fonte de atualizações configurada no Windows'}
         """;
+    // Resultado da instalação NVIDIA, sempre comparado com a oferta (#13). O script só mede; a decisão é tomada aqui.
+    //   expected_version_confirmed: placa presente, Code 0, e a versão do Windows corresponde à oferta pela regra de InstalledMarketingVersion
+    //                               (32.0.16.2114 ↔ 621.14). Conta como instalada, ainda com teste funcional pendente.
+    //   unexpected_version:         a placa está com Code 0 ou 14 e a versão mudou, mas para outra que não a oferecida. A oferta não é dada como instalada.
+    //   unchanged:                  a placa está com Code 0 e continua na versão de antes.
+    //   unconfirmed:                a placa sumiu, ficou com erro, o Windows não informou uma única versão ou o instalador não informou o código de saída.
+    //   pending_restart:            o instalador saiu com 1 (reinício pedido), com a placa em Code 0 ou 14, e a versão é conferida depois de
+    //                               reiniciar; ou a placa ficou em Code 14 (CM_PROB_NEED_RESTART) já na versão oferecida. Code 14 com outra
+    //                               versão é unexpected_version, e sem mudança de versão é unconfirmed.
+    // O código de saída nunca decide sozinho: o setup 621.14 saiu com 0x80070005 com a versão nova instalada (ensaio de 07/11/2026).
+    internal static bool MatchesOfferedNvidiaVersion(string offeredVersion, string windowsVersion) =>
+        Regex.IsMatch(offeredVersion, @"^\d{3}\.\d{2}$") && Version.TryParse(offeredVersion, out var offered)
+        && OfficialDriverSource.InstalledMarketingVersion(windowsVersion) == offered;
+    internal const int DeviceNeedsRestart = 14;
+    internal static string ClassifyNvidiaInstallation(string offeredVersion, string beforeVersion, string afterVersion, int deviceCodeAfter, int? installerExitCode, bool rebootRequired)
+    {
+        var reported = !string.IsNullOrWhiteSpace(afterVersion);
+        var changed = reported && !string.Equals(afterVersion.Trim(), beforeVersion.Trim(), StringComparison.OrdinalIgnoreCase);
+        // Reinício pedido pelo instalador só conta com a placa sem erro ou só esperando reinício; placa sumida ou com erro não vira sucesso.
+        if (installerExitCode == 1 || rebootRequired) return deviceCodeAfter is 0 or DeviceNeedsRestart ? "pending_restart" : "unconfirmed";
+        if (installerExitCode == null) return "unconfirmed";
+        if (deviceCodeAfter == DeviceNeedsRestart && changed)
+            return MatchesOfferedNvidiaVersion(offeredVersion, afterVersion.Trim()) ? "pending_restart" : "unexpected_version";
+        if (deviceCodeAfter != 0 || !reported) return "unconfirmed";
+        if (!changed) return "unchanged";
+        return MatchesOfferedNvidiaVersion(offeredVersion, afterVersion.Trim()) ? "expected_version_confirmed" : "unexpected_version";
+    }
+    internal static string InstallerExitCodeText(int code) => "código " + code + " (0x" + unchecked((uint)code).ToString("X8") + ")";
+    private static string VerifyNvidiaInstallation(JsonElement data, string offered)
+    {
+        string Text(string key) => data.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
+        int? Number(string key) => data.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number) ? number : null;
+        var exitCode = Number("InstallerExitCode");
+        var deviceCode = Number("DeviceCodeAfter") ?? -1;
+        var before = Text("BeforeVersion");
+        var after = Text("AfterVersion");
+        var reboot = data.TryGetProperty("RebootRequired", out var restart) && restart.ValueKind == JsonValueKind.True;
+        var verification = ClassifyNvidiaInstallation(offered, before, after, deviceCode, exitCode, reboot);
+        var classified = System.Text.Json.Nodes.JsonNode.Parse(data.GetRawText())!.AsObject();
+        classified["Verification"] = verification;
+        // Quem pediu o reinício: o instalador (código 1) ou o Windows (placa em Code 14).
+        if (verification == "pending_restart") classified["RestartRequestedBy"] = exitCode == 1 || reboot ? "installer" : "windows";
+        var audio = HdmiAudioReport(data);
+        var unusualExit = exitCode is { } code && code is not (0 or 1) ? InstallerExitCodeText(code) : null;
+        if (verification is "expected_version_confirmed" or "pending_restart")
+        {
+            var result = new System.Text.Json.Nodes.JsonObject { ["success"] = true };
+            // A versão já aparece na frase principal do resultado; o aviso só explica o código.
+            if (unusualExit != null)
+                result["installerWarning"] = verification == "expected_version_confirmed"
+                    ? "Aviso: o instalador NVIDIA terminou com " + unusualExit + ", mas o Windows confirma a versão oferecida, com a placa sem erro. O código fica registrado para a TI."
+                    : "Aviso: o instalador NVIDIA terminou com " + unusualExit + ". Depois de reiniciar, confira se a versão do driver é a oferecida. O código fica registrado para a TI.";
+            if (audio is { } report) result[report.Kind] = report.Message;
+            result["data"] = classified;
+            return result.ToJsonString();
+        }
+        var installed = OfficialDriverSource.InstalledMarketingVersion(after.Trim());
+        var reason = verification switch
+        {
+            "unexpected_version" => "O Windows agora informa a versão " + after + (installed is { } other ? " (driver " + other.Major + "." + other.Minor.ToString("D2") + ")" : "")
+                + ", que não corresponde ao driver " + offered + " oferecido" + (deviceCode == DeviceNeedsRestart ? ", e também pede reinício da placa (código 14)" : "")
+                + ". O Nexo não considera a versão oferecida instalada.",
+            "unchanged" => "O Windows continua informando a versão anterior " + after + "; o driver " + offered + " oferecido não foi confirmado no dispositivo.",
+            _ => (exitCode == 1 ? "O instalador NVIDIA pediu reinicialização, mas, depois" : "Depois") + " da instalação, "
+                + (exitCode == null ? "o instalador não informou o código de saída"
+                    : deviceCode == -1 ? "o Windows não encontrou a placa NVIDIA de forma única ou não informou o estado dela"
+                    : deviceCode == DeviceNeedsRestart ? "o Windows pede reinício da placa NVIDIA (código 14), mas não informou uma versão nova do driver"
+                    : deviceCode != 0 ? "a placa NVIDIA está com erro no Windows (código " + deviceCode + ")"
+                    : Number("AfterDriverCount") > 1 ? "o Windows informou mais de um driver para a placa"
+                    : "o Windows não informou a versão do driver da placa")
+                + ", então o driver " + offered + " oferecido não foi confirmado."
+        };
+        return JsonSerializer.Serialize(new
+        {
+            success = false,
+            installationReported = true,
+            error = (unusualExit != null ? "O instalador NVIDIA terminou com " + unusualExit + ". " : "") + reason
+                + " Confira o Gerenciador de Dispositivos antes de considerar a correção concluída." + (audio is { } note ? " " + note.Message : ""),
+            data = classified
+        });
+    }
     internal static string VerifyDriverInstallationResult(string output)
     {
         using var document = JsonDocument.Parse(output);
         var root = document.RootElement;
         if (!root.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.True || !root.TryGetProperty("data", out var data)
-            || data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("Verification", out var verification)
-            || verification.ValueKind != JsonValueKind.String) return output;
+            || data.ValueKind != JsonValueKind.Object) return output;
+        if (data.TryGetProperty("OfferedVersion", out var offeredVersion) && offeredVersion.ValueKind == JsonValueKind.String)
+            return VerifyNvidiaInstallation(data, offeredVersion.GetString() ?? "");
+        // result.json gravado por um Nexo anterior ao #13: a instalação NVIDIA só comparava com a versão anterior.
+        if (data.TryGetProperty("Source", out var source) && source.ValueKind == JsonValueKind.String && source.GetString() == "NVIDIA"
+            && data.TryGetProperty("Verification", out var legacy) && legacy.ValueKind == JsonValueKind.String && legacy.GetString() == "version_changed")
+        {
+            var unverified = System.Text.Json.Nodes.JsonNode.Parse(data.GetRawText())!.AsObject();
+            unverified["Verification"] = "unconfirmed";
+            return JsonSerializer.Serialize(new
+            {
+                success = false,
+                installationReported = true,
+                error = "Este resultado veio de uma versão anterior do Nexo, que não comparava a versão instalada com o driver NVIDIA oferecido. Confira no Gerenciador de Dispositivos se a versão do driver de vídeo é a oferecida antes de considerar a correção concluída."
+                    + (HdmiAudioReport(data) is { } legacyAudio ? " " + legacyAudio.Message : ""),
+                data = unverified
+            });
+        }
+        // Fonte do Windows: a oferta (IWindowsDriverUpdate) não tem campo de versão do driver, e o scan_driver_updates guarda só
+        // ID, revisão, título, ID de hardware, fabricante e provedor. Sem versão oferecida, o script continua comparando com a
+        // versão anterior (version_changed).
+        if (!data.TryGetProperty("Verification", out var verification) || verification.ValueKind != JsonValueKind.String) return output;
         var audio = HdmiAudioReport(data);
         if (verification.GetString() != "unconfirmed")
             return audio is not { } report ? output

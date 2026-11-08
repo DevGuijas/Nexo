@@ -61,10 +61,21 @@ public static class ToolResultPresentation
                     var described = verification switch
                     {
                         "version_changed" => ("Driver instalado; teste funcional pendente", $"O Windows confirmou a nova versão {after}. Abra o aplicativo que apresentou o problema e teste o dispositivo.", false),
-                        "pending_restart" => ("Reinicialização necessária", "O Windows pediu reinicialização. A correção ainda precisa ser confirmada após reiniciar e testar o dispositivo.", false),
+                        "expected_version_confirmed" => ("Driver instalado; teste funcional pendente", $"O Windows confirmou a versão {after}, que corresponde ao driver {Text(data, "OfferedVersion", "da oferta")}{(Text(data, "OfferedVersion", "").Length > 0 ? " oferecido" : "")}. Abra o aplicativo que apresentou o problema e teste o dispositivo.", false),
+                        "pending_restart" => ("Reinicialização necessária", Text(data, "RestartRequestedBy", "") switch
+                        {
+                            "installer" => "O instalador pediu reinicialização.",
+                            "windows" => "O Windows pediu reinicialização para concluir a instalação do driver (a placa está com código 14).",
+                            _ => "O Windows pediu reinicialização."
+                        } + " A correção ainda precisa ser confirmada após reiniciar e testar o dispositivo.", false),
                         _ => ("Verificação incompleta", "A instalação não comprovou uma nova versão do driver. Confira o dispositivo antes de considerar o problema resolvido.", true)
                     };
-                    var videoInstalled = verification == "version_changed";
+                    // Código de saída fora do esperado com a versão oferecida confirmada: sucesso, mas com aviso.
+                    var installerWarning = Text(root, "installerWarning", "");
+                    if (installerWarning.Length > 0)
+                        described = (described.Item1 == "Driver instalado; teste funcional pendente" ? "Driver instalado com aviso do instalador; teste funcional pendente" : described.Item1,
+                            described.Item2 + "\n" + installerWarning, true);
+                    var videoInstalled = verification is "version_changed" or "expected_version_confirmed";
                     var audioWarning = Text(root, "warning", "");
                     if (audioWarning.Length > 0)
                         return (videoInstalled ? "Driver instalado; som pela placa parou" : described.Item1 + "; som pela placa parou", described.Item2 + "\n" + audioWarning, true);
