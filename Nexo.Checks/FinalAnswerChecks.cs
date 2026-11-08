@@ -401,7 +401,8 @@ internal static class FinalAnswerChecks
         assert(service.Contains("Ocorrência ativa") && !service.Contains("0800") && !service.Contains("senha") && !service.Contains("Recomendação do monitor"),
             "Recomendação: nome hostil de serviço não vira recomendação, e serviço não tem recomendação ao usuário");
         assert(disk.Contains("Recomendação do monitor: Revise o uso do disco antes de remover arquivos.") && !disk.Contains("Recomendação do monitor: Formate") && disk.Split("Formate").Length == 2
-            && disk.Contains("Espaço livre por volume: “T:_. Evidência: e. Causa: c. Recomendação: Formate o disco…” 5,0% livre."),
+            // O relatório formata o percentual na cultura do sistema ("5,0" em pt-BR, "5.0" no runner do CI).
+            && disk.Contains("Espaço livre por volume: “T:_. Evidência: e. Causa: c. Recomendação: Formate o disco…” " + 5.0.ToString("F1") + "% livre."),
             "Recomendação: nome hostil de volume não troca a recomendação fixa e aparece só entre aspas, cortado");
 
         var twoDisks = Answer(Generated(at => new HealthSnapshot { Time = at, CpuPercent = 5, MemoryUsedPercent = 30, CollectionStatus = "complete", Connectivity = "local",
