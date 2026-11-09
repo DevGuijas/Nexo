@@ -8,7 +8,8 @@ using Nexo.Support;
 // 2. reinício de serviço: a janela de aprovação mostra o estado observado antes, nunca o do modelo;
 // 3. memória: os MB do processo que segura memória chegam à resposta;
 // 4. toda ferramenta do catálogo tem rótulo de progresso próprio;
-// 5. ocorrência que não persiste (resolvida, histórica ou informativa) não é apresentada como atual.
+// 5. ocorrência encerrada (resolvida ou de estado atual desconhecido) não é apresentada como atual; qualquer outro
+//    estado, inclusive um que ainda não existe, conta como atual.
 internal static class ValidationFollowUpChecks
 {
     // Trechos reais da conversa 43766bcd (cenário 7, VHDX T: com 7% livre).
@@ -30,6 +31,13 @@ internal static class ValidationFollowUpChecks
             ReportSections(assert);
             await MemoryFigures(store, actor, assert);
             await StaleProcess(store, actor, assert);
+            // Revisão do @qa no 27d9a0a.
+            await GuidanceOnFinish(store, actor, assert);
+            await ServiceStateAge(store, actor, assert);
+            await RestartRefreshesState(assert);
+            SyntheticState(assert);
+            ConsumptionSentences(assert);
+            await QuestionStaysLast(store, actor, assert);
         }
         finally { store.Data.AiEnabled = previousAi; }
     }
@@ -151,8 +159,12 @@ internal static class ValidationFollowUpChecks
         var llama = report.IndexOf("llama-server PID 9100", StringComparison.Ordinal);
         var holder = report.IndexOf("NexoMemTeste PID 23132", StringComparison.Ordinal);
         var llamaLine = report.Split('\n').Single(line => line.StartsWith("Achado", StringComparison.Ordinal) && line.Contains("llama-server"));
+        var chrome = report.IndexOf("chrome PID 4120", StringComparison.Ordinal);
+        var chromeLine = report.Split('\n').Single(line => line.StartsWith("Achado", StringComparison.Ordinal) && line.Contains("chrome PID 4120"));
         assert(current >= 0 && other > current && holder > current && holder < other && llama > other,
             "Relatório: a ocorrência que persiste fica na parte atual, e a resolvida na parte que não é atual");
+        assert(chromeLine.Contains("ocorrência histórica; estado atual desconhecido") && chrome > other && !chromeLine.Contains("Recomendação:"),
+            "Relatório: a ocorrência de estado atual desconhecido fica fora da parte atual, sem recomendação");
         assert(llamaLine.Contains("resolvida: 3 leituras seguidas sem a condição") && !llamaLine.Contains("Recomendação:")
             && report.Split('\n').Single(line => line.StartsWith("Achado", StringComparison.Ordinal) && line.Contains("NexoMemTeste")).Contains("Recomendação:"),
             "Relatório: só a ocorrência atual traz recomendação");
@@ -205,14 +217,160 @@ internal static class ValidationFollowUpChecks
         evidence.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(report));
         assert(evidence.ValidateStatement("O llama-server não está consumindo memória agora.", false) == null
             && evidence.ValidateStatement("O llama-server estava consumindo memória mais cedo.", false) == null
-            && evidence.ValidateStatement("O chrome está consumindo memória.", false) == null
-            && evidence.ValidateStatement("Agora o llama-server consome 9 GB.", false) == InvestigationEvidence.StaleProcessReason,
-            "Ocorrência resolvida: negação, passado e outro processo passam; o consumo no presente do processo resolvido é recusado");
+            && evidence.ValidateStatement("Agora o llama-server consome 9 GB.", false) == InvestigationEvidence.StaleProcessReason
+            && evidence.ValidateStatement("O chrome está consumindo memória.", false) == InvestigationEvidence.StaleProcessReason
+            && evidence.ValidateStatement("O firefox está consumindo memória.", false) == null,
+            "Ocorrência encerrada: negação, passado e processo fora do relatório passam; o consumo no presente do processo resolvido ou de estado desconhecido é recusado");
         assert(!evidence.Report("").Contains("llama-server"),
             "Ocorrência resolvida: o resumo do turno não lista a ocorrência resolvida");
         evidence.Observe("get_processes", "p", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(JsonSerializer.Serialize(new[] { new { Name = "llama-server", Id = 9100, MemoryMB = 9000, Responding = true } })));
         assert(evidence.ValidateStatement(stale, false) == null,
             "Ocorrência resolvida: se a consulta de processos do turno mostra o processo, ele pode ser citado como atual");
+    }
+
+    // A recusa no caminho do finish_support também leva o trecho recusado (QM6 do @qa).
+    private static async Task GuidanceOnFinish(Store store, Account actor, Action<bool, string> assert)
+    {
+        var model = new CapturingModel([Call("finish_support", new { message = DiskText }), Text(DiskFixed)]);
+        var answer = await Ask(store, actor, "estou sem espaço no disco T:", DiskTools(), model);
+        assert(answer.StartsWith(DiskFixed, StringComparison.Ordinal) && (model.SystemMessages(1).LastOrDefault() ?? "").Contains("Controle de execução: " + AgentProtocol.PendingActionReason + " Trecho recusado: “vamos verificar”."),
+            "Disco: a recusa do finish_support também leva o trecho recusado ao modelo");
+    }
+
+    // O estado observado vale por 5 minutos, pelo relógio do executor (QM4 do @qa).
+    private static async Task ServiceStateAge(Store store, Account actor, Action<bool, string> assert)
+    {
+        var clock = new DateTimeOffset(2026, 11, 9, 3, 0, 0, TimeSpan.Zero);
+        var requests = new List<ChangeRequest>();
+        var tools = new WindowsTools(store, actor, request => { requests.Add(request); return Task.FromResult(false); }, new Progress<string>())
+        {
+            PrinterReader = (_, _) => Task.FromResult("""{"Spooler":"Stopped","StartType":"Automatic"}"""),
+            ServiceEventsReader = (_, _) => throw new InvalidOperationException("Eventos indisponíveis no teste."),
+            ServiceEventsClock = () => clock
+        };
+        await tools.Execute("get_printers", JsonSerializer.SerializeToElement(new { }), CancellationToken.None);
+        clock = clock.AddMinutes(5);
+        await tools.Execute("restart_service", JsonSerializer.SerializeToElement(new { service = "Spooler" }), CancellationToken.None);
+        clock = clock.AddMinutes(1);
+        await tools.Execute("restart_service", JsonSerializer.SerializeToElement(new { service = "Spooler" }), CancellationToken.None);
+        assert(requests.Count == 2 && requests[0].Details.Contains("\nEstado atual: parado (início automático).\n") && !requests[1].Details.Contains("Estado atual"),
+            "Spooler: a leitura do estado vale por 5 minutos; mais velha, a janela não a mostra");
+    }
+
+    // Depois de um reinício concluído, a janela do próximo mostra o estado que o Windows informou, não o "parado" de antes.
+    private static async Task RestartRefreshesState(Action<bool, string> assert)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "nexo-88-restart-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var isolated = new Store(root, directAccess: true);
+            var requests = new List<ChangeRequest>();
+            var tools = new WindowsTools(isolated, isolated.GetLocalSession(), request => { requests.Add(request); return Task.FromResult(requests.Count == 1); }, new Progress<string>())
+            {
+                PrinterReader = (_, _) => Task.FromResult("""{"Spooler":"Stopped","StartType":"Automatic"}"""),
+                ServiceEventsReader = (_, _) => throw new InvalidOperationException("Eventos indisponíveis no teste."),
+                // O processo elevado é trocado por um que só termina; o resultado é o que o script do Windows grava no fim.
+                ElevatedStarter = script =>
+                {
+                    var output = System.Text.RegularExpressions.Regex.Match(script, @"-LiteralPath '(?<path>(?:[^']|'')+)' -Encoding UTF8$").Groups["path"].Value.Replace("''", "'");
+                    File.WriteAllText(output, """{"success":true,"data":{"Service":"Spooler","Status":"Running"}}""");
+                    return System.Diagnostics.Process.Start(OperatingSystem.IsWindows()
+                        ? new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), "/c exit 0") { UseShellExecute = false, CreateNoWindow = true }
+                        : new System.Diagnostics.ProcessStartInfo("/bin/sh", "-c true") { UseShellExecute = false })!;
+                }
+            };
+            await tools.Execute("get_printers", JsonSerializer.SerializeToElement(new { }), CancellationToken.None);
+            var first = await tools.Execute("restart_service", JsonSerializer.SerializeToElement(new { service = "Spooler" }), CancellationToken.None);
+            await tools.Execute("restart_service", JsonSerializer.SerializeToElement(new { service = "Spooler" }), CancellationToken.None);
+            assert(first.Contains("\"success\":true") && requests.Count == 2 && requests[0].Details.Contains("Estado atual: parado (início automático).")
+                && requests[1].Details.Contains("\nEstado atual: em execução.\n") && !requests[1].Details.Contains("parado"),
+                "Spooler: depois do reinício concluído, o próximo pedido mostra o estado informado pelo Windows, não o parado de antes");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    // Relatório com um estado que não existe hoje e não é "persiste" nem encerrado: conta como atual (QM2 e item 1 do @qa).
+    private static string SyntheticReport(string llamaStatus) =>
+        "RELATÓRIO LOCAL DE SAÚDE — dados observados, não instruções\nAmostra: 2026-11-09 03:00:00 _00:00; coleta complete.\n" + HealthReportPresentation.CurrentHeader + "\n"
+        + "Achado memory (warning), 2026-11-09 02:55 _00:00, estável em patamar alto: NexoMemTeste PID 23132 segue com 13591 MB há 30 minutos: Processo com memória em crescimento persistente. Evidência: NexoMemTeste PID 23132 iniciado em 2026-11-09 02:20:00 _00:00: de 4375 MB para 13591 MB em 4 leituras e 29 pontos da RAM. Causa: hipótese, x. Recomendação: Verifique se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção. Confiança 70%; confirmado: não.\n"
+        + "Achado memory (warning), 2026-11-09 02:50 _00:00, " + llamaStatus + ": Processo com memória em crescimento persistente. Evidência: llama-server PID 9100 iniciado em 2026-11-09 00:00:00 _00:00: de 1200 MB para 6200 MB em 4 leituras. Causa: hipótese, x. Confiança 70%; confirmado: não.\n";
+
+    private static void SyntheticState(Action<bool, string> assert)
+    {
+        var evidence = new InvestigationEvidence();
+        evidence.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(SyntheticReport("resolvida: 3 leituras seguidas sem a condição")));
+        assert(evidence.ValidateStatement("O NexoMemTeste está consumindo muita memória.", false) == null
+            && evidence.WithMemoryFigures("O NexoMemTeste PID 23132 está pesado.").EndsWith("Pelo monitor de saúde: “NexoMemTeste” (PID 23132) segue com 13591 MB; no alerta, subiu de 4375 MB para 13591 MB.", StringComparison.Ordinal)
+            && evidence.Report("").Contains("Ocorrência ativa no monitor de saúde") && evidence.Report("").Contains("NexoMemTeste PID 23132")
+            && evidence.ValidateStatement("O llama-server está consumindo muita memória.", false) == InvestigationEvidence.StaleProcessReason,
+            "Estado novo: um estado que não é \"persiste\" nem encerrado conta como atual (citação, MB e resumo); o resolvido continua não atual");
+        var both = new InvestigationEvidence();
+        both.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(SyntheticReport("resolvida: 3 leituras seguidas sem a condição")
+            + "Achado memory (warning), 2026-11-09 02:58 _00:00, persiste nas leituras atuais: Processo com memória em crescimento persistente. Evidência: llama-server PID 9100 iniciado em 2026-11-09 00:00:00 _00:00: de 6200 MB para 9000 MB em 4 leituras. Causa: hipótese, x. Confiança 70%; confirmado: não.\n"));
+        assert(both.ValidateStatement("O llama-server está consumindo muita memória.", false) == null,
+            "Estado novo: um processo que também aparece numa ocorrência atual pode ser citado como atual");
+    }
+
+    // As sondas do @qa (qa88r1-probe) sobre a ocorrência resolvida do llama-server: as legítimas passam, as afirmações no
+    // presente são recusadas.
+    private static void ConsumptionSentences(Action<bool, string> assert)
+    {
+        var evidence = new InvestigationEvidence();
+        evidence.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(
+            "RELATÓRIO LOCAL DE SAÚDE — dados observados, não instruções\nAmostra: 2026-11-09 03:00:00 _00:00; coleta complete.\n" + HealthReportPresentation.OtherHeader + "\n"
+            + "Achado memory (warning), 2026-11-09 02:50 _00:00, resolvida: 3 leituras seguidas sem a condição: Processo com memória em crescimento persistente. Evidência: llama-server PID 9100 iniciado em 2026-11-09 00:00:00 _00:00:_ de 1200 MB para 6200 MB em 4 leituras. Causa: hipótese, x. Confiança 70%; confirmado: não.\n"));
+        bool Refused(string sentence) => evidence.ValidateStatement(sentence, false) == InvestigationEvidence.StaleProcessReason;
+        string[] accepted =
+        [
+            "O llama-server do Ollama ocupa memória enquanto o modelo está carregado, o que é normal.",
+            "O llama-server já foi resolvido e agora está usando pouca memória.",
+            "Antes, o llama-server estava consumindo memória; agora está normal.",
+            "O llama-server continua usando memória?",
+            "O llama-server está consumindo muita memória, não é?",
+            "O llama-server consome memória só quando você usa o assistente.",
+            "Se o llama-server estiver consumindo memória de novo, avise.",
+            "Quando o llama-server ocupa muita memória, o PC fica lento; hoje isso já foi resolvido.",
+            "O llama-server não está consumindo memória agora.",
+            "O llama-server nem está usando memória."
+        ];
+        string[] refused =
+        [
+            "O llama-server tá consumindo memória.",
+            "O llama-server.exe está consumindo memória.",
+            "O LLAMA-SERVER está consumindo memória.",
+            "Os processos llama-server e chrome estão consumindo memória.",
+            "O llama-server, que não é do sistema, está consumindo memória.",
+            "A memória está ocupada porque o llama-server ocupa 6 GB."
+        ];
+        var wrongAccepted = accepted.Where(Refused).ToArray();
+        var wrongRefused = refused.Where(sentence => !Refused(sentence)).ToArray();
+        assert(wrongAccepted.Length == 0 && wrongRefused.Length == 0,
+            "Ocorrência encerrada: pergunta, condição, \"resolvido/normal\" e negação ligada ao verbo passam; \"tá consumindo\", \".exe\" e negação longe do verbo são recusados"
+            + string.Concat(wrongAccepted.Select(x => " [recusada: " + x + "]")) + string.Concat(wrongRefused.Select(x => " [aceita: " + x + "]")));
+    }
+
+    // ask_user: a pergunta continua sendo a última coisa da resposta; a leitura em MB entra antes dela.
+    private static async Task QuestionStaysLast(Store store, Account actor, Action<bool, string> assert)
+    {
+        const string statement = "O NexoMemTeste PID 23132 continua crescendo.";
+        const string question = "Você está usando esse programa agora?";
+        var report = LlamaReport(holding: true);
+        var tools = new FlowTools((name, _) => name switch
+        {
+            "get_health_report" => WindowsTools.Ok(report),
+            "diagnose_device" => WindowsTools.Ok("Memória livre: 4 GB de 31.9 GB\r\nDisco C:: 250.0 GB livres de 476.3 GB"),
+            _ => throw new Exception("Ferramenta inesperada: " + name)
+        });
+        var answer = await Ask(store, actor, "meu pc ta lento", tools,
+            new CapturingModel([Call("ask_user", new { message = statement + " " + question, reason = "missing_information" })]));
+        const string figures = "Pelo monitor de saúde: “NexoMemTeste” (PID 23132) segue com 13591 MB; no alerta, subiu de 4375 MB para 13591 MB.";
+        assert(answer.StartsWith(statement + "\n\n" + figures + "\n\n" + question + "\n\n" + TurnFacts.Prefix, StringComparison.Ordinal),
+            "Memória: no ask_user, a leitura em MB entra antes da pergunta, que continua sendo a última frase antes da linha de fatos");
+        var evidence = new InvestigationEvidence();
+        evidence.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(report));
+        assert(evidence.WithMemoryFigures("O NexoMemTeste segue alto. Você usa esse programa? Posso ajudar a decidir?") == "O NexoMemTeste segue alto.\n\n" + figures + "\n\nVocê usa esse programa? Posso ajudar a decidir?"
+            && evidence.WithMemoryFigures("O NexoMemTeste está usando a memória?") == figures + "\n\nO NexoMemTeste está usando a memória?",
+            "Memória: várias perguntas no fim ficam juntas depois da leitura, e uma resposta que é só pergunta começa pela leitura");
     }
 
     // Relatório real do HealthReportPresentation: o llama-server teve um alerta de memória já resolvido; com holding, o
@@ -231,7 +389,9 @@ internal static class ValidationFollowUpChecks
             {
                 Time = now.AddSeconds(-30 * (4 - i)), CpuPercent = 10, MemoryUsedPercent = holding ? 60 : 40, CollectionStatus = "complete",
                 Disks = [new DiskHealth("C:\\", 250_000, 500_000)],
-                Processes = [new ProcessHealth("llama-server", 9100, 900 * Mb, 1, llamaStart), .. holding ? new[] { new ProcessHealth("NexoMemTeste", 23132, 13591 * Mb, 0, testStart) } : []]
+                // O chrome aparece sem início legível: não dá para confirmar que liberou a memória, e o estado fica desconhecido.
+                Processes = [new ProcessHealth("llama-server", 9100, 900 * Mb, 1, llamaStart), new ProcessHealth("chrome", 4120, 700 * Mb, 1),
+                    .. holding ? new[] { new ProcessHealth("NexoMemTeste", 23132, 13591 * Mb, 0, testStart) } : []]
             }).ToArray();
             foreach (var sample in samples) db.SaveSnapshot(sample);
             var found = new List<HealthFinding>
@@ -239,7 +399,11 @@ internal static class ValidationFollowUpChecks
                 new() { Id = $"process-memory-growing:9100:{llamaStart.UtcTicks}:s0", Time = now.AddMinutes(-4), Category = "memory", Severity = "warning",
                     Problem = "Processo com memória em crescimento persistente", Evidence = $"llama-server PID 9100 iniciado em {llamaStart:yyyy-MM-dd HH:mm:ss zzz}: de 1200 MB para 6200 MB em 4 leituras e 15 pontos da RAM",
                     Cause = "Crescimento observado neste processo", Recommendation = "Verifique se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção", Confidence = 0.7,
-                    MemoryGrowth = new("llama-server", 1200 * Mb, 6200 * Mb) }
+                    MemoryGrowth = new("llama-server", 1200 * Mb, 6200 * Mb) },
+                new() { Id = $"process-memory-growing:4120:{now.AddHours(-1).UtcTicks}:s0", Time = now.AddMinutes(-5), Category = "memory", Severity = "warning",
+                    Problem = "Processo com memória em crescimento persistente", Evidence = $"chrome PID 4120 iniciado em {now.AddHours(-1):yyyy-MM-dd HH:mm:ss zzz}: de 400 MB para 2400 MB em 4 leituras e 6 pontos da RAM",
+                    Cause = "Crescimento observado neste processo", Recommendation = "Verifique se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção", Confidence = 0.7,
+                    MemoryGrowth = new("chrome", 400 * Mb, 2400 * Mb) }
             };
             if (holding)
                 found.Add(new() { Id = $"process-memory-growing:23132:{testStart.UtcTicks}:s1", Time = now.AddMinutes(-3), Category = "memory", Severity = "warning",

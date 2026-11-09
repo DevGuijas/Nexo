@@ -24,6 +24,7 @@ public sealed class InvestigationEvidence
     // atual, e os nomes que só aparecem em ocorrência que não é atual (resolvida, histórica ou informativa).
     private readonly List<(string Name, int Pid, long From, long To, long? Now)> memoryHolders = [];
     private readonly HashSet<string> staleProcesses = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> currentProcesses = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<(string Name, ControlBlock Kind, string? Topic)> blocks = [];
     private readonly Dictionary<string, (string Host, bool Dns, bool Tcp)> connections = [];
     private readonly List<string> changes = [];
@@ -233,20 +234,24 @@ public sealed class InvestigationEvidence
         return null;
     }
 
-    internal const string StaleProcessReason = "A resposta apresenta como atual o consumo de memória de um processo que o relatório de saúde só mostra em ocorrência que não é atual (resolvida, histórica ou informativa). Cite apenas o que persiste nas leituras atuais, ou diga que essa ocorrência não está ativa.";
+    internal const string StaleProcessReason = "A resposta apresenta como atual o consumo de memória de um processo que o relatório de saúde só mostra em ocorrência encerrada (resolvida ou com estado atual desconhecido). Cite apenas o que continua nas leituras atuais, ou diga que essa ocorrência não está ativa.";
 
-    // "O llama-server está consumindo memória" quando a única ocorrência dele está resolvida (#88). Vale a frase que cita o
-    // processo com um verbo de consumo no presente, sem negação; um processo que aparece numa consulta atual (get_processes
-    // ou ocorrência que persiste) pode ser citado.
+    // "O llama-server está consumindo memória" quando a ocorrência dele está encerrada (#88). Vale só a afirmação de consumo
+    // no presente: a frase que cita o processo (também como "llama-server.exe") com "está/tá/continua consumindo", "consome",
+    // "ocupa"... A frase com "?", com condição ("se", "quando", "enquanto") ou que diz que foi resolvido ou está normal passa,
+    // e a negação só vale ligada ao verbo, até três palavras antes dele. Um processo de consulta atual (get_processes ou
+    // ocorrência que não está encerrada) pode ser citado.
+    private static readonly Regex PresentUse = new(@"\b(?:(?:esta|estao|ta|tao|continua|continuam|segue|seguem)\s+(?:consumindo|usando|ocupando|segurando)|consome|consomem|ocupa|ocupam)\b");
     private bool PresentsStaleProcess(string normalized)
     {
-        var current = topProcesses.Select(p => p.Name).Concat(memoryHolders.Select(h => h.Name)).Select(AgentProtocol.Normalize).ToHashSet();
+        var current = topProcesses.Select(p => p.Name).Concat(currentProcesses).Select(AgentProtocol.Normalize).ToHashSet();
         var stale = staleProcesses.Select(AgentProtocol.Normalize).Where(name => !current.Contains(name)).ToArray();
         if (stale.Length == 0) return false;
-        return Regex.Split(normalized, @"(?<=[.!?;\n])").Any(sentence =>
-            stale.Any(name => Regex.IsMatch(sentence, @"(?<![\w.-])" + Regex.Escape(name) + @"(?![\w-])"))
-            && Regex.IsMatch(sentence, @"\b(esta|estao|continua|continuam|segue|seguem)\s+(consumindo|usando|ocupando|segurando)\b|\b(consome|consomem|ocupa|ocupam)\b")
-            && !Regex.IsMatch(sentence, @"\b(nao|nem|deixou de|deixaram de|parou de|pararam de)\b"));
+        // Ponto só fecha a frase antes de espaço ou no fim: "llama-server.exe" fica inteiro.
+        return Regex.Split(normalized, @"(?<=[!?;\n])|(?<=\.)(?=\s|$)").Any(sentence =>
+            !sentence.Contains('?') && !Regex.IsMatch(sentence, @"\b(se|quando|enquanto)\b|resolvid|\bnormal|\bja foi\b")
+            && stale.Any(name => Regex.IsMatch(sentence, @"(?<![\w.-])" + Regex.Escape(name) + @"(?:\.exe)?(?![\w-]|\.\w)"))
+            && PresentUse.Matches(sentence).Any(use => !Regex.Matches(sentence[..use.Index], @"[\p{L}\p{N}]+").TakeLast(3).Any(word => word.Value is "nao" or "nem" or "nunca")));
     }
 
     // Os MB do processo que segura memória entram na resposta (#88): no PC, a resposta citou "NexoMemTeste PID 23132" e só
@@ -264,7 +269,16 @@ public sealed class InvestigationEvidence
             Quoted(holder.Name) + " (PID " + holder.Pid.ToString(CultureInfo.InvariantCulture) + ")"
             + (holder.Now is { } now ? " segue com " + now.ToString(CultureInfo.InvariantCulture) + " MB; no alerta, subiu" : " subiu")
             + " de " + holder.From.ToString(CultureInfo.InvariantCulture) + " MB para " + holder.To.ToString(CultureInfo.InvariantCulture) + " MB");
-        return answer.TrimEnd() + "\n\nPelo monitor de saúde: " + string.Join("; ", figures) + ".";
+        var line = "Pelo monitor de saúde: " + string.Join("; ", figures) + ".";
+        var trimmed = answer.TrimEnd();
+        if (!trimmed.EndsWith('?')) return trimmed + "\n\n" + line;
+        // Uma pergunta ao usuário continua sendo a última coisa da resposta: a leitura entra antes das frases finais com "?".
+        // A frase acaba em ".", "!" ou "?" seguidos de espaço, ou na quebra de linha; "13.591" e "llama-server.exe" não cortam.
+        var sentences = Regex.Split(trimmed, @"(?<=[.!?])(?=\s)|(?<=\n)");
+        var asked = sentences.Reverse().TakeWhile(sentence => sentence.TrimEnd().EndsWith('?')).Count();
+        var before = string.Concat(sentences[..^asked]).TrimEnd();
+        var question = string.Concat(sentences[^asked..]).Trim();
+        return (before.Length == 0 ? "" : before + "\n\n") + line + "\n\n" + question;
     }
     public static bool ExplicitlyUnchanged(JsonElement result)
     {
@@ -532,7 +546,7 @@ public sealed class InvestigationEvidence
     // Assunto do pedido do usuário ("space" ou "slowness"): a recomendação ligada a ele vem primeiro no limite de duas.
     public string? Focus { get; set; }
 
-    private void ForgetFindings() { findings.Clear(); topProcesses.Clear(); memoryHolders.Clear(); staleProcesses.Clear(); }
+    private void ForgetFindings() { findings.Clear(); topProcesses.Clear(); memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear(); }
 
     // Só a evidência é encurtada; a orientação de segurança que acompanha a linha nunca é cortada.
     private void Finding(string key, string text, string guidance = "")
@@ -634,8 +648,8 @@ public sealed class InvestigationEvidence
     private void RememberHealth(string report)
     {
         // Cada relatório substitui as três linhas do anterior; uma parte ausente agora não pode sobrar da leitura velha.
-        findings.RemoveAll(f => f.Key is "health" or "health:unknown" or "health:informative" or "health:volumes");
-        memoryHolders.Clear(); staleProcesses.Clear();
+        findings.RemoveAll(f => f.Key is "health" or "health:unknown" or "health:volumes");
+        memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear();
         if (report.StartsWith("Nenhuma amostra", StringComparison.Ordinal)) { Finding("health", "O relatório de saúde não tem leituras das últimas 24 horas."); return; }
         // O relatório marca a amostra velha na linha de coleta, pelo mesmo critério de HealthOccurrences.CollectionNotice.
         var stale = Regex.IsMatch(report, @"^Última coleta: [^\n]*Sem leitura recente: o estado atual das ocorrências é desconhecido\.", RegexOptions.Multiline);
@@ -644,28 +658,27 @@ public sealed class InvestigationEvidence
             ? time.ToLocalTime().ToString("dd/MM 'às' HH:mm", CultureInfo.InvariantCulture) : null;
         // O relatório troca a vírgula decimal por "_"; aqui ela volta para o usuário ler o número.
         static string Readable(string text) => Regex.Replace(text.Replace(":_", ":"), @"(?<=\d)_(?=\d)", ",");
-        // Toda linha de achado tem o mesmo formato; o estado vem depois da data e antes do problema. Só um estado que começa
-        // por "persiste" é atual (#88): "persiste nas leituras atuais" e "persiste: <processo> segue com N MB…", que antes não
-        // era reconhecido e tirava do resumo a ocorrência do processo que segura memória. Qualquer outro estado não é atual.
-        // Os estados conhecidos vêm do código; um estado novo, sem dois-pontos, também é lido. O problema e a evidência podem
-        // trazer nome de volume que imita ". Evidência:", então o estado nunca avança sobre eles.
-        var lines = Regex.Matches(report, @"^Achado (?<category>[a-z]+) \([^)\n]*\), [^,\n]*, (?<status>persiste nas leituras atuais|persiste: [\p{L}\p{N}._-]+ PID \d+ segue com [^:\n]*|ocorrência histórica; estado atual desconhecido \([^)\n]*\)|resolvida: [^:\n]*|[^:\n]*): (?<problem>[^\n]+?)\. Evidência: (?<evidence>[^\n]+?)\. Causa:", RegexOptions.Multiline)
+        // Toda linha de achado tem o mesmo formato; o estado vem depois da data e antes do problema. Só os estados que o código
+        // dá como encerrados, "resolvida" e "ocorrência histórica" (estado atual desconhecido), deixam de ser atuais (#88).
+        // Qualquer outro, inclusive um que ainda não existe (como um estado de memória estável em patamar alto), conta como
+        // atual: o processo dele pode ser citado e os MB dele entram na resposta. "persiste: <processo> segue com N MB…" antes
+        // não era reconhecido e tirava do resumo a ocorrência do processo que segura memória. O problema e a evidência podem
+        // trazer nome de volume que imita ". Evidência:", então o estado só avança sobre texto do próprio formato dele.
+        var lines = Regex.Matches(report, @"^Achado (?<category>[a-z]+) \([^)\n]*\), [^,\n]*, (?<status>persiste nas leituras atuais|ocorrência histórica; estado atual desconhecido \([^)\n]*\)|resolvida: [^:\n]*|[^:\n]*: [\p{L}\p{N}._-]+ PID \d+ segue com [^:\n]*|[^:\n]*): (?<problem>[^\n]+?)\. Evidência: (?<evidence>[^\n]+?)\. Causa:", RegexOptions.Multiline)
             .Select(match => (Status: match.Groups["status"].Value, Category: match.Groups["category"].Value, Problem: match.Groups["problem"].Value, Evidence: match.Groups["evidence"].Value,
-                Active: match.Groups["status"].Value.StartsWith("persiste", StringComparison.Ordinal)))
+                Active: !Closed(match.Groups["status"].Value)))
             .ToArray();
         foreach (var line in lines.Where(line => line.Category == "memory"))
         {
             if (Regex.Match(line.Evidence, @"^(?<name>[\p{L}\p{N}._-]+) PID (?<pid>\d{1,9})\b") is not { Success: true } who) continue;
             var name = who.Groups["name"].Value;
             if (!line.Active) { staleProcesses.Add(name); continue; }
+            currentProcesses.Add(name);
             if (Regex.Match(line.Evidence, @": de (?<from>\d{1,9}) MB para (?<to>\d{1,9}) MB") is { Success: true } growth
                 && int.TryParse(who.Groups["pid"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var pid))
                 memoryHolders.Add((name, pid, long.Parse(growth.Groups["from"].Value, CultureInfo.InvariantCulture), long.Parse(growth.Groups["to"].Value, CultureInfo.InvariantCulture),
                     Regex.Match(line.Status, @" segue com (?<now>\d{1,9}) MB\b") is { Success: true } now ? long.Parse(now.Groups["now"].Value, CultureInfo.InvariantCulture) : null));
         }
-        // Um processo citado também numa ocorrência atual não é só de ocorrência antiga.
-        foreach (var holder in lines.Where(line => line.Active && line.Category == "memory")
-            .Select(line => Regex.Match(line.Evidence, @"^(?<name>[\p{L}\p{N}._-]+) PID ")).Where(match => match.Success)) staleProcesses.Remove(holder.Groups["name"].Value);
         var occurrences = lines
             .Where(line => !line.Status.StartsWith("resolvida", StringComparison.Ordinal) && !line.Status.Contains("(há ocorrência mais recente do mesmo alerta)", StringComparison.Ordinal))
             // A evidência pode trazer nome de adaptador, serviço ou processo: vai entre aspas, como todo nome vindo de ferramenta.
@@ -680,9 +693,7 @@ public sealed class InvestigationEvidence
         bool Related(string rule) => Focus == "space" ? rule == "disk-low" : Focus == "slowness" && rule is "cpu-high" or "memory-growing" or "process-memory-growing";
         var advice = occurrences.Where(o => o.Active && o.Advice.Text.Length > 0).OrderBy(o => Related(o.Advice.Rule) ? 0 : 1)
             .Select(o => o.Advice.Text).Distinct().Take(2).ToArray();
-        var unknown = occurrences.Where(o => !o.Active && o.Unknown).Select(o => o.Text).ToArray();
-        // Estado que não é atual nem desconhecido (um estado informativo, por exemplo): fica visível, marcado como não atual.
-        var informative = occurrences.Where(o => !o.Active && !o.Unknown).Select(o => o.Text).ToArray();
+        var unknown = occurrences.Where(o => o.Unknown).Select(o => o.Text).ToArray();
         var volumes = Regex.Matches(report, @"^Volume (?<name>[^\n]+?): (?<free>[\d.,]+% livre)\.", RegexOptions.Multiline)
             // Letra de unidade sai como está; outro nome de volume é dado da ferramenta e vai entre aspas (@qa: nome que imita o relatório).
             .Select(match => (Regex.IsMatch(match.Groups["name"].Value, @"^[A-Za-z]:_?$") ? match.Groups["name"].Value.TrimEnd('_') : Quoted(match.Groups["name"].Value)) + " " + match.Groups["free"].Value).ToArray();
@@ -696,9 +707,11 @@ public sealed class InvestigationEvidence
                 // Caminho real para ver o uso do disco (#88): o Nexo não lista arquivos nem pastas.
                 + (advice.Contains(Advice("disk", "Pouco espaço no volume ").Text) ? " Para ver o que ocupa espaço, abra Configurações > Sistema > Armazenamento no Windows." : ""));
         if (unknown.Length > 0) Finding("health:unknown", "Ocorrências do monitor com estado atual desconhecido: " + Within(unknown.Take(3), unknown.Length) + ".");
-        if (informative.Length > 0) Finding("health:informative", "Ocorrências do monitor que não são problemas atuais: " + Within(informative.Take(3), informative.Length) + ".");
         if (volumes.Length > 0) Finding("health:volumes", (stale ? "Espaço livre por volume naquela amostra: " : "Espaço livre por volume: ") + Within(volumes.Take(4), volumes.Length) + ".");
     }
+
+    // Estados que o relatório dá como encerrados; todo o resto conta como atual.
+    private static bool Closed(string status) => status.StartsWith("resolvida", StringComparison.Ordinal) || status.StartsWith("ocorrência histórica", StringComparison.Ordinal);
 
     // Descreve a alteração concluída com o que a própria ferramenta devolveu e o estado consultado antes dela.
     public string? ChangeOutcome(string name, JsonElement args, JsonElement root)
