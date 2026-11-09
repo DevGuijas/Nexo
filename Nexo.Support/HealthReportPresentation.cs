@@ -192,14 +192,25 @@ public static class HealthReportPresentation
         if (report.Findings.Count == 0) text.AppendLine("Nenhum achado sustentado foi registrado nos dados disponíveis.");
         var occurrences = HealthOccurrences.Classify(report.Findings, store.RecentSnapshots(since, 20), thresholds ?? new(), DateTimeOffset.UtcNow);
         if (occurrences.Count > 10) text.AppendLine($"Mostrando 10 de {occurrences.Count} ocorrências, as críticas primeiro; as demais foram omitidas deste relatório.");
-        foreach (var (finding, status) in occurrences.OrderByDescending(o => o.Finding.Severity == "critical").ThenByDescending(o => o.Finding.Time).Take(10))
-        {
-            text.AppendLine($"Achado {Safe(finding.Category)} ({Safe(finding.Severity)}), {finding.Time:yyyy-MM-dd HH:mm zzz}, {char.ToLowerInvariant(status.Label[0]) + status.Label[1..]}: {Safe(finding.Problem)}. Evidência: {Safe(finding.Evidence)}. Causa: hipótese, {Safe(finding.Cause)}. Recomendação: {Safe(finding.Recommendation)}. Confiança {Math.Clamp(finding.Confidence, 0, 1):P0}; confirmado: não.");
-        }
+        // Só o que persiste nas leituras atuais é problema atual (#88): no PC, o modelo leu como atual uma ocorrência "resolvida"
+        // do llama-server. A separação é pelo estado, não pelo texto dele; qualquer outro estado vai para a parte não atual,
+        // sem recomendação, para não puxar uma ação sobre algo que não está acontecendo.
+        var shown = occurrences.OrderByDescending(o => o.Finding.Severity == "critical").ThenByDescending(o => o.Finding.Time).Take(10).ToArray();
+        var currentPart = shown.Where(o => o.Status.State == OccurrenceState.Persistent).ToArray();
+        var otherPart = shown.Where(o => o.Status.State != OccurrenceState.Persistent).ToArray();
+        if (currentPart.Length > 0) text.AppendLine(CurrentHeader);
+        foreach (var (finding, status) in currentPart) text.AppendLine(Line(finding, status, true));
+        if (otherPart.Length > 0) text.AppendLine(OtherHeader);
+        foreach (var (finding, status) in otherPart) text.AppendLine(Line(finding, status, false));
         foreach (var limitation in report.Limitations.Take(10)) text.AppendLine("Limitação: " + Safe(limitation));
         text.AppendLine("Nenhuma alteração foi executada por este relatório. Confirme a função afetada antes de declarar recuperação.");
         return text.ToString()[..Math.Min(text.Length, 7000)];
     }
+    internal const string CurrentHeader = "OCORRÊNCIAS ATUAIS (persistem nas leituras atuais):";
+    internal const string OtherHeader = "OCORRÊNCIAS QUE NÃO SÃO ATUAIS (resolvidas, históricas ou informativas): não as apresente como problemas presentes nem proponha ação para elas.";
+    private static string Line(HealthFinding finding, OccurrenceStatus status, bool current) =>
+        $"Achado {Safe(finding.Category)} ({Safe(finding.Severity)}), {finding.Time:yyyy-MM-dd HH:mm zzz}, {char.ToLowerInvariant(status.Label[0]) + status.Label[1..]}: {Safe(finding.Problem)}. Evidência: {Safe(finding.Evidence)}. Causa: hipótese, {Safe(finding.Cause)}."
+        + (current ? $" Recomendação: {Safe(finding.Recommendation)}." : "") + $" Confiança {Math.Clamp(finding.Confidence, 0, 1):P0}; confirmado: não.";
     public static string InterventionState(InterventionRecord intervention) => intervention.State switch
     {
         _ when PendingOperations.IsWaiting(intervention) => "em andamento ou incerto, aguardando o resultado do Windows",
