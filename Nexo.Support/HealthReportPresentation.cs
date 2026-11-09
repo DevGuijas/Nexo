@@ -45,6 +45,11 @@ public static class HealthOccurrences
     /// janela que termina na leitura atual já é um patamar e a referência ainda não foi gravada; depois disso basta a leitura atual.
     /// </summary>
     public static void RecordPlateaus(OperationalStore store, HealthSnapshot latest, HealthThresholds thresholds)
+        => RecordPlateaus(store, latest, thresholds, store.ProcessReadings);
+
+    // readings é trocado nos testes para contar o que o monitor lê do banco.
+    internal static void RecordPlateaus(OperationalStore store, HealthSnapshot latest, HealthThresholds thresholds,
+        Func<int, long, DateTimeOffset, IReadOnlyList<ProcessReading>> readings)
     {
         if (latest.Processes.Count == 0) return;
         var updated = new List<HealthFinding>();
@@ -59,9 +64,9 @@ public static class HealthOccurrences
                 continue;
             }
             if (latest.Time - finding.Time < PlateauWindow) continue;
-            var recent = store.ProcessReadings(process.Pid, process.StartTicks, latest.Time - PlateauWindow - thresholds.MaxSampleGap);
+            var recent = readings(process.Pid, process.StartTicks, latest.Time - PlateauWindow - thresholds.MaxSampleGap);
             if (!EndsInPlateau(recent, latest.Time, thresholds)) continue;
-            var scan = Scan(finding.Time, store.ProcessReadings(process.Pid, process.StartTicks, finding.Time), thresholds);
+            var scan = Scan(finding.Time, readings(process.Pid, process.StartTicks, finding.Time), thresholds);
             // Sem referência e sem motivo definitivo, a busca recomeça na próxima leitura.
             if (scan.Reference == null && scan.Unavailable == null) continue;
             updated.Add(finding.WithMemoryPlateau(new MemoryPlateauEvidence(process.Pid, process.StartTicks, scan.Reference is { } level ? (long)level : null,

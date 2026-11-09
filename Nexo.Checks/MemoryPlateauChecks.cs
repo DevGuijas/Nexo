@@ -294,6 +294,60 @@ internal static class MemoryPlateauChecks
             check(line != null && line.StartsWith("Achado memory (warning)") && line.Contains("persiste: Navegador PID 20248"),
                 "#71: relatório do assistente mostra o vazamento de 1,9% em 30 min por 3,5 h persistindo");
         });
+        // Custo: enquanto não há patamar, o monitor só lê do banco a janela de ~30 min do processo, nunca a série desde o alerta.
+        WithStore(db =>
+        {
+            var series = Series(362, Ramp(0.03), DateTimeOffset.UtcNow.AddSeconds(-5));
+            db.SaveFindings([ProcessAlert(series)]);
+            var reads = new List<(DateTimeOffset Latest, DateTimeOffset Since, int Rows)>();
+            foreach (var sample in series)
+            {
+                db.SaveSnapshot(sample);
+                HealthOccurrences.RecordPlateaus(db, sample, Limits, (pid, ticks, since) => { var rows = db.ProcessReadings(pid, ticks, since); reads.Add((sample.Time, since, rows.Count)); return rows; });
+            }
+            check(reads.Count > 250 && reads.All(r => r.Since >= r.Latest - TimeSpan.FromMinutes(30) - Limits.MaxSampleGap && r.Rows <= 64) && Stored(db).MemoryPlateau == null,
+                "#71: com um processo vazando por 3 h, cada leitura do monitor lê do banco só a janela de 30 min, sem a série desde o alerta");
+        });
+        WithStore(db =>
+        {
+            var series = Series(242, _ => 14000, DateTimeOffset.UtcNow.AddSeconds(-5));
+            db.SaveFindings([ProcessAlert(series)]);
+            var full = new List<DateTimeOffset>();
+            var windows = 0;
+            foreach (var sample in series)
+            {
+                db.SaveSnapshot(sample);
+                HealthOccurrences.RecordPlateaus(db, sample, Limits, (pid, ticks, since) =>
+                {
+                    if (since == series[1].Time) full.Add(sample.Time); else windows++;
+                    return db.ProcessReadings(pid, ticks, since);
+                });
+            }
+            check(full.SequenceEqual([series[61].Time]) && windows == 1, "#71: processo estável: a série desde o alerta é lida uma vez, na leitura que comprova o patamar, e depois nada");
+        });
+        // Uma falha ao gravar o patamar não derruba a leitura do monitor: o erro fica no aviso do monitor, com texto fixo.
+        WithStore(db =>
+        {
+            var series = Series(ThirtyOne, _ => 14000, DateTimeOffset.UtcNow.AddSeconds(-5));
+            db.SaveFindings([ProcessAlert(series)]);
+            foreach (var sample in series[..^2]) db.SaveSnapshot(sample);
+            var fail = true;
+            var updates = 0;
+            using var engine = new MonitoringEngine(new QueueSampler(new Queue<HealthSnapshot>(series[^2..])), db, TimeSpan.FromSeconds(30), Limits)
+            {
+                PlateauRecorder = (store, sample, limits) => { if (fail) throw new OperationalStoreException("C:\\Users\\pessoa\\operations.db corrompido", new InvalidOperationException("dado")); HealthOccurrences.RecordPlateaus(store, sample, limits); }
+            };
+            engine.Updated += (_, _) => updates++;
+            Exception? thrown = null;
+            try { engine.RunOnceAsync(CancellationToken.None).GetAwaiter().GetResult(); } catch (Exception ex) { thrown = ex; }
+            check(thrown == null && updates == 1 && db.RecentSnapshots(DateTimeOffset.UtcNow.AddHours(-1), 1)[0].Id == series[^2].Id
+                && engine.LastError == MonitoringEngine.PlateauFailure && !engine.LastError.Contains("pessoa"),
+                "#71: falha ao gravar o patamar não interrompe a leitura do monitor e fica no aviso dele, sem os dados da exceção");
+            fail = false;
+            engine.RunOnceAsync(CancellationToken.None).GetAwaiter().GetResult();
+            check(engine.LastError == null && updates == 2 && Stored(db).MemoryPlateau?.ReferenceBytes == 14000 * Mb,
+                "#71: na leitura seguinte, a gravação do patamar é feita e o aviso some");
+        });
         // O monitor real chama a gravação a cada leitura.
         WithStore(db =>
         {
