@@ -926,7 +926,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         if (!ServiceEvents.IsAllowed(service)) throw new InvalidOperationException("Serviço não permitido.");
         try
         {
-            var result = ServiceEvents.Result(ServiceEvents.Parse(await ServiceEventsReader(ServiceEvents.Script(service), token), service), DateTimeOffset.Now);
+            var result = ServiceEvents.Result(ServiceEvents.Parse(await ServiceEventsReader(ServiceEvents.Script(service), token), service), ServiceEventsClock());
             observedServiceEvents[service] = (ServiceEventsClock(), ServiceEvents.Note(result, service));
             return result;
         }
