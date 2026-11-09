@@ -666,7 +666,7 @@ public sealed class InvestigationEvidence
         // parado…" (#57) também é lido inteiro, para que o problema da linha não comece no meio do estado. O problema e a evidência podem
         // trazer nome de volume que imita ". Evidência:", então o estado só avança sobre texto do próprio formato dele. O estado
         // "estável em patamar alto (informativo…): <processo> segue com N MB. Patamar de referência: …" (#71) tem dois dois-pontos.
-        var lines = Regex.Matches(report, @"^Achado (?<category>[a-z]+) \([^)\n]*\), [^,\n]*, (?<status>persiste nas leituras atuais|persiste: [^:\n]*|estável em patamar alto \([^)\n]*\): [^:\n]*: [^:\n]*|ocorrência histórica; estado atual desconhecido \([^)\n]*\)|resolvida: [^:\n]*|[^:\n]*: [\p{L}\p{N}._-]+ PID \d+ segue com [^:\n]*|[^:\n]*): (?<problem>[^\n]+?)\. Evidência: (?<evidence>[^\n]+?)\. Causa:", RegexOptions.Multiline)
+        var lines = Regex.Matches(report, @"^Achado (?<category>[a-z]+) \([^)\n]*\), [^,\n]*, (?<status>persiste nas leituras atuais|persiste: [^:\n]*|" + StableStatus + @": [^:\n]*: [^:\n]*|ocorrência histórica; estado atual desconhecido \([^)\n]*\)|resolvida: [^:\n]*|[^:\n]*: [\p{L}\p{N}._-]+ PID \d+ segue com [^:\n]*|[^:\n]*): (?<problem>[^\n]+?)\. Evidência: (?<evidence>[^\n]+?)\. Causa:", RegexOptions.Multiline)
             .Select(match => (Status: match.Groups["status"].Value, Category: match.Groups["category"].Value, Problem: match.Groups["problem"].Value, Evidence: match.Groups["evidence"].Value,
                 Active: !Closed(match.Groups["status"].Value)))
             .ToArray();
@@ -716,8 +716,11 @@ public sealed class InvestigationEvidence
         if (volumes.Length > 0) Finding("health:volumes", (stale ? "Espaço livre por volume naquela amostra: " : "Espaço livre por volume: ") + Within(volumes.Take(4), volumes.Length) + ".");
     }
 
-    // Estado atual que o próprio relatório marca como informativo, como "Estável em patamar alto (informativo, não é falha ativa)".
-    private static bool Informative(string status) => status.Contains("(informativo", StringComparison.Ordinal);
+    // Estado atual e informativo: só o rótulo do patamar estável da #71, pelo começo exato e compartilhado com quem o monta.
+    // Um "(informativo" no meio de outro estado não conta.
+    private static bool Informative(string status) => status.StartsWith(HealthOccurrences.StablePlateauLabel + ": ", StringComparison.OrdinalIgnoreCase);
+    // O relatório mostra o estado com a primeira letra minúscula; no padrão da linha, o rótulo vai escapado.
+    private static readonly string StableStatus = "(?i:" + Regex.Escape(HealthOccurrences.StablePlateauLabel) + ")";
     // Estados que o relatório dá como encerrados; todo o resto conta como atual.
     private static bool Closed(string status) => status.StartsWith("resolvida", StringComparison.Ordinal) || status.StartsWith("ocorrência histórica", StringComparison.Ordinal);
 

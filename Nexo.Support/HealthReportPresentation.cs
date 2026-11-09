@@ -176,7 +176,7 @@ public static class HealthOccurrences
                     // Qualquer processo que segura a memória sem patamar estável mantém a ocorrência persistindo.
                     if (ReferenceOf(holder) is not { } reference)
                         return new(OccurrenceState.Persistent, $"Persiste: {holder.Label} segue com {Megabytes(bytes)} MB, mais da metade da subida de {Megabytes(holder.Growth!.FromBytes)} para {Megabytes(holder.Growth.ToBytes)} MB registrada no alerta do processo");
-                    stable ??= new(OccurrenceState.Stable, $"Estável em patamar alto (informativo, não é falha ativa): {holder.Label} segue com {Megabytes(bytes)} MB. "
+                    stable ??= new(OccurrenceState.Stable, $"{StablePlateauLabel}: {holder.Label} segue com {Megabytes(bytes)} MB. "
                         + $"Patamar de referência: cerca de {Megabytes(reference)} MB, o primeiro medido depois do alerta, em {PlateauWindow.TotalMinutes:F0} min seguidos com variação abaixo de {PlateauAmplitude * 100:F0}% e sem tendência de alta. "
                         + $"Volta a persistir se chegar a {Megabytes((long)(reference * (1 + PlateauRise)))} MB");
                 }
@@ -218,6 +218,8 @@ public static class HealthOccurrences
     }
 
     /// <summary>Severidade exibida: o patamar estável é informativo, qualquer que seja a do registro (#71).</summary>
+    /// <summary>Começo exato do rótulo do patamar estável (#71). O resumo ao modelo (#88) reconhece o estado informativo só por ele.</summary>
+    public const string StablePlateauLabel = "Estável em patamar alto (informativo, não é falha ativa)";
     public static string ShownSeverity(HealthFinding finding, OccurrenceStatus status) => status.State == OccurrenceState.Stable ? "info" : finding.Severity;
 
     private static OccurrenceStatus Unknown(string reason) => new(OccurrenceState.Unknown, $"Ocorrência histórica; estado atual desconhecido ({reason})");

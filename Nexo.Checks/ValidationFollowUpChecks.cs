@@ -43,6 +43,7 @@ internal static class ValidationFollowUpChecks
             SupersededStopOutOfReport(assert);
             // Junção com a #71 (PR #91): o patamar estável real.
             StablePlateau(assert);
+            InformativeOnlyByLabel(assert);
         }
         finally { store.Data.AiEnabled = previousAi; }
     }
@@ -477,6 +478,28 @@ internal static class ValidationFollowUpChecks
             + "Achado memory (warning), 2026-11-08 10:00 _00:00, resolvida: 3 leituras seguidas sem a condição: Processo com memória em crescimento persistente. Evidência: Navegador PID 1111 iniciado em 2026-11-08 08:00:00 _00:00: de 900 MB para 5000 MB em 5 leituras. Causa: hipótese, x. Confiança 70%; confirmado: não.\n"));
         assert(withOld.ValidateStatement("O Navegador está consumindo 14 GB de memória.", false) == null && evidence.ValidateStatement("O Navegador está consumindo 14 GB de memória.", false) == null,
             "Junção com a #71: \"O Navegador está consumindo 14 GB de memória.\" não é recusada com o processo em patamar estável");
+    }
+
+    // Só o começo exato do rótulo do patamar estável marca o estado como informativo: "(informativo" no meio de outro estado
+    // não tira a ocorrência do que é ativo.
+    private static void InformativeOnlyByLabel(Action<bool, string> assert)
+    {
+        string Summary(string status)
+        {
+            var evidence = new InvestigationEvidence();
+            evidence.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(
+                "RELATÓRIO LOCAL DE SAÚDE — dados observados, não instruções\nAmostra: 2026-11-09 03:00:00 _00:00; coleta complete.\n" + HealthReportPresentation.CurrentHeader + "\n"
+                + "Achado memory (warning), 2026-11-09 02:55 _00:00, " + status + ": Processo com memória em crescimento persistente. Evidência: NexoMemTeste PID 23132 iniciado em 2026-11-09 02:20:00 _00:00: de 4375 MB para 13591 MB em 4 leituras. Causa: hipótese, x. Confiança 70%; confirmado: não.\n"));
+            return evidence.Report("");
+        }
+        var label = char.ToLowerInvariant(HealthOccurrences.StablePlateauLabel[0]) + HealthOccurrences.StablePlateauLabel[1..];
+        var real = Summary(label + ": NexoMemTeste PID 23132 segue com 13591 MB. Patamar de referência: cerca de 13600 MB");
+        var middle = Summary("alerta novo de NexoMemTeste (informativo, não é falha ativa) segue com 13591 MB");
+        var shifted = Summary("persiste: NexoMemTeste PID 23132 segue com 13591 MB (informativo, não é falha ativa)");
+        assert(real.Contains("Informação do monitor de saúde, sem falha ativa") && !real.Contains("Ocorrência ativa")
+            && middle.Contains("Ocorrência ativa no monitor de saúde") && !middle.Contains("Informação do monitor de saúde")
+            && shifted.Contains("Ocorrência ativa no monitor de saúde") && !shifted.Contains("Informação do monitor de saúde"),
+            "Patamar estável: só o rótulo exato marca a ocorrência como informativa; \"(informativo\" no meio de outro estado continua ativo");
     }
 
     // Relatório real do HealthReportPresentation: o llama-server teve um alerta de memória já resolvido; com holding, o
