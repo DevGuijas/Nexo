@@ -15,6 +15,11 @@ public sealed class HealthThresholds
     public int CpuSamples { get; set; } = 3;
     public int OtherSamples { get; set; } = 2;
     public int NetworkSamples { get; set; } = 3;
+    /// <summary>
+    /// Serviço Auto que parou com saída normal, sem início atrasado e sem gatilho, só gera alerta se foi visto em
+    /// execução em todas as leituras desse período antes da parada (#57).
+    /// </summary>
+    public TimeSpan ServiceStableRunning { get; set; } = TimeSpan.FromMinutes(10);
 }
 
 public static class HealthRules
@@ -29,10 +34,47 @@ public static class HealthRules
             && service.Status.Equals("Stopped", StringComparison.OrdinalIgnoreCase)
             && !(service.ExitCode == 0 && (service.DelayedAutoStart == true || service.TriggerStart == true));
 
+    /// <summary>
+    /// Parada com saída normal de serviço Auto comum: código 0, código específico 0 ou não informado, e início atrasado
+    /// e gatilho lidos como ausentes. Um campo não lido (nulo) não conta como parada normal. É o caso dos serviços que
+    /// rodam por pouco tempo e param sozinhos (GoogleUpdater, no PC do ensaio), mas também de uma parada manual.
+    /// Por isso a regra exige ter visto o serviço em execução estável antes da parada (#57).
+    /// </summary>
+    internal static bool CleanStop(ServiceHealth service)
+        => UnexpectedlyStopped(service) && service.ExitCode == 0 && service.ServiceSpecificExitCode is null or 0
+            && service.DelayedAutoStart == false && service.TriggerStart == false;
+
+    /// <summary>
+    /// Prova de que o serviço estava em execução estável antes da parada atual. Precisa de leituras contínuas com o
+    /// serviço Running desde uma leitura feita até ServiceStableRunning antes da 1ª leitura parada, sem lacuna maior que
+    /// MaxSampleGap. A parada atual é a sequência final de leituras Stopped ou Stop Pending. Serviço ausente de uma
+    /// leitura (lista truncada ou falha de coleta) interrompe a prova. Sem prova, o resultado é nulo.
+    /// </summary>
+    internal static ServiceStopEvidence? StableRunBeforeStop(IReadOnlyList<HealthSnapshot> ordered, string name, HealthThresholds thresholds)
+    {
+        string? StatusAt(int index) => ordered[index].Services.FirstOrDefault(s => s.Name == name)?.Status;
+        bool Stopping(int index) => StatusAt(index) is { } status
+            && (status.Equals("Stopped", StringComparison.OrdinalIgnoreCase) || status.Equals("Stop Pending", StringComparison.OrdinalIgnoreCase));
+        bool Close(int index) => index > 0 && ordered[index].Time - ordered[index - 1].Time <= thresholds.MaxSampleGap;
+        var first = ordered.Count - 1;
+        if (first < 0 || !Stopping(first)) return null;
+        while (Close(first) && Stopping(first - 1)) first--;
+        if (!Close(first)) return null;
+        var stoppedAt = ordered[first].Time;
+        var since = stoppedAt - thresholds.ServiceStableRunning;
+        for (var index = first - 1; index >= 0; index--)
+        {
+            if (!(StatusAt(index)?.Equals("Running", StringComparison.OrdinalIgnoreCase) ?? false)) return null;
+            if (ordered[index].Time <= since) return new(ordered[index].Time, stoppedAt);
+            if (!Close(index)) return null;
+        }
+        return null;
+    }
+
     public static List<HealthFinding> Evaluate(IReadOnlyList<HealthSnapshot> history, HealthThresholds thresholds)
     {
         if (thresholds.CpuSamples < 2 || thresholds.OtherSamples < 2 || thresholds.NetworkSamples < 2
-            || thresholds.MaxSampleGap <= TimeSpan.Zero || thresholds.ExternalProbeMaxSampleGap <= TimeSpan.Zero || thresholds.CpuHighPercent is < 1 or > 100
+            || thresholds.MaxSampleGap <= TimeSpan.Zero || thresholds.ExternalProbeMaxSampleGap <= TimeSpan.Zero || thresholds.ServiceStableRunning <= TimeSpan.Zero || thresholds.CpuHighPercent is < 1 or > 100
             || thresholds.DiskLowFreePercent is < 1 or > 100
             || thresholds.ProcessMemorySamples < 3 || !(thresholds.ProcessMemoryGrowthPoints is > 0 and <= 100))
             throw new ArgumentOutOfRangeException(nameof(thresholds));
@@ -67,8 +109,17 @@ public static class HealthRules
             }
             foreach (var service in latest.Services.Where(UnexpectedlyStopped))
             {
-                if (other.All(s => s.Services.Any(x => x.Name == service.Name && UnexpectedlyStopped(x))))
-                    findings.Add(Finding("service-stopped:" + service.Name, "service", "Serviço automático interrompido", service.Name + " parado em " + other.Length + " leituras", "Causa da parada ainda não identificada", "warning", "A função associada pode estar indisponível", "Consulte eventos do serviço antes de propor reinício", 0.85));
+                var readings = other.Select(s => s.Services.FirstOrDefault(x => x.Name == service.Name)).ToArray();
+                if (!readings.All(x => x != null && UnexpectedlyStopped(x))) continue;
+                // Código de saída diferente de 0 ou campo não lido: falha, como antes. Saída normal só alerta com a
+                // execução estável observada antes da parada; sem ela, o serviço fica só como informativo (#57).
+                ServiceStopEvidence? run = null;
+                if (readings.All(x => CleanStop(x!)) && (run = StableRunBeforeStop(ordered, service.Name, thresholds)) == null) continue;
+                var finding = Finding("service-stopped:" + service.Name, "service", "Serviço automático interrompido",
+                    service.Name + " parado em " + other.Length + " leituras" + (run == null ? "" : $", depois de pelo menos {(int)thresholds.ServiceStableRunning.TotalMinutes} min em execução observada"),
+                    "Causa da parada ainda não identificada", "warning", "A função associada pode estar indisponível", "Consulte eventos do serviço antes de propor reinício", 0.85);
+                finding.ServiceStop = run;
+                findings.Add(finding);
             }
         }
 

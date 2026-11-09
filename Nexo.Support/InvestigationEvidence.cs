@@ -662,9 +662,10 @@ public sealed class InvestigationEvidence
         // dá como encerrados, "resolvida" e "ocorrência histórica" (estado atual desconhecido), deixam de ser atuais (#88).
         // Qualquer outro, inclusive um que ainda não existe (como um estado de memória estável em patamar alto), conta como
         // atual: o processo dele pode ser citado e os MB dele entram na resposta. "persiste: <processo> segue com N MB…" antes
-        // não era reconhecido e tirava do resumo a ocorrência do processo que segura memória. O problema e a evidência podem
+        // não era reconhecido e tirava do resumo a ocorrência do processo que segura memória; "persiste: <serviço> segue
+        // parado…" (#57) também é lido inteiro, para que o problema da linha não comece no meio do estado. O problema e a evidência podem
         // trazer nome de volume que imita ". Evidência:", então o estado só avança sobre texto do próprio formato dele.
-        var lines = Regex.Matches(report, @"^Achado (?<category>[a-z]+) \([^)\n]*\), [^,\n]*, (?<status>persiste nas leituras atuais|ocorrência histórica; estado atual desconhecido \([^)\n]*\)|resolvida: [^:\n]*|[^:\n]*: [\p{L}\p{N}._-]+ PID \d+ segue com [^:\n]*|[^:\n]*): (?<problem>[^\n]+?)\. Evidência: (?<evidence>[^\n]+?)\. Causa:", RegexOptions.Multiline)
+        var lines = Regex.Matches(report, @"^Achado (?<category>[a-z]+) \([^)\n]*\), [^,\n]*, (?<status>persiste nas leituras atuais|persiste: [^:\n]*|ocorrência histórica; estado atual desconhecido \([^)\n]*\)|resolvida: [^:\n]*|[^:\n]*: [\p{L}\p{N}._-]+ PID \d+ segue com [^:\n]*|[^:\n]*): (?<problem>[^\n]+?)\. Evidência: (?<evidence>[^\n]+?)\. Causa:", RegexOptions.Multiline)
             .Select(match => (Status: match.Groups["status"].Value, Category: match.Groups["category"].Value, Problem: match.Groups["problem"].Value, Evidence: match.Groups["evidence"].Value,
                 Active: !Closed(match.Groups["status"].Value)))
             .ToArray();

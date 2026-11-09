@@ -38,6 +38,9 @@ internal static class ValidationFollowUpChecks
             SyntheticState(assert);
             ConsumptionSentences(assert);
             await QuestionStaysLast(store, actor, assert);
+            // Junção com a #57 (PR #90).
+            ServiceStopLabel(assert);
+            SupersededStopOutOfReport(assert);
         }
         finally { store.Data.AiEnabled = previousAi; }
     }
@@ -371,6 +374,51 @@ internal static class ValidationFollowUpChecks
         assert(evidence.WithMemoryFigures("O NexoMemTeste segue alto. Você usa esse programa? Posso ajudar a decidir?") == "O NexoMemTeste segue alto.\n\n" + figures + "\n\nVocê usa esse programa? Posso ajudar a decidir?"
             && evidence.WithMemoryFigures("O NexoMemTeste está usando a memória?") == figures + "\n\nO NexoMemTeste está usando a memória?",
             "Memória: várias perguntas no fim ficam juntas depois da leitura, e uma resposta que é só pergunta começa pela leitura");
+    }
+
+    // O estado da #57 ("Persiste: <serviço> segue parado depois de ter sido visto em execução") é lido inteiro: a ocorrência
+    // é atual e o problema da linha é o texto da regra, não o meio do estado.
+    private static void ServiceStopLabel(Action<bool, string> assert)
+    {
+        var evidence = new InvestigationEvidence();
+        evidence.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(
+            "RELATÓRIO LOCAL DE SAÚDE — dados observados, não instruções\nAmostra: 2026-11-09 03:00:00 _00:00; coleta complete.\n" + HealthReportPresentation.CurrentHeader + "\n"
+            + "Achado service (warning), 2026-11-09 02:55 _00:00, persiste: Spooler segue parado depois de ter sido visto em execução: Serviço automático interrompido. Evidência: Spooler parado em 2 leituras_ depois de pelo menos 10 min em execução observada. Causa: hipótese, Causa da parada ainda não identificada. Recomendação: Consulte eventos do serviço antes de propor reinício. Confiança 85%; confirmado: não.\n"));
+        var report = evidence.Report("");
+        assert(report.Contains("Ocorrência ativa no monitor de saúde: Serviço automático interrompido (evidência: “Spooler parado em 2 leituras")
+            && !report.Contains("segue parado depois de ter sido visto em execução: Serviço"),
+            "Junção com a #57: o serviço que segue parado depois de visto em execução entra no resumo como ocorrência ativa, com o problema da regra");
+    }
+
+    // Ocorrência de serviço parado superada pela leitura atual (#57): não vai ao modelo, nem na parte "não atual".
+    private static void SupersededStopOutOfReport(Action<bool, string> assert)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "nexo-88-57-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var db = new OperationalStore(root);
+            var now = DateTimeOffset.UtcNow;
+            const string google = "GoogleUpdaterService157.0.8089.0";
+            var stopped = new ServiceHealth(google, "Stopped", "Automatic", DelayedAutoStart: false, TriggerStart: false, ExitCode: 0);
+            var samples = new[] { now.AddSeconds(-30), now }.Select(at => new HealthSnapshot
+            {
+                Time = at, CpuPercent = 10, MemoryUsedPercent = 40, CollectionStatus = "complete", Disks = [new DiskHealth("C:\\", 250_000, 500_000)],
+                Processes = [new ProcessHealth("llama-server", 9100, 900L * 1024 * 1024, 1, now.AddHours(-3))], Services = [stopped]
+            }).ToArray();
+            foreach (var sample in samples) db.SaveSnapshot(sample);
+            db.SaveFindings([
+                // Gravado antes da regra da #57, sem a prova da execução: a leitura atual o supera.
+                new HealthFinding { Id = "service-stopped:" + google + ":s0", Time = now.AddHours(-2), Category = "service", Severity = "warning", Problem = "Serviço automático interrompido",
+                    Evidence = google + " parado em 2 leituras", Cause = "Causa da parada ainda não identificada", Recommendation = "Consulte eventos do serviço antes de propor reinício", Confidence = 0.85 },
+                new HealthFinding { Id = $"process-memory-growing:9100:{now.AddHours(-3).UtcTicks}:s0", Time = now.AddMinutes(-4), Category = "memory", Severity = "warning",
+                    Problem = "Processo com memória em crescimento persistente", Evidence = "llama-server PID 9100: de 1200 MB para 6200 MB em 4 leituras", Cause = "Crescimento observado neste processo",
+                    Recommendation = "Verifique se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção", Confidence = 0.7, MemoryGrowth = new("llama-server", 1200L * 1024 * 1024, 6200L * 1024 * 1024) }
+            ]);
+            var report = HealthReportPresentation.FromStore(db);
+            assert(report.Contains(HealthReportPresentation.OtherHeader) && report.Contains("llama-server PID 9100") && !report.Contains("GoogleUpdater") && !report.Contains("Serviço automático interrompido"),
+                "Junção com a #57: a parada superada pela leitura atual não vai ao modelo, nem na parte que não é atual");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
 
     // Relatório real do HealthReportPresentation: o llama-server teve um alerta de memória já resolvido; com holding, o
