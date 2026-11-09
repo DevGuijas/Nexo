@@ -34,8 +34,8 @@ public sealed class MonitoringEngine : IDisposable
             token.ThrowIfCancellationRequested();
             var snapshot = await sampler.Sample(token);
             store.SaveSnapshot(snapshot);
-            var window = TimeSpan.FromSeconds(Math.Max(600, interval.TotalSeconds * Math.Max(5, thresholds.ProcessMemorySamples + 1)));
-            var history = store.RecentSnapshots(snapshot.Time - window, 20).OrderBy(s => s.Time).ToArray();
+            var (window, limit) = HistoryWindow(interval, thresholds);
+            var history = store.RecentSnapshots(snapshot.Time - window, limit).OrderBy(s => s.Time).ToArray();
             var current = HealthRules.Evaluate(history, thresholds);
             var keys = current.Select(f => f.Id).ToHashSet();
             active.IntersectWith(keys);
@@ -52,6 +52,17 @@ public sealed class MonitoringEngine : IDisposable
             Updated?.Invoke(snapshot, fresh);
         }
         finally { gate.Release(); }
+    }
+
+    /// <summary>
+    /// Histórico consultado a cada leitura. Além das regras de memória, precisa alcançar uma leitura feita
+    /// ServiceStableRunning antes da 1ª leitura de um serviço parado, quando ele completa as leituras do alerta (#57).
+    /// </summary>
+    internal static (TimeSpan Window, int Limit) HistoryWindow(TimeSpan interval, HealthThresholds thresholds)
+    {
+        var seconds = Math.Max(Math.Max(600, interval.TotalSeconds * Math.Max(5, thresholds.ProcessMemorySamples + 1)),
+            thresholds.ServiceStableRunning.TotalSeconds + interval.TotalSeconds * (thresholds.OtherSamples + 2));
+        return (TimeSpan.FromSeconds(seconds), Math.Clamp((int)Math.Ceiling(seconds / interval.TotalSeconds) + 2, 20, 1000));
     }
 
     public void Start()

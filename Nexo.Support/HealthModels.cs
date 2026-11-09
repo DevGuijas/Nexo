@@ -29,14 +29,16 @@ public sealed class HealthSnapshot
 public sealed record DiskHealth(string Name, long FreeBytes, long TotalBytes, string Health = "unavailable");
 public sealed record ProcessHealth(string Name, int Id, long WorkingSetBytes, double? CpuPercent, DateTimeOffset? StartTime = null);
 /// <summary>
-/// Serviço automático observado. Os três campos opcionais só são lidos para serviços que não estão em execução
-/// (Win32_Service.DelayedAutoStart, Win32_Service.ExitCode e a chave TriggerInfo do serviço no registro).
-/// Nulo quer dizer "não lido"; leituras gravadas antes da #57 não têm esses campos e continuam nulas.
+/// Serviço automático observado. Os campos opcionais só são lidos para serviços que não estão em execução
+/// (Win32_Service.DelayedAutoStart, Win32_Service.ExitCode, Win32_Service.ServiceSpecificExitCode e a chave
+/// TriggerInfo do serviço no registro). Nulo quer dizer "não lido"; leituras gravadas antes da #57 não têm esses
+/// campos e continuam nulas.
 /// </summary>
 public sealed record ServiceHealth(string Name, string Status, string StartType,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? DelayedAutoStart = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? TriggerStart = null,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? ExitCode = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? ExitCode = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? ServiceSpecificExitCode = null);
 public sealed record AdapterHealth(string Id, string Name, string Status, bool Enabled);
 public sealed record NetworkProbeReading(string State = "disabled", string Target = "", string Detail = "", string ConfigurationId = "");
 
@@ -58,6 +60,11 @@ public sealed class HealthFinding
     public string ProbeConfigurationId { get; set; } = "";
     /// <summary>Só em process-memory-growing gravado a partir da #60; nos demais e nos registros anteriores fica nulo e não é gravado.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ProcessMemoryGrowth? MemoryGrowth { get; set; }
+    /// <summary>
+    /// Só em service-stopped de serviço que parou com saída normal, sem início atrasado e sem gatilho (#57): guarda
+    /// a execução estável observada antes da parada, que é a prova do alerta. Nos demais fica nulo e não é gravado.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ServiceStopEvidence? ServiceStop { get; set; }
 
     /// <summary>Cópia para exibição: o registro gravado não muda.</summary>
     public HealthFinding WithCause(string cause)
@@ -73,6 +80,9 @@ public sealed class HealthFinding
 /// O PID e o horário de início continuam no identificador da ocorrência.
 /// </summary>
 public sealed record ProcessMemoryGrowth(string Name, long FromBytes, long ToBytes);
+
+/// <summary>Serviço visto em execução em todas as leituras desde RunningSince até a parada observada em StoppedAt (#57).</summary>
+public sealed record ServiceStopEvidence(DateTimeOffset RunningSince, DateTimeOffset StoppedAt);
 
 public sealed class SystemEvent
 {

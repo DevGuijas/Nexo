@@ -60,6 +60,13 @@ public static class HealthOccurrences
             return readings >= -before - 0.5 && readings <= after + 0.5;
         }
 
+        bool StillStopped(string name)
+        {
+            var tail = ordered.TakeLast(thresholds.OtherSamples).ToArray();
+            return tail.Length == thresholds.OtherSamples && tail.Zip(tail.Skip(1)).All(pair => pair.Second.Time - pair.First.Time <= thresholds.MaxSampleGap)
+                && tail.All(s => s.Services.FirstOrDefault(x => x.Name == name) is { } service && HealthRules.UnexpectedlyStopped(service));
+        }
+
         OccurrenceStatus Status(HealthFinding finding, Pointed[] related)
         {
             if (finding.Source != "rules") return Unknown("sem regra para reavaliar");
@@ -69,6 +76,11 @@ public static class HealthOccurrences
             if (active.Any(currentFinding => currentFinding.Id == id && (id != "network-external-unconfirmed"
                 || SameProbe(finding, currentFinding.ProbeTarget, currentFinding.ProbeConfigurationId))))
                 return new(OccurrenceState.Persistent, "Persiste nas leituras atuais");
+            // A prova do alerta (execução estável antes da parada) fica no registro: depois que essas leituras saem do
+            // histórico consultado, a regra não volta a gerar o achado, mas o serviço continua parado (#57).
+            if (id.StartsWith("service-stopped:", StringComparison.Ordinal) && finding.ServiceStop != null
+                && StillStopped(id["service-stopped:".Length..]))
+                return new(OccurrenceState.Persistent, $"Persiste: {HealthRules.SafeName(id["service-stopped:".Length..])} segue parado depois de ter sido visto em execução");
             // Memória do sistema depende dos processos apontados; a do processo, dele mesmo.
             Pointed[] holders = related.Length > 0 ? related : PointedBy(finding, ordered) is { } self ? [self] : [];
             foreach (var holder in holders)
@@ -76,6 +88,10 @@ public static class HealthOccurrences
                     return new(OccurrenceState.Persistent, $"Persiste: {holder.Label} segue com {Megabytes(bytes)} MB, mais da metade da subida de {Megabytes(holder.Growth!.FromBytes)} para {Megabytes(holder.Growth.ToBytes)} MB registrada no alerta do processo");
             var criterion = CriterionFor(id, finding, thresholds, holders);
             if (criterion == null) return Unknown("sem critério para confirmar o fim");
+            // Registro anterior à #57, sem a prova da execução: parada normal sem essa prova não é falha.
+            if (id.StartsWith("service-stopped:", StringComparison.Ordinal) && finding.ServiceStop == null
+                && ordered[^1].Services.FirstOrDefault(x => x.Name == id["service-stopped:".Length..]) is { } stopped && HealthRules.CleanStop(stopped))
+                return Unknown("parado com saída normal, sem execução estável observada antes da parada");
             var recent = ordered.Where(s => s.Time > finding.Time).TakeLast(criterion.Samples).ToArray();
             var proven = recent.Length == criterion.Samples && recent.All(criterion.Clear)
                 && recent.Zip(recent.Skip(1)).All(pair => pair.Second.Time - pair.First.Time <= criterion.MaxGap);
@@ -171,6 +187,23 @@ public static class HealthOccurrences
 
 public static class HealthReportPresentation
 {
+    /// <summary>
+    /// Serviços automáticos parados com saída normal que não contam como falha (#57): ficam visíveis no painel, mas não
+    /// entram no relatório do modelo. Serviço com ocorrência persistente fica de fora, porque já aparece como alerta.
+    /// </summary>
+    public static string? CleanStopNotice(HealthSnapshot? latest, IEnumerable<(HealthFinding Finding, OccurrenceStatus Status)> occurrences)
+    {
+        if (latest == null) return null;
+        var alerted = occurrences.Where(o => o.Status.State == OccurrenceState.Persistent && o.Finding.Id.StartsWith("service-stopped:", StringComparison.Ordinal))
+            .Select(o => o.Finding.Id).ToArray();
+        var names = latest.Services.Where(HealthRules.CleanStop)
+            .Where(service => !alerted.Any(id => id == "service-stopped:" + service.Name || id.StartsWith("service-stopped:" + service.Name + ":", StringComparison.Ordinal)))
+            .Select(service => HealthRules.SafeName(service.Name)).Distinct(StringComparer.Ordinal).Order(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (names.Length == 0) return null;
+        var shown = string.Join(", ", names.Take(8)) + (names.Length > 8 ? $" e mais {names.Length - 8}" : "");
+        return $"Serviços automáticos parados com saída normal (sem falha): {shown}. Não foram vistos em execução estável antes de parar; isso não conta como alerta.";
+    }
+
     public static string FromStore(OperationalStore store, HealthThresholds? thresholds = null)
     {
         var since = DateTimeOffset.UtcNow.AddDays(-1);
