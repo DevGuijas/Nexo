@@ -211,6 +211,28 @@ public sealed class OperationalStore : IDisposable
         }
     }
     public List<HealthFinding> RecentFindings(int limit) => Read<HealthFinding>("findings", limit);
+
+    /// <summary>Ocorrências mais recentes cujo identificador começa com prefix (#71).</summary>
+    public List<HealthFinding> RecentFindingsWithPrefix(string prefix, int limit)
+    {
+        if (limit is < 1 or > 1000) throw new ArgumentOutOfRangeException(nameof(limit));
+        lock (gate)
+        {
+            try
+            {
+                using var connection = Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = "SELECT payload FROM findings WHERE substr(id, 1, length($prefix)) = $prefix ORDER BY time DESC LIMIT $limit";
+                command.Parameters.AddWithValue("$prefix", prefix);
+                command.Parameters.AddWithValue("$limit", limit);
+                using var reader = command.ExecuteReader();
+                var result = new List<HealthFinding>();
+                while (reader.Read()) result.Add(JsonSerializer.Deserialize<HealthFinding>(reader.GetString(0), Json)!);
+                return result;
+            }
+            catch (Exception ex) when (ex is SqliteException or JsonException) { throw new OperationalStoreException("Falha ao consultar o histórico operacional.", ex); }
+        }
+    }
     public List<HealthFinding> FindingsSince(DateTimeOffset since) => Read<HealthFinding>("findings", null, since);
     public List<SystemEvent> RecentEvents(int limit) => Read<SystemEvent>("events", limit);
     public List<EventGap> RecentEventGaps(int limit, DateTimeOffset? since = null) => Read<EventGap>("event_gaps", limit, since);

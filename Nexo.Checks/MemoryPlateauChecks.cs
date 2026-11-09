@@ -12,7 +12,7 @@ internal static class MemoryPlateauChecks
     private static readonly long Ram = 32L * 1024 * Mb;
     private static readonly TimeSpan Brasilia = TimeSpan.FromHours(-3);
     private static readonly DateTimeOffset Now = new(2026, 11, 9, 3, 0, 0, Brasilia);
-    private static readonly DateTimeOffset ProcessStart = Now.AddHours(-12);
+    private static readonly DateTimeOffset ProcessStart = Now.AddDays(-5);
     private static readonly HealthThresholds Limits = new() { ProcessMemoryGrowthPoints = 7, ProcessMemorySamples = 5 };
     private const int Pid = 20248;
     private const string Name = "Navegador";
@@ -26,7 +26,8 @@ internal static class MemoryPlateauChecks
         Rise(check);
         Breaks(check);
         TwoProcesses(check);
-        Report(check);
+        Recorder(check);
+        Recorded(check);
     }
 
     // Leituras a cada 30 s terminando em "end": a 0 tem o alerta do sistema e a 1 o do processo, que subiu de 2000 para 16000 MB
@@ -72,7 +73,7 @@ internal static class MemoryPlateauChecks
         var flat = States(Series(ThirtyOne, _ => 14000));
         check(flat.Process.State == OccurrenceState.Stable
             && flat.Process.Label == "Estável em patamar alto (informativo, não é falha ativa): Navegador PID 20248 segue com 14000 MB. "
-                + "Patamar de referência: cerca de 14000 MB, o primeiro medido depois do alerta em 30 min seguidos sem crescimento. Volta a persistir se chegar a 15400 MB",
+                + "Patamar de referência: cerca de 14000 MB, o primeiro medido depois do alerta, em 30 min seguidos com variação abaixo de 5% e sem tendência de alta. Volta a persistir se chegar a 15400 MB",
             "#71: processo parado em 14000 MB por 31 min fica estável, com o processo, os MB, a referência e o limite de volta");
         check(flat.System.State == OccurrenceState.Stable && flat.System.Label.Contains("Navegador PID 20248 segue com 14000 MB"),
             "#71: a ocorrência de memória do sistema ligada ao processo acompanha o patamar estável");
@@ -82,11 +83,11 @@ internal static class MemoryPlateauChecks
             "#71: o patamar estável é exibido como informativo, sem alterar a severidade gravada");
         var process = shown.Single(o => o.Finding.Id.StartsWith("process-memory-growing:")).Finding;
         var system = shown.Single(o => o.Finding.Id.StartsWith("memory-growing:")).Finding;
-        check(process.Problem == "Processo mantém a memória num patamar estável, sem crescer" && system.Problem == "Uso de memória ligado a processo em patamar estável"
+        check(process.Problem == "Processo mantém a memória num patamar estável, sem passar de 10% sobre o patamar de referência" && system.Problem == "Uso de memória ligado a processo em patamar estável"
             && !process.Recommendation.Contains("Verifique") && !system.Recommendation.Contains("Compare") && process.Recommendation.StartsWith("Nenhuma ação recomendada"),
             "#71: no patamar estável, o problema exibido acompanha o estado e não há recomendação de ação");
         check(shown.All(o => o.Finding.Problem.Contains("patamar")) && series.Length == ThirtyOne
-            && HealthOccurrences.Classify([ProcessAlert(series)], series, Limits, Now).Single().Finding.Problem == "Processo mantém a memória num patamar estável, sem crescer",
+            && HealthOccurrences.Classify([ProcessAlert(series)], series, Limits, Now).Single().Finding.Problem == "Processo mantém a memória num patamar estável, sem passar de 10% sobre o patamar de referência",
             "#71: o texto do patamar vale também para a ocorrência do processo sozinha");
         var stored = ProcessAlert(series);
         HealthOccurrences.Classify([stored], series, Limits, Now);
@@ -212,50 +213,163 @@ internal static class MemoryPlateauChecks
         }
     }
 
-    private static void Report(Action<bool, string> check)
+    // Grava as leituras no banco uma a uma, como o monitor, e grava o patamar a cada leitura.
+    private static void Monitor(OperationalStore db, IEnumerable<HealthSnapshot> series)
+    {
+        foreach (var sample in series) { db.SaveSnapshot(sample); HealthOccurrences.RecordPlateaus(db, sample, Limits); }
+    }
+
+    private static void WithStore(Action<OperationalStore> body)
     {
         var root = Path.Combine(Path.GetTempPath(), "nexo-memory-plateau-" + Guid.NewGuid().ToString("N"));
-        try
+        try { using var db = new OperationalStore(root); body(db); }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    private static HealthFinding Stored(OperationalStore db) => db.RecentFindingsWithPrefix("process-memory-growing:", 5).Single();
+
+    private static void Recorder(Action<bool, string> check)
+    {
+        // O monitor grava a referência quando o 1º patamar é comprovado: média de 14000 MB, na leitura que fecha os 30 min.
+        WithStore(db =>
         {
-            using var db = new OperationalStore(root);
-            // 2 h paradas: o relatório só pede 20 leituras completas; o patamar vem das leituras do processo no banco, desde o alerta.
+            var series = Series(ThirtyOne + 10, _ => 14000, DateTimeOffset.UtcNow.AddSeconds(-5));
+            db.SaveFindings([ProcessAlert(series)]);
+            Monitor(db, series[..61]);
+            check(Stored(db).MemoryPlateau == null, "#71: antes de 30 min depois do alerta, o monitor não grava patamar");
+            Monitor(db, series[61..]);
+            var plateau = Stored(db).MemoryPlateau;
+            check(plateau == new MemoryPlateauEvidence(Pid, ProcessStart.UtcTicks, 14000 * Mb, series[61].Time),
+                "#71: o monitor grava na ocorrência o PID, o início, a média de referência e o instante do 1º patamar");
+            check(Stored(db).Problem == "Processo com memória em crescimento persistente" && Stored(db).Severity == "warning",
+                "#71: gravar o patamar não muda o resto da ocorrência");
+            // Subida de 11% depois: a passagem fica gravada e não se apaga quando o processo volta ao patamar.
+            var later = Series(6, i => i < 2 ? 15540 : 14000, series[^1].Time.AddSeconds(180));
+            Monitor(db, later);
+            var exceeded = Stored(db).MemoryPlateau;
+            check(exceeded?.ExceededAt == later[0].Time && exceeded.ExceededBytes == 15540 * Mb && exceeded.ReferenceBytes == 14000 * Mb,
+                "#71: a 1ª leitura 10% acima da referência fica gravada na ocorrência");
+            check(HealthOccurrences.Classify([Stored(db)], db.RecentSnapshots(DateTimeOffset.UtcNow.AddHours(-1), 20), Limits, later[^1].Time).Single().Status.State == OccurrenceState.Persistent,
+                "#71: com a passagem gravada, a ocorrência persiste mesmo com as leituras recentes de volta ao patamar");
+        });
+        // Lacuna antes do 1º patamar: o monitor grava que o patamar não pode ser comprovado e não tenta de novo.
+        WithStore(db =>
+        {
+            var series = Series(ThirtyOne + 40, _ => 14000, DateTimeOffset.UtcNow.AddSeconds(-5)).Where((_, i) => i is < 30 or > 32).ToArray();
+            db.SaveFindings([ProcessAlert(series)]);
+            Monitor(db, series);
+            var plateau = Stored(db).MemoryPlateau;
+            check(plateau is { ReferenceBytes: null, Unavailable: "lacuna ou falha de leitura antes do 1º patamar" },
+                "#71: lacuna antes do 1º patamar fica gravada como patamar não comprovável");
+            check(HealthOccurrences.Classify([Stored(db)], db.RecentSnapshots(DateTimeOffset.UtcNow.AddHours(-1), 20), Limits, series[^1].Time).Single().Status.State == OccurrenceState.Persistent,
+                "#71: sem patamar comprovável, a ocorrência persiste");
+        });
+        // Sem as leituras do início do alerta no banco (o Nexo abriu depois dele), o patamar fica gravado como não comprovável.
+        WithStore(db =>
+        {
+            var series = Series(ThirtyOne + 40, _ => 14000, DateTimeOffset.UtcNow.AddSeconds(-5));
+            db.SaveFindings([ProcessAlert(series)]);
+            Monitor(db, series[20..]);
+            check(Stored(db).MemoryPlateau is { ReferenceBytes: null, Unavailable: "sem as leituras do início do alerta" },
+                "#71: sem as leituras do início do alerta no banco, o patamar fica gravado como não comprovável");
+        });
+        // Vazamento: a janela atual nunca é patamar, então a série desde o alerta não é lida e nada é gravado.
+        WithStore(db =>
+        {
+            var series = Series(180, Ramp(0.03), DateTimeOffset.UtcNow.AddSeconds(-5));
+            db.SaveFindings([ProcessAlert(series)]);
+            Monitor(db, series);
+            check(Stored(db).MemoryPlateau == null, "#71: vazamento de 3% em 30 min não grava patamar");
+        });
+        // Sonda do @qa: 1,9% em 30 min por 3,5 h: a referência é gravada na 1ª janela e a passagem de 10% depois.
+        WithStore(db =>
+        {
+            var series = Series(422, Ramp(0.019, 10000), DateTimeOffset.UtcNow.AddSeconds(-5));
+            db.SaveFindings([ProcessAlert(series)]);
+            Monitor(db, series);
+            var plateau = Stored(db).MemoryPlateau;
+            check(plateau?.ProvenAt == series[61].Time && plateau.ExceededAt != null && plateau.ExceededBytes >= plateau.ReferenceBytes * 1.1,
+                "#71: vazamento de 1,9% em 30 min grava a referência e depois a passagem de 10%");
+            var line = HealthReportPresentation.FromStore(db, Limits).ReplaceLineEndings("\n").Split('\n').SingleOrDefault(l => l.Contains("Processo com memória em crescimento persistente"));
+            check(line != null && line.StartsWith("Achado memory (warning)") && line.Contains("persiste: Navegador PID 20248"),
+                "#71: relatório do assistente mostra o vazamento de 1,9% em 30 min por 3,5 h persistindo");
+        });
+        // O monitor real chama a gravação a cada leitura.
+        WithStore(db =>
+        {
+            var series = Series(ThirtyOne, _ => 14000, DateTimeOffset.UtcNow.AddSeconds(-5));
+            db.SaveFindings([ProcessAlert(series)]);
+            foreach (var sample in series[..^1]) db.SaveSnapshot(sample);
+            using var engine = new MonitoringEngine(new QueueSampler(new Queue<HealthSnapshot>([series[^1]])), db, TimeSpan.FromSeconds(30), Limits);
+            engine.RunOnceAsync(CancellationToken.None).GetAwaiter().GetResult();
+            check(Stored(db).MemoryPlateau?.ReferenceBytes == 14000 * Mb && engine.LastError == null, "#71: o monitor grava o patamar na leitura que o comprova");
+        });
+    }
+
+    private static void Recorded(Action<bool, string> check)
+    {
+        // Alerta de 3 dias atrás com a referência gravada: a classificação só usa as 20 leituras recentes.
+        var recent = Series(20, _ => 14000);
+        HealthFinding Old(MemoryPlateauEvidence? plateau)
+        {
+            var alert = ProcessAlert(recent);
+            alert.Time = Now.AddDays(-3);
+            alert.MemoryPlateau = plateau;
+            return alert;
+        }
+        var proven = new MemoryPlateauEvidence(Pid, ProcessStart.UtcTicks, 14000 * Mb, Now.AddDays(-3).AddMinutes(31));
+        var stable = HealthOccurrences.Classify([Old(proven)], recent, Limits, Now).Single();
+        check(stable.Status.State == OccurrenceState.Stable && stable.Status.Label.Contains("cerca de 14000 MB") && stable.Finding.Problem.StartsWith("Processo mantém a memória"),
+            "#71: alerta de 3 dias com a referência gravada e o processo estável fica estável, só com as leituras recentes");
+        var near = Series(20, i => i < 19 ? 14000 : 15260);
+        check(HealthOccurrences.Classify([Old(proven)], near, Limits, Now).Single().Status.State == OccurrenceState.Stable, "#71: 3 dias depois, 9% sobre a referência gravada continua estável");
+        var up = Series(20, i => i < 19 ? 14000 : 15410);
+        var back = HealthOccurrences.Classify([Old(proven)], up, Limits, Now).Single().Status;
+        check(back.State == OccurrenceState.Persistent && back.Label.StartsWith("Persiste:"), "#71: 3 dias depois, 10% sobre a referência gravada volta a persistir");
+        var earlier = Series(20, i => i == 5 ? 15410 : 14000);
+        check(HealthOccurrences.Classify([Old(proven)], earlier, Limits, Now).Single().Status.State == OccurrenceState.Persistent,
+            "#71: uma leitura recente 10% acima, mesmo que já tenha voltado, mantém a ocorrência persistindo");
+        check(HealthOccurrences.Classify([Old(proven with { ExceededAt = Now.AddDays(-1), ExceededBytes = 15500 * Mb })], recent, Limits, Now).Single().Status.State == OccurrenceState.Persistent,
+            "#71: com a passagem de 10% gravada, a ocorrência de 3 dias persiste até um novo alerta");
+        check(HealthOccurrences.Classify([Old(null)], recent, Limits, Now).Single().Status.State == OccurrenceState.Persistent,
+            "#71: ocorrência antiga sem referência gravada e sem leituras desde o alerta persiste");
+        check(HealthOccurrences.Classify([Old(proven with { Pid = 4242 })], recent, Limits, Now).Single().Status.State == OccurrenceState.Persistent
+            && HealthOccurrences.Classify([Old(proven with { StartTicks = proven.StartTicks + 1 })], recent, Limits, Now).Single().Status.State == OccurrenceState.Persistent,
+            "#71: referência gravada para outro PID ou outro início não vale");
+        check(HealthOccurrences.Classify([Old(new(Pid, ProcessStart.UtcTicks, null, null, Unavailable: "lacuna ou falha de leitura antes do 1º patamar"))], recent, Limits, Now).Single().Status.State == OccurrenceState.Persistent,
+            "#71: patamar gravado como não comprovável persiste");
+        var released = Series(20, _ => 8000);
+        check(HealthOccurrences.Classify([Old(proven)], released, Limits, Now).Single().Status.State == OccurrenceState.Resolved,
+            "#71: com a referência gravada, o processo que libera a memória resolve, como antes");
+        // A ocorrência gravada lê o formato novo e o antigo.
+        var json = System.Text.Json.JsonSerializer.Serialize(Old(proven));
+        var read = System.Text.Json.JsonSerializer.Deserialize<HealthFinding>(json)!;
+        check(read.MemoryPlateau == proven && !System.Text.Json.JsonSerializer.Serialize(ProcessAlert(recent)).Contains("MemoryPlateau"),
+            "#71: a referência gravada vai e volta do banco, e ocorrência sem ela fica no formato antigo");
+
+        // Relatório do assistente com a referência gravada pelo monitor: informativo, sem recomendação de ação.
+        WithStore(db =>
+        {
             var series = Series(242, _ => 14000, DateTimeOffset.UtcNow.AddSeconds(-5));
-            foreach (var sample in series) db.SaveSnapshot(sample);
             db.SaveFindings([SystemAlert(series), ProcessAlert(series)]);
+            Monitor(db, series);
             var lines = HealthReportPresentation.FromStore(db, Limits).ReplaceLineEndings("\n").Split('\n');
             var process = lines.SingleOrDefault(line => line.Contains("Processo mantém a memória num patamar estável"));
             check(process != null && process.StartsWith("Achado memory (info)") && process.Contains("estável em patamar alto (informativo, não é falha ativa): Navegador PID 20248 segue com 14000 MB")
                 && process.Contains("Recomendação: Nenhuma ação recomendada") && !lines.Any(line => line.Contains("Verifique se o aplicativo")),
                 "#71: relatório do assistente mostra o patamar como informativo, com o processo e os MB e sem recomendação de ação");
             check(!lines.Any(line => line.Contains("persiste:") || line.Contains("crescimento persistente")), "#71: relatório do assistente não apresenta o patamar como problema atual");
-
             var readings = db.ProcessReadings(Pid, ProcessStart.UtcTicks, series[1].Time);
             check(readings.Count == 241 && readings.All(r => r.Bytes == 14000 * Mb) && readings[0].Time == series[1].Time,
                 "#71: o banco devolve o working set do processo em cada leitura desde o alerta");
-            // Busca limitada a 24 h antes de "now": um alerta mais antigo fica sem as leituras do início e persiste.
-            var last = series[^1].Time;
-            OccurrenceState From(DateTimeOffset now) => HealthOccurrences.Classify([ProcessAlert(series)], db.RecentSnapshots(last.AddHours(-1), 20), Limits, last,
-                HealthOccurrences.ReadingsFrom(db, now)).Single().Status.State;
-            check(From(last) == OccurrenceState.Stable && From(series[1].Time.AddHours(24).AddMinutes(10)) == OccurrenceState.Persistent,
-                "#71: as leituras do processo no banco vão até 24 h antes; alerta mais antigo que isso persiste");
             check(db.ProcessReadings(Pid, ProcessStart.AddMinutes(1).UtcTicks, series[1].Time).All(r => r.Bytes == null)
                 && db.ProcessReadings(4242, ProcessStart.UtcTicks, series[1].Time).All(r => r.Bytes == null),
                 "#71: outro início ou outro PID não contam como o processo apontado nas leituras do banco");
-        }
-        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+        });
+    }
 
-        var rootLeak = Path.Combine(Path.GetTempPath(), "nexo-memory-plateau-leak-" + Guid.NewGuid().ToString("N"));
-        try
-        {
-            using var db = new OperationalStore(rootLeak);
-            // 1,9% em 30 min por 3,5 h: as 20 leituras recentes parecem estáveis, mas a série desde o alerta passa de 10% sobre a referência.
-            var series = Series(422, Ramp(0.019, 10000), DateTimeOffset.UtcNow.AddSeconds(-5));
-            foreach (var sample in series) db.SaveSnapshot(sample);
-            db.SaveFindings([ProcessAlert(series)]);
-            var line = HealthReportPresentation.FromStore(db, Limits).ReplaceLineEndings("\n").Split('\n').SingleOrDefault(l => l.Contains("Processo com memória em crescimento persistente"));
-            check(line != null && line.StartsWith("Achado memory (warning)") && line.Contains("persiste: Navegador PID 20248"),
-                "#71: relatório usa a série desde o alerta: vazamento de 1,9% em 30 min por 3,5 h continua persistindo");
-        }
-        finally { if (Directory.Exists(rootLeak)) Directory.Delete(rootLeak, true); }
+    private sealed class QueueSampler(Queue<HealthSnapshot> samples) : IHealthSampler
+    {
+        public Task<HealthSnapshot> Sample(CancellationToken token) => Task.FromResult(samples.Dequeue());
     }
 }

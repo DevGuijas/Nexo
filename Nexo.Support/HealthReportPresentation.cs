@@ -32,20 +32,58 @@ public static class HealthOccurrences
     internal const double PlateauSlope = 0.02;
     // Crescimento acumulado sobre o 1º patamar depois do alerta que volta a ocorrência a "Persiste" até um novo alerta.
     internal const double PlateauRise = 0.10;
-    // Até onde o painel e o relatório buscam as leituras do processo desde o alerta. Alerta mais antigo fica "Persiste".
-    internal static readonly TimeSpan PlateauLookback = TimeSpan.FromHours(24);
 
     /// <summary>Working set do processo apontado (mesmo PID e início) numa leitura; nulo quando a leitura não o mostra.</summary>
     public sealed record ProcessReading(DateTimeOffset Time, long? Bytes);
-    /// <summary>Leituras do processo desde o horário pedido, em ordem cronológica.</summary>
-    public delegate IReadOnlyList<ProcessReading> ProcessReadings(int pid, long startTicks, DateTimeOffset since);
 
-    /// <summary>Leituras do processo vindas do banco, limitadas a PlateauLookback antes de now.</summary>
-    public static ProcessReadings ReadingsFrom(OperationalStore store, DateTimeOffset now)
-        => (pid, ticks, since) => store.ProcessReadings(pid, ticks, since < now - PlateauLookback ? now - PlateauLookback : since);
+    /// <summary>Resultado da busca do 1º patamar numa série desde o alerta.</summary>
+    internal sealed record PlateauScan(double? Reference, DateTimeOffset? ProvenAt, DateTimeOffset? ExceededAt, long? ExceededBytes, string? Unavailable);
 
-    public static IReadOnlyList<(HealthFinding Finding, OccurrenceStatus Status)> Classify(IReadOnlyList<HealthFinding> findings, IReadOnlyList<HealthSnapshot> history, HealthThresholds thresholds, DateTimeOffset now,
-        ProcessReadings? readings = null)
+    /// <summary>
+    /// Grava na ocorrência do processo a referência do 1º patamar, quando ele é comprovado, e o momento em que o acumulado passa
+    /// de PlateauRise sobre ela (#71). Roda no monitor, a cada leitura, fora da interface. A série desde o alerta só é lida quando a
+    /// janela que termina na leitura atual já é um patamar e a referência ainda não foi gravada; depois disso basta a leitura atual.
+    /// </summary>
+    public static void RecordPlateaus(OperationalStore store, HealthSnapshot latest, HealthThresholds thresholds)
+    {
+        if (latest.Processes.Count == 0) return;
+        var updated = new List<HealthFinding>();
+        foreach (var finding in store.RecentFindingsWithPrefix("process-memory-growing:", 50).GroupBy(BaseId).Select(group => group.MaxBy(f => f.Time)!))
+        {
+            if (PointedBy(finding, []) is not { } process || process.Limit == null) continue;
+            if (latest.Processes.FirstOrDefault(p => Same(p, process.Pid, process.StartTicks)) is not { } current) continue;
+            if (finding.MemoryPlateau is { } recorded)
+            {
+                if (recorded.ReferenceBytes is { } reference && recorded.ExceededAt == null && current.WorkingSetBytes >= reference * (1 + PlateauRise))
+                    updated.Add(finding.WithMemoryPlateau(recorded with { ExceededAt = latest.Time, ExceededBytes = current.WorkingSetBytes }));
+                continue;
+            }
+            if (latest.Time - finding.Time < PlateauWindow) continue;
+            var recent = store.ProcessReadings(process.Pid, process.StartTicks, latest.Time - PlateauWindow - thresholds.MaxSampleGap);
+            if (!EndsInPlateau(recent, latest.Time, thresholds)) continue;
+            var scan = Scan(finding.Time, store.ProcessReadings(process.Pid, process.StartTicks, finding.Time), thresholds);
+            // Sem referência e sem motivo definitivo, a busca recomeça na próxima leitura.
+            if (scan.Reference == null && scan.Unavailable == null) continue;
+            updated.Add(finding.WithMemoryPlateau(new MemoryPlateauEvidence(process.Pid, process.StartTicks, scan.Reference is { } level ? (long)level : null,
+                scan.ProvenAt, scan.ExceededAt, scan.ExceededBytes, scan.Unavailable)));
+        }
+        if (updated.Count > 0) store.SaveFindings(updated);
+    }
+
+    // A janela que termina na leitura atual já é um patamar: só então vale ler a série desde o alerta.
+    private static bool EndsInPlateau(IReadOnlyList<ProcessReading> readings, DateTimeOffset now, HealthThresholds thresholds)
+    {
+        var window = new List<(DateTimeOffset Time, double Bytes)>();
+        for (var i = readings.Count - 1; i >= 0; i--)
+        {
+            if (readings[i].Bytes is not { } bytes || window.Count > 0 && window[^1].Time - readings[i].Time > thresholds.MaxSampleGap) return false;
+            window.Add((readings[i].Time, bytes));
+            if (readings[i].Time <= now - PlateauWindow) { window.Reverse(); return StableWindow(window) != null; }
+        }
+        return false;
+    }
+
+    public static IReadOnlyList<(HealthFinding Finding, OccurrenceStatus Status)> Classify(IReadOnlyList<HealthFinding> findings, IReadOnlyList<HealthSnapshot> history, HealthThresholds thresholds, DateTimeOffset now)
     {
         var ordered = history.OrderBy(s => s.Time).ToArray();
         var active = HealthRules.Evaluate(ordered, thresholds);
@@ -64,10 +102,22 @@ public static class HealthOccurrences
             return (shown, status);
         }).ToArray();
 
-        // Sem fonte, as leituras vêm do histórico recebido (os testes e quem já tem a série inteira).
-        IReadOnlyList<ProcessReading> ReadingsOf(Pointed process) => readings?.Invoke(process.Pid, process.StartTicks, process.Finding.Time)
-            ?? [.. ordered.Where(s => s.Time >= process.Finding.Time).Select(s => new ProcessReading(s.Time,
-                s.Processes.FirstOrDefault(p => Same(p, process.Pid, process.StartTicks))?.WorkingSetBytes))];
+        // Referência do patamar: a gravada pelo monitor, conferida nas leituras recebidas desde que foi comprovada;
+        // sem ela, a busca na série recebida, que precisa alcançar o alerta (os testes e quem já tem a série inteira).
+        long? ReferenceOf(Pointed process)
+        {
+            if (process.Finding.MemoryPlateau is { } recorded)
+            {
+                if (recorded.Pid != process.Pid || recorded.StartTicks != process.StartTicks || recorded.ReferenceBytes is not { } reference
+                    || recorded.ExceededAt != null || recorded.ProvenAt is not { } proven) return null;
+                var exceeded = ordered.Where(s => s.Time >= proven).Select(s => s.Processes.FirstOrDefault(p => Same(p, process.Pid, process.StartTicks)))
+                    .Any(p => p != null && p.WorkingSetBytes >= reference * (1 + PlateauRise));
+                return exceeded ? null : reference;
+            }
+            var scan = Scan(process.Finding.Time, [.. ordered.Where(s => s.Time >= process.Finding.Time).Select(s => new ProcessReading(s.Time,
+                s.Processes.FirstOrDefault(p => Same(p, process.Pid, process.StartTicks))?.WorkingSetBytes))], thresholds);
+            return scan.Reference is { } level && scan.ExceededAt == null ? (long)level : null;
+        }
 
         Pointed[] Related(HealthFinding system) => system.Source != "rules" || BaseId(system) != "memory-growing" ? [] : pointed
             .Where(p => Overlaps(system.Time, p.Finding.Time))
@@ -119,10 +169,10 @@ public static class HealthOccurrences
                 if (HoldAt(holder, ordered[^1]) is (Hold.Holding, var bytes))
                 {
                     // Qualquer processo que segura a memória sem patamar estável mantém a ocorrência persistindo.
-                    if (PlateauAt(holder, ReadingsOf(holder), thresholds) is not { } reference)
+                    if (ReferenceOf(holder) is not { } reference)
                         return new(OccurrenceState.Persistent, $"Persiste: {holder.Label} segue com {Megabytes(bytes)} MB, mais da metade da subida de {Megabytes(holder.Growth!.FromBytes)} para {Megabytes(holder.Growth.ToBytes)} MB registrada no alerta do processo");
                     stable ??= new(OccurrenceState.Stable, $"Estável em patamar alto (informativo, não é falha ativa): {holder.Label} segue com {Megabytes(bytes)} MB. "
-                        + $"Patamar de referência: cerca de {Megabytes(reference)} MB, o primeiro medido depois do alerta em {PlateauWindow.TotalMinutes:F0} min seguidos sem crescimento. "
+                        + $"Patamar de referência: cerca de {Megabytes(reference)} MB, o primeiro medido depois do alerta, em {PlateauWindow.TotalMinutes:F0} min seguidos com variação abaixo de {PlateauAmplitude * 100:F0}% e sem tendência de alta. "
                         + $"Volta a persistir se chegar a {Megabytes((long)(reference * (1 + PlateauRise)))} MB");
                 }
             if (stable != null) return stable;
@@ -190,32 +240,32 @@ public static class HealthOccurrences
     }
 
     /// <summary>
-    /// Patamar de referência do processo apontado (média em bytes), ou nulo quando a ocorrência continua "Persiste" (#71).
-    /// A referência é o 1º patamar depois do alerta: a 1ª janela de PlateauWindow de leituras seguidas (mesmo PID e início,
-    /// sem lacuna nem falha) com amplitude abaixo de PlateauAmplitude e inclinação abaixo de PlateauSlope. Ela é fixa: qualquer
-    /// leitura posterior PlateauRise acima dela devolve nulo, e só um novo alerta do processo recomeça a contagem.
-    /// Sem leitura no início do alerta, ou com lacuna antes do 1º patamar, não se sabe qual foi ele: nulo, o lado conservador.
+    /// Busca o 1º patamar depois do alerta (#71): a 1ª janela de PlateauWindow de leituras seguidas (mesmo PID e início, sem lacuna
+    /// nem falha) com amplitude abaixo de PlateauAmplitude e inclinação abaixo de PlateauSlope. A média dela é a referência, fixa:
+    /// a 1ª leitura posterior PlateauRise acima dela fica registrada. Sem leitura no início do alerta, ou com lacuna antes do 1º
+    /// patamar, não se sabe qual foi ele: Unavailable, o lado conservador.
     /// </summary>
-    private static long? PlateauAt(Pointed process, IReadOnlyList<ProcessReading> readings, HealthThresholds thresholds)
+    internal static PlateauScan Scan(DateTimeOffset alert, IReadOnlyList<ProcessReading> readings, HealthThresholds thresholds)
     {
-        if (readings.Count == 0 || readings[0].Time - process.Finding.Time > thresholds.MaxSampleGap) return null;
+        if (readings.Count == 0 || readings[0].Time - alert > thresholds.MaxSampleGap) return new(null, null, null, null, "sem as leituras do início do alerta");
         double? reference = null;
+        DateTimeOffset? proven = null;
         var segment = new List<(DateTimeOffset Time, double Bytes)>();
         foreach (var reading in readings)
         {
             var broken = reading.Bytes == null || segment.Count > 0 && reading.Time - segment[^1].Time > thresholds.MaxSampleGap;
-            if (broken && reference == null) return null;
+            if (broken && reference == null) return new(null, null, null, null, "lacuna ou falha de leitura antes do 1º patamar");
             if (reading.Bytes is not { } bytes) continue;
             if (reference is { } fixedLevel)
             {
-                if (bytes >= fixedLevel * (1 + PlateauRise)) return null;
+                if (bytes >= fixedLevel * (1 + PlateauRise)) return new(reference, proven, reading.Time, bytes, null);
                 continue;
             }
             segment.Add((reading.Time, bytes));
             var start = segment.FindLastIndex(r => r.Time <= reading.Time - PlateauWindow);
-            if (start >= 0 && StableWindow(segment.GetRange(start, segment.Count - start)) is { } level) reference = level;
+            if (start >= 0 && StableWindow(segment.GetRange(start, segment.Count - start)) is { } level) (reference, proven) = (level, reading.Time);
         }
-        return reference is { } found ? (long)found : null;
+        return new(reference, proven, null, null, null);
     }
 
     // Média da janela quando ela é um patamar: amplitude e inclinação (regressão linear, projetada para PlateauWindow) abaixo dos limites.
@@ -325,7 +375,7 @@ public static class HealthReportPresentation
             text.AppendLine($"Volume {Safe(disk.Name)}: {(disk.TotalBytes > 0 ? 100.0 * disk.FreeBytes / disk.TotalBytes : 0):F1}% livre.");
         if (report.Findings.Count == 0) text.AppendLine("Nenhum achado sustentado foi registrado nos dados disponíveis.");
         var now = DateTimeOffset.UtcNow;
-        var occurrences = HealthOccurrences.Classify(report.Findings, store.RecentSnapshots(since, 20), thresholds ?? new(), now, HealthOccurrences.ReadingsFrom(store, now));
+        var occurrences = HealthOccurrences.Classify(report.Findings, store.RecentSnapshots(since, 20), thresholds ?? new(), now);
         if (occurrences.Count > 10) text.AppendLine($"Mostrando 10 de {occurrences.Count} ocorrências, as críticas primeiro; as demais foram omitidas deste relatório.");
         foreach (var (finding, status) in occurrences.OrderByDescending(o => o.Finding.Severity == "critical").ThenByDescending(o => o.Finding.Time).Take(10))
         {

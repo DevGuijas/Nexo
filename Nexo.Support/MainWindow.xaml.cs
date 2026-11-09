@@ -306,7 +306,7 @@ public partial class MainWindow : Window
             PageContent.Children.Add(SectionHeading("health", "Ocorrências preventivas"));
             PageContent.Children.Add(Card(Text(HealthOccurrences.CollectionNotice(latest, occurrenceLimits, occurrenceNow), 12, "Secondary")));
             if (alerts.Count == 0) PageContent.Children.Add(Card(Text("Nenhuma ocorrência registrada.", 13, "Secondary")));
-            var occurrences = HealthOccurrences.Classify(alerts, occurrenceHistory, occurrenceLimits, occurrenceNow, HealthOccurrences.ReadingsFrom(healthStore, occurrenceNow));
+            var occurrences = HealthOccurrences.Classify(alerts, occurrenceHistory, occurrenceLimits, occurrenceNow);
             // Parada normal sem execução estável observada antes: visível, mas não conta como alerta (#57).
             if (HealthReportPresentation.CleanStopNotice(latest, occurrences) is { } cleanStops)
                 PageContent.Children.Add(Card(Text(cleanStops, 12, "Secondary")));

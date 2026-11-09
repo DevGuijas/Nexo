@@ -45,6 +45,8 @@ public sealed class MonitoringEngine : IDisposable
             store.SaveFindings(fresh);
             // Só depois de gravar: uma falha não pode consumir o alerta.
             active.UnionWith(freshKeys);
+            // Referência do 1º patamar de memória de cada processo apontado, gravada na ocorrência (#71).
+            HealthOccurrences.RecordPlateaus(store, snapshot, thresholds);
             // A memória de um processo oscila: uma janela abaixo do limiar não encerra a ocorrência.
             foreach (var expired in processAlerts.Where(alert => snapshot.Time - alert.Value >= thresholds.ProcessMemoryAlertCooldown).Select(alert => alert.Key).ToArray()) processAlerts.Remove(expired);
             foreach (var key in keys.Where(key => key.StartsWith("process-memory-", StringComparison.Ordinal))) processAlerts[key] = snapshot.Time;
