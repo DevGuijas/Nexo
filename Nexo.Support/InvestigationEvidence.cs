@@ -429,7 +429,7 @@ public sealed class InvestigationEvidence
         "disk" when problem.StartsWith("Pouco espaço no volume ", StringComparison.Ordinal) => ("disk-low", "Revise o uso do disco antes de remover arquivos"),
         "cpu" when problem == "Uso persistente de CPU" => ("cpu-high", "Identifique os processos ativos antes de fechar qualquer um"),
         "memory" when problem == "Memória em crescimento persistente" => ("memory-growing", "Compare o uso por processo antes de intervir"),
-        "memory" when problem == "Processo com memória em crescimento persistente" => ("process-memory-growing", "Confirme se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção"),
+        "memory" when problem == "Processo com memória em crescimento persistente" => ("process-memory-growing", "Verifique se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção"),
         _ => ("", "")
     };
 

@@ -434,12 +434,12 @@ internal static class FinalAnswerChecks
         // Caso G do @qa: a memória tem quatro regras. A do processo tem a recomendação dela, e as de identidade incerta, nenhuma.
         var process = Answer(header + Line("memory", "Processo com memória em crescimento persistente"));
         var unverified = Answer(header + Line("memory", "Crescimento de memória sem identidade confirmada") + Line("memory", "Processo que crescia deixou de ser observado"));
-        assert(process.Contains("Recomendação do monitor: Confirme se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção.") && !process.Contains("Compare o uso por processo"),
+        assert(process.Contains("Recomendação do monitor: Verifique se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção.") && !process.Contains("Compare o uso por processo"),
             "Recomendação: a regra de memória por processo não recebe a recomendação de outra regra");
         assert(unverified.Contains("Ocorrência ativa") && !unverified.Contains("Recomendação do monitor"), "Recomendação: regras de memória sem identidade confirmada não recomendam nada ao usuário");
         var forged = Answer(header + Line("disk", "Pouco espaço") + Line("cpu", "Uso persistente de CPU alta") + Line("disk", "Volume X: Pouco espaço no volume T:_"));
         var processOnly = Answer(header + Line("disk", "Pouco espaço no volume T:_") + Line("cpu", "CPU qualquer") + Line("memory", "Processo com memória em crescimento persistente"), "slowness");
-        assert(processOnly.Contains("Recomendação do monitor: Confirme se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção; Revise o uso do disco"),
+        assert(processOnly.Contains("Recomendação do monitor: Verifique se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção; Revise o uso do disco"),
             "Recomendação: em pedido de lentidão, a regra de memória por processo também vem antes da do disco");
         assert(!forged.Contains("Recomendação do monitor"), "Recomendação: problema que não é o texto da regra não recebe recomendação");
     }
@@ -1263,7 +1263,8 @@ internal static class FinalAnswerChecks
     {
         var tools = new FlowTools((name, args) => name switch
         {
-            "get_processes" => args.EnumerateObject().Any() ? throw new InvalidOperationException("Argumento inesperado ou repetido: limit") : WindowsTools.Ok(Processes(16664)),
+            // A recusa é a do executor real (#83): get_processes não recebe argumentos.
+            "get_processes" => Validated(name, args, () => WindowsTools.Ok(Processes(16664))),
             "get_health_report" => WindowsTools.Ok("Nenhuma amostra de saúde foi coletada nas últimas 24 horas."),
             "diagnose_device" => WindowsTools.Ok("Memória livre: 5 GB de 31.9 GB"),
             _ => throw new Exception("Ferramenta inesperada: " + name)
@@ -1274,6 +1275,8 @@ internal static class FinalAnswerChecks
             && answer.Contains("tentou repetir a consulta de processos, que já tinha falhado ou sido recusada"),
             "Repetição de chamada que falhou explica a parada e mantém a evidência da consulta que funcionou");
     }
+
+    private static string Validated(string name, JsonElement args, Func<string> result) { WindowsTools.ValidateArguments(name, args); return result(); }
 
     private static string Processes(int megabytes) => JsonSerializer.Serialize(new object[]
     {

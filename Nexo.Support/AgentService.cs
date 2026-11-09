@@ -15,6 +15,8 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
 {
     private DateTime UtcNow() => (utcNow ?? (() => DateTime.UtcNow))();
     private static readonly HttpClient shared = new() { Timeout = TimeSpan.FromMinutes(3) };
+    internal const string NextStep = "Se o problema continuar, me diga o que ainda falha e desde quando, para direcionarmos a próxima verificação.";
+    private const string ObservationPending = "O acompanhamento solicitado ainda não ocorreu. Consulte o alvo e chame wait_for_reconnect; se faltar informação para distinguir os alvos, use ask_user com missing_information ou ambiguous_target. Não afirme funcionamento baseado apenas no estado PnP.";
     private TurnFacts facts = new();
     // Linha de fatos do turno em andamento ou do último (#73). Quem exibe uma interrupção (cancelamento, erro) a acrescenta.
     public string TurnFactsLine => facts.Line();
@@ -316,14 +318,17 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             if (calls == null || calls.Value.GetArrayLength() == 0)
             {
                 // Tool calls are for observing/acting, not a mandatory format for conversation.
-                if ((!observationOnly || reconnectAttempted) && AgentProtocol.Validate(content.Contains('?') ? "ask_user" : "finish_support", JsonSerializer.SerializeToElement(new { reason = "manual_test" }), content, readOnly) == null
-                    && evidence.ValidateStatement(content, userConfirmedFunction) == null)
-                    return Finish(ModelAnswer(content));
+                var rejection = observationOnly && !reconnectAttempted ? ObservationPending
+                    : AgentProtocol.Validate(content.Contains('?') ? "ask_user" : "finish_support", JsonSerializer.SerializeToElement(new { reason = "manual_test" }), content, readOnly)
+                      ?? evidence.ValidateStatement(content, userConfirmedFunction);
+                if (rejection == null) return Finish(ModelAnswer(content));
                 // A narrated intention is not a completed operation. This is controller feedback,
                 // never a fabricated user message or consent to change Windows settings.
                 if (!string.IsNullOrWhiteSpace(content)) history.Add(new AgentMessage { role = "assistant", content = content });
-                if (++protocolRetries > 3) return Finish(evidence.Report("A IA não conseguiu selecionar a próxima etapa. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento."));
-                control = "Controle de execução: sua resposta não chamou uma ferramenta. Se anunciou um teste ou consulta, execute-o agora. Para concluir chame finish_support com message; se não conseguir emitir tool_calls para esse controle, escreva exatamente finish_support seguido de um objeto JSON com message. Para informação indispensável ou teste manual use ask_user com message e reason. Não peça Ok nem autorização no chat. Nenhuma mudança foi autorizada por esta instrução; o executor mantém a confirmação do usuário.";
+                Rejected("texto sem ferramenta", rejection);
+                if (++protocolRetries > 3) return Finish(GaveUp("A IA não conseguiu selecionar a próxima etapa. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento."));
+                // O motivo da recusa vai junto (#83): sem ele, o modelo reescrevia a mesma frase até esgotar as tentativas.
+                control = "Controle de execução: sua resposta não chamou uma ferramenta e não foi aceita como conclusão. Motivo: " + rejection + " Se anunciou um teste ou consulta, execute-o agora. Para concluir chame finish_support com message; se não conseguir emitir tool_calls para esse controle, escreva exatamente finish_support seguido de um objeto JSON com message. Para informação indispensável ou teste manual use ask_user com message e reason. Não peça Ok nem autorização no chat. Nenhuma mudança foi autorizada por esta instrução; o executor mantém a confirmação do usuário.";
                 progress.Report("Continuando o diagnóstico e selecionando a próxima etapa…");
                 continue;
             }
@@ -353,6 +358,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                         facts.Record(InvestigationEvidence.ChangeKey(unavailableName, refusedArguments), evidence.ChangeDescription(unavailableName, refusedArguments), ChangeState.Refused);
                     }
                 }
+                Rejected("ferramenta indisponível", error);
                 if (++protocolRetries > 3) return Finish(evidence.Report("A IA insistiu em uma ferramenta indisponível. Interrompi as ações; encaminhe os resultados a uma pessoa de suporte."));
                 control = "Controle de execução: " + error;
                 continue;
@@ -391,12 +397,13 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     var text = arguments.TryGetProperty("message", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
                     var error = calls.Value.GetArrayLength() != 1 ? "Conclua somente após receber os resultados das ferramentas; envie uma chamada de controle por vez." : AgentProtocol.Validate(name, arguments, text, readOnly);
                     if (error == null && observationOnly && !reconnectAttempted && (name == "finish_support" || !arguments.TryGetProperty("reason", out var questionReason) || questionReason.GetString() == "manual_test"))
-                        error = "O acompanhamento solicitado ainda não ocorreu. Consulte o alvo e chame wait_for_reconnect; se faltar informação para distinguir os alvos, use ask_user com missing_information ou ambiguous_target. Não afirme funcionamento baseado apenas no estado PnP.";
+                        error = ObservationPending;
                     if (error == null) error = evidence.ValidateStatement(text, userConfirmedFunction);
                     result = JsonSerializer.Serialize(new { success = error == null, error });
                     history.Add(new AgentMessage { role = "tool", tool_name = name, content = result });
                     if (error == null) return Finish(ModelAnswer(text));
-                    if (++protocolRetries > 3) return Finish(evidence.Report("A IA não conseguiu selecionar a próxima etapa. Interrompi a tentativa; os resultados acima podem orientar a continuação do atendimento."));
+                    Rejected(name, error);
+                    if (++protocolRetries > 3) return Finish(GaveUp("A IA não conseguiu selecionar a próxima etapa. Interrompi a tentativa; os resultados acima podem orientar a continuação do atendimento."));
                     control = "Controle de execução: " + error;
                     continue;
                 }
@@ -561,7 +568,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             {
                 // O motivo da parada vem das travas registradas; o próximo passo depende do que já foi observado.
                 var stopped = evidence.Report(lockStop ? "" : evidence.HasFindings
-                    ? "Se o problema continuar, me diga o que ainda falha e desde quando, para direcionarmos a próxima verificação."
+                    ? NextStep
                     : "Me diga qual aplicativo ou atividade ainda apresenta o problema, para direcionarmos a próxima verificação.");
                 return Finish(stopped);
             }
@@ -581,6 +588,12 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         // Havendo alguma, a resposta é montada pelo Nexo: o que as consultas mostraram, as alterações concluídas e, pela trava,
         // o que não foi feito e por quê. Reconhecer as frases do modelo não basta (#73): "a fila da X foi limpa" escapava.
         string ModelAnswer(string text) => refusedMutations.Count == 0 ? text : evidence.Report("");
+        // Cada recusa do controle fica na auditoria com o motivo (#83): na validação no PC, o "[error]" não dizia qual regra recusou.
+        // O motivo é sempre um texto fixo dos validadores; o texto do modelo não entra no registro.
+        void Rejected(string what, string reason) => store.Log(actor, "Controle de execução recusou " + what + ": " + reason);
+        // Depois de quatro recusas seguidas, o Nexo encerra com o que as consultas mostraram e um próximo passo fixo (#83).
+        // Sem nenhuma evidência, fica a mensagem de antes: não há resultado para mostrar.
+        string GaveUp(string withoutEvidence) => evidence.Report(evidence.HasFindings ? NextStep : withoutEvidence);
         // Toda resposta final do turno passa por aqui e termina com a linha de fatos (#73, opção A).
         string Finish(string text)
         {
