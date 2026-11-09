@@ -217,9 +217,9 @@ public static class HealthOccurrences
         return IsRecent(latest, thresholds, now) ? time : time + ". Sem leitura recente: o estado atual das ocorrências é desconhecido.";
     }
 
-    /// <summary>Severidade exibida: o patamar estável é informativo, qualquer que seja a do registro (#71).</summary>
     /// <summary>Começo exato do rótulo do patamar estável (#71). O resumo ao modelo (#88) reconhece o estado informativo só por ele.</summary>
     public const string StablePlateauLabel = "Estável em patamar alto (informativo, não é falha ativa)";
+    /// <summary>Severidade exibida: o patamar estável é informativo, qualquer que seja a do registro (#71).</summary>
     public static string ShownSeverity(HealthFinding finding, OccurrenceStatus status) => status.State == OccurrenceState.Stable ? "info" : finding.Severity;
 
     private static OccurrenceStatus Unknown(string reason) => new(OccurrenceState.Unknown, $"Ocorrência histórica; estado atual desconhecido ({reason})");
