@@ -32,6 +32,7 @@ internal static class ValidationAdjustmentChecks
             await SpoolerExecutor(store, actor, assert);
             await SpoolerFlow(store, actor, assert);
             await DeviceApproval(store, actor, assert);
+            await SpoolerBefore(store, actor, assert);
             await UnknownToolLine(store, actor, assert);
         }
         finally { store.Data.AiEnabled = previousAi; }
@@ -186,9 +187,9 @@ internal static class ValidationAdjustmentChecks
     // Cenário 6 (08/11): Fifine desabilitado, com wdma_usb.inf 10.0.19041.3636 da Microsoft no diagnóstico.
     private static async Task DeviceApproval(Store store, Account actor, Action<bool, string> assert)
     {
-        static string Diagnosis(int code, bool withDriver, string inf = "wdma_usb.inf") => JsonSerializer.Serialize(new
+        static string Diagnosis(int code, bool withDriver, string inf = "wdma_usb.inf", string name = FifineName) => JsonSerializer.Serialize(new
         {
-            Devices = new[] { new { Name = FifineName, Id = FifineId, Code = code, Status = code == 22 ? "Error" : "OK", Present = true, HardwareIds = new[] { "USB\\VID_3142&PID_A010&MI_00" }, CompatibleIds = Array.Empty<string>() } },
+            Devices = new[] { new { Name = name, Id = FifineId, Code = code, Status = code == 22 ? "Error" : "OK", Present = true, HardwareIds = new[] { "USB\\VID_3142&PID_A010&MI_00" }, CompatibleIds = Array.Empty<string>() } },
             Drivers = withDriver ? new[] { new { DeviceId = FifineId, InfName = inf, Version = "10.0.19041.3636", Provider = "Microsoft" } } : [],
             DriverQuery = withDriver ? "ok" : "skipped"
         });
@@ -213,6 +214,62 @@ internal static class ValidationAdjustmentChecks
         var part = WindowsTools.DeviceChangeDetails("restart_device", new Device("Webcam", "USB\\X", 0, "OK") { DriverVersion = "1.2", DriverProvider = "" });
         assert(part == "Reiniciar Webcam.\nDriver: versão 1.2.\nO dispositivo poderá ficar temporariamente indisponível.",
             "Aprovação: do inventário, só os dados presentes do driver aparecem");
+
+        // O nome vem do descritor do dispositivo: com quebra de linha, não pode criar uma linha "Driver: …" falsa (achado do @qa).
+        foreach (var breakChar in new[] { "\n", "\r\n", "\u2028", "\u0085" })
+        {
+            var forgedName = "Fifine Microphone" + breakChar + "Driver: wdma_usb.inf · versão 99.0 · Microsoft";
+            var named = await Asked(Diagnosis(0, false, name: forgedName), "restart_device", new { device_id = FifineId });
+            var lines = named?.Split('\n') ?? [];
+            assert(lines.Length == 2 && lines[0] == "Reiniciar Fifine Microphone Driver: wdma_usb.inf · versão 99.0 · Microsoft." && !lines[1].StartsWith("Driver:", StringComparison.Ordinal)
+                && !named!.Contains('\r') && !named.Contains('\u2028') && !named.Contains('\u0085'),
+                "Aprovação: nome do dispositivo com quebra de linha (" + Uri.EscapeDataString(breakChar) + ") fica numa linha só e não imita a linha do driver");
+        }
+
+        // O corte é por caractere visível: emoji, par substituto ou acento combinado na posição 80 não é partido (achado do @qa).
+        static bool WellFormed(string text) { try { _ = new UTF8Encoding(false, true).GetBytes(text); return true; } catch (EncoderFallbackException) { return false; } }
+        var a79 = new string('a', 79);
+        const string Emoji = "\U0001F600", Accent = "e\u0301";
+        assert(WindowsTools.Limited(a79 + Emoji + "bcd", 80) == a79 + Emoji && WindowsTools.Limited(new string('a', 80) + Emoji, 80) == new string('a', 80)
+            && WindowsTools.Limited(a79 + Accent + "x", 80) == a79 + Accent && WindowsTools.Limited(a79 + Emoji, 80) == a79 + Emoji && WindowsTools.Limited("", 80) == "",
+            "Aprovação: o corte em 80 conta emoji e acento combinado como um caractere e não parte nenhum");
+        var cut = WindowsTools.DeviceChangeDetails("restart_device", new Device("Webcam", "USB\\X", 0, "OK") { DriverProvider = a79 + Emoji + "zzz", InfName = new string('i', 79) + Emoji + ".inf" });
+        assert(WellFormed(cut) && cut.Contains("Driver: " + new string('i', 79) + Emoji + " · " + a79 + Emoji + ".\n"),
+            "Aprovação: driver com emoji na posição 80 é cortado sem par substituto partido");
+        var longName = WindowsTools.DeviceChangeDetails("restart_device", new Device(new string('n', 159) + Emoji + "fim", "USB\\X", 0, "OK"));
+        assert(WellFormed(longName) && longName.StartsWith("Reiniciar " + new string('n', 159) + Emoji + ".\n", StringComparison.Ordinal),
+            "Aprovação: nome longo é cortado em 160 caracteres visíveis, sem partir o emoji");
+    }
+
+    // A observação do Spooler parado é o estado anterior registrado do reinício do serviço (achado do @qa).
+    private static async Task SpoolerBefore(Store store, Account actor, Action<bool, string> assert)
+    {
+        async Task<InterventionRecord> Restart(bool observeFirst)
+        {
+            var tools = new WindowsTools(store, actor, _ => Task.FromResult(false), new Progress<string>())
+            {
+                PrinterReader = (_, _) => Task.FromResult("""{"Spooler":"Stopped","StartType":"Automatic"}"""),
+                ServiceEventsReader = (_, _) => throw new InvalidOperationException("Eventos indisponíveis no teste.")
+            };
+            if (observeFirst) await tools.Execute("get_printers", JsonSerializer.SerializeToElement(new { }), CancellationToken.None);
+            var result = await tools.Execute("restart_service", JsonSerializer.SerializeToElement(new { service = "Spooler" }), CancellationToken.None);
+            if (!result.Contains("\"denied\":true")) throw new Exception("FAIL: o reinício recusado não voltou como recusa: " + result);
+            using var operational = new OperationalStore(store.Root);
+            return operational.RecentInterventions(50).Where(item => item.Action == "restart_service").OrderByDescending(item => item.Time).First();
+        }
+        var observed = await Restart(true);
+        using (var before = JsonDocument.Parse(observed.Before))
+        {
+            var root = before.RootElement;
+            assert(root.GetProperty("status").GetString() == "observed" && root.GetProperty("source").GetString() == "service_inventory"
+                && root.GetProperty("service").GetProperty("Name").GetString() == "Spooler" && root.GetProperty("service").GetProperty("Status").GetString() == "Stopped"
+                && root.GetProperty("service").GetProperty("StartType").GetString() == "Automatic" && observed.Transitions.Select(t => t.State).SequenceEqual(["proposed", "denied"]),
+                "Impressoras: depois de get_printers com o Spooler parado, o reinício do Spooler registra esse estado como o anterior");
+        }
+        var unobserved = await Restart(false);
+        using (var before = JsonDocument.Parse(unobserved.Before))
+            assert(before.RootElement.GetProperty("status").GetString() == "unavailable",
+                "Impressoras: sem a consulta, o reinício do Spooler não tem estado anterior observado");
     }
 
     private static async Task UnknownToolLine(Store store, Account actor, Action<bool, string> assert)

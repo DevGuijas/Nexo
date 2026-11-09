@@ -135,14 +135,22 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 : " Reiniciar o Spooler (restart_service) depende da aprovação do usuário.")
     });
 
+    // Corte por caractere visível (text element), não por unidade UTF-16: não parte par substituto, emoji nem acento combinado.
+    internal static string Limited(string text, int limit)
+    {
+        var info = new System.Globalization.StringInfo(text);
+        return info.LengthInTextElements > limit ? info.SubstringByTextElements(0, limit) : text;
+    }
+
     // Texto da janela de aprovação de enable_device/restart_device (#84): o driver aparece quando a consulta do turno trouxe
     // o INF, a versão ou o fornecedor desse ID. Tudo vem da observação do executor, nada dos argumentos do modelo.
     internal static string DeviceChangeDetails(string action, Device device)
     {
-        static string Part(string value) => InvestigationEvidence.Clean(value).Trim() is var clean && clean.Length > 80 ? clean[..80] : clean;
+        // O nome do dispositivo também vem do Windows (do descritor USB, por exemplo): sem quebra de linha, não imita a linha do driver.
+        static string Part(string value, int limit = 80) => Limited(InvestigationEvidence.Clean(value).Trim(), limit);
         var parts = new[] { Part(device.InfName), Part(device.DriverVersion) is { Length: > 0 } version ? "versão " + version : "", Part(device.DriverProvider) }
             .Where(part => part.Length > 0).ToArray();
-        return (action == "restart_device" ? "Reiniciar " : "Habilitar ") + device.Name + "."
+        return (action == "restart_device" ? "Reiniciar " : "Habilitar ") + Part(device.Name, 160) + "."
             + (parts.Length > 0 ? "\nDriver: " + string.Join(" · ", parts) + "." : "")
             + "\nO dispositivo poderá ficar temporariamente indisponível.";
     }
