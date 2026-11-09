@@ -300,7 +300,7 @@ public partial class MainWindow : Window
             }
             var alerts = healthStore.RecentFindings(20);
             var occurrenceNow = DateTimeOffset.UtcNow;
-            var occurrenceHistory = healthStore.RecentSnapshots(occurrenceNow.AddHours(-6), 20);
+            var occurrenceHistory = HealthOccurrences.History(healthStore, occurrenceNow.AddHours(-6), occurrenceNow);
             var occurrenceLimits = healthSettings.Thresholds();
             PageContent.Children.Add(SectionHeading("health", "Ocorrências preventivas"));
             PageContent.Children.Add(Card(Text(HealthOccurrences.CollectionNotice(latest, occurrenceLimits, occurrenceNow), 12, "Secondary")));
@@ -308,7 +308,7 @@ public partial class MainWindow : Window
             foreach (var (finding, status) in HealthOccurrences.Classify(alerts, occurrenceHistory, occurrenceLimits, occurrenceNow))
             {
                 var detail = new StackPanel();
-                detail.Children.Add(Text($"{finding.Time.ToLocalTime():g}  ·  {finding.Severity}", 11, status.State != OccurrenceState.Persistent ? "Secondary" : finding.Severity == "critical" ? "Danger" : "Warning"));
+                detail.Children.Add(Text($"{finding.Time.ToLocalTime():g}  ·  {HealthOccurrences.ShownSeverity(finding, status)}", 11, status.State != OccurrenceState.Persistent ? "Secondary" : finding.Severity == "critical" ? "Danger" : "Warning"));
                 var occurrenceState = Text(status.Label, 12, status.State switch { OccurrenceState.Persistent => "Warning", OccurrenceState.Resolved => "Success", _ => "Secondary" });
                 occurrenceState.FontWeight = FontWeights.SemiBold; occurrenceState.Margin = new Thickness(0, 5, 0, 0); detail.Children.Add(occurrenceState);
                 var problem = Text(finding.Problem, 15); problem.FontWeight = FontWeights.SemiBold; problem.Margin = new Thickness(0, 7, 0, 7); detail.Children.Add(problem);

@@ -3,7 +3,8 @@ using System.Text;
 
 namespace Nexo.Support;
 
-public enum OccurrenceState { Persistent, Resolved, Unknown }
+/// <summary>Stable: o processo apontado segura a memória num patamar estável (#71). É informativo, não uma falha ativa.</summary>
+public enum OccurrenceState { Persistent, Resolved, Unknown, Stable }
 public sealed record OccurrenceStatus(OccurrenceState State, string Label);
 
 /// <summary>Estado atual de uma ocorrência registrada. Resolver exige prova: sem ela, o estado é desconhecido.</summary>
@@ -21,6 +22,32 @@ public static class HealthOccurrences
 
     // A regra de memória do sistema alerta com três leituras; o fim das ocorrências de memória exige o mesmo.
     private const int MemorySamples = 3;
+
+    // #71: um processo que segura a memória sem crescer deixa de "persistir" e fica "estável em patamar alto".
+    // A janela é medida em tempo, para valer com qualquer intervalo de coleta. O nome do processo não entra no critério.
+    internal static readonly TimeSpan PlateauWindow = TimeSpan.FromMinutes(30);
+    // Amplitude (máx − mín) abaixo desta fração do patamar (média da janela).
+    internal const double PlateauAmplitude = 0.05;
+    // Crescimento líquido, da média do 1º quarto da janela à do último quarto, abaixo desta fração: separa o patamar de um vazamento lento.
+    internal const double PlateauDrift = 0.02;
+    // Depois do patamar, uma leitura com esta subida sobre ele volta a ocorrência a "Persiste".
+    internal const double PlateauRise = 0.10;
+    // Histórico que o painel e o relatório consultam: a janela do patamar e a volta a ele depois de uma oscilação.
+    internal static readonly TimeSpan PlateauHistory = TimeSpan.FromHours(1);
+    private const int PlateauHistoryLimit = 400;
+
+    /// <summary>
+    /// Leituras para classificar as ocorrências: as 20 mais recentes desde since, como antes da #71, mais as da última hora,
+    /// que a janela de 30 min do patamar precisa (limitadas a 400, o que cobre 1 h a partir de 9 s de intervalo).
+    /// </summary>
+    public static List<HealthSnapshot> History(OperationalStore store, DateTimeOffset since, DateTimeOffset now)
+    {
+        var recent = store.RecentSnapshots(since, 20);
+        var plateauSince = now - PlateauHistory;
+        if (plateauSince < since) plateauSince = since;
+        var known = recent.Select(s => s.Id).ToHashSet();
+        return [.. recent, .. store.RecentSnapshots(plateauSince, PlateauHistoryLimit).Where(s => known.Add(s.Id))];
+    }
 
     public static IReadOnlyList<(HealthFinding Finding, OccurrenceStatus Status)> Classify(IReadOnlyList<HealthFinding> findings, IReadOnlyList<HealthSnapshot> history, HealthThresholds thresholds, DateTimeOffset now)
     {
@@ -71,9 +98,16 @@ public static class HealthOccurrences
                 return new(OccurrenceState.Persistent, "Persiste nas leituras atuais");
             // Memória do sistema depende dos processos apontados; a do processo, dele mesmo.
             Pointed[] holders = related.Length > 0 ? related : PointedBy(finding, ordered) is { } self ? [self] : [];
+            OccurrenceStatus? stable = null;
             foreach (var holder in holders)
                 if (HoldAt(holder, ordered[^1]) is (Hold.Holding, var bytes))
-                    return new(OccurrenceState.Persistent, $"Persiste: {holder.Label} segue com {Megabytes(bytes)} MB, mais da metade da subida de {Megabytes(holder.Growth!.FromBytes)} para {Megabytes(holder.Growth.ToBytes)} MB registrada no alerta do processo");
+                {
+                    // Qualquer processo que segura a memória sem patamar estável mantém a ocorrência persistindo.
+                    if (PlateauAt(holder, ordered, thresholds) is not { } plateau)
+                        return new(OccurrenceState.Persistent, $"Persiste: {holder.Label} segue com {Megabytes(bytes)} MB, mais da metade da subida de {Megabytes(holder.Growth!.FromBytes)} para {Megabytes(holder.Growth.ToBytes)} MB registrada no alerta do processo");
+                    stable ??= new(OccurrenceState.Stable, $"Estável em patamar alto (informativo, não é falha ativa): {holder.Label} segue com {Megabytes(bytes)} MB, num patamar de cerca de {Megabytes(plateau)} MB sem nova subida há pelo menos {PlateauWindow.TotalMinutes:F0} min");
+                }
+            if (stable != null) return stable;
             var criterion = CriterionFor(id, finding, thresholds, holders);
             if (criterion == null) return Unknown("sem critério para confirmar o fim");
             var recent = ordered.Where(s => s.Time > finding.Time).TakeLast(criterion.Samples).ToArray();
@@ -91,6 +125,9 @@ public static class HealthOccurrences
         var time = "Última coleta: " + latest.Time.ToLocalTime().ToString("g");
         return IsRecent(latest, thresholds, now) ? time : time + ". Sem leitura recente: o estado atual das ocorrências é desconhecido.";
     }
+
+    /// <summary>Severidade exibida: o patamar estável é informativo, qualquer que seja a do registro (#71).</summary>
+    public static string ShownSeverity(HealthFinding finding, OccurrenceStatus status) => status.State == OccurrenceState.Stable ? "info" : finding.Severity;
 
     private static OccurrenceStatus Unknown(string reason) => new(OccurrenceState.Unknown, $"Ocorrência histórica; estado atual desconhecido ({reason})");
 
@@ -114,6 +151,39 @@ public static class HealthOccurrences
         // Registro anterior à #60 não guarda o nome: usa o da leitura, se o processo ainda aparece no histórico.
         var name = finding.MemoryGrowth?.Name ?? history.SelectMany(s => s.Processes).LastOrDefault(p => Same(p, pid, ticks))?.Name;
         return new(finding, pid, ticks, $"{(name == null ? "processo" : HealthRules.SafeName(name))} PID {pid}", finding.MemoryGrowth);
+    }
+
+    /// <summary>
+    /// Patamar (média em bytes) em que o processo apontado se estabilizou depois do alerta, ou nulo (#71).
+    /// Exige leituras seguidas do mesmo PID e início, sem lacuna e sem falha na lista, cobrindo PlateauWindow, com amplitude
+    /// e crescimento líquido abaixo dos limites. Depois dessa janela, nenhuma leitura pode passar de PlateauRise sobre o patamar.
+    /// </summary>
+    private static long? PlateauAt(Pointed process, HealthSnapshot[] ordered, HealthThresholds thresholds)
+    {
+        // Sequência contínua mais recente, a partir do alerta, em que o processo aparece em todas as leituras.
+        var series = new List<(DateTimeOffset Time, long Bytes)>();
+        for (var i = ordered.Length - 1; i >= 0 && ordered[i].Time >= process.Finding.Time; i--)
+        {
+            var same = ordered[i].Processes.FirstOrDefault(p => Same(p, process.Pid, process.StartTicks));
+            if (same == null || series.Count > 0 && series[^1].Time - ordered[i].Time > thresholds.MaxSampleGap) break;
+            series.Add((ordered[i].Time, same.WorkingSetBytes));
+        }
+        series.Reverse();
+        var peakAfter = long.MinValue;
+        for (var end = series.Count - 1; end > 0; peakAfter = Math.Max(peakAfter, series[end].Bytes), end--)
+        {
+            var start = series.FindLastIndex(end, r => r.Time <= series[end].Time - PlateauWindow);
+            if (start < 0) break;
+            var window = series.GetRange(start, end - start + 1).Select(r => (double)r.Bytes).ToArray();
+            var level = window.Average();
+            if (level <= 0 || (window.Max() - window.Min()) / level >= PlateauAmplitude) continue;
+            var quarter = Math.Max(1, window.Length / 4);
+            var (first, last) = (window.Take(quarter).Average(), window.TakeLast(quarter).Average());
+            if (first <= 0 || (last - first) / first >= PlateauDrift) continue;
+            if (peakAfter != long.MinValue && peakAfter >= level * (1 + PlateauRise)) continue;
+            return (long)level;
+        }
+        return null;
     }
 
     private static bool Same(ProcessHealth process, int pid, long startTicks) => process.Id == pid && process.StartTime?.UtcTicks == startTicks;
@@ -190,11 +260,12 @@ public static class HealthReportPresentation
         foreach (var disk in latest.Disks.Take(8))
             text.AppendLine($"Volume {Safe(disk.Name)}: {(disk.TotalBytes > 0 ? 100.0 * disk.FreeBytes / disk.TotalBytes : 0):F1}% livre.");
         if (report.Findings.Count == 0) text.AppendLine("Nenhum achado sustentado foi registrado nos dados disponíveis.");
-        var occurrences = HealthOccurrences.Classify(report.Findings, store.RecentSnapshots(since, 20), thresholds ?? new(), DateTimeOffset.UtcNow);
+        var now = DateTimeOffset.UtcNow;
+        var occurrences = HealthOccurrences.Classify(report.Findings, HealthOccurrences.History(store, since, now), thresholds ?? new(), now);
         if (occurrences.Count > 10) text.AppendLine($"Mostrando 10 de {occurrences.Count} ocorrências, as críticas primeiro; as demais foram omitidas deste relatório.");
         foreach (var (finding, status) in occurrences.OrderByDescending(o => o.Finding.Severity == "critical").ThenByDescending(o => o.Finding.Time).Take(10))
         {
-            text.AppendLine($"Achado {Safe(finding.Category)} ({Safe(finding.Severity)}), {finding.Time:yyyy-MM-dd HH:mm zzz}, {char.ToLowerInvariant(status.Label[0]) + status.Label[1..]}: {Safe(finding.Problem)}. Evidência: {Safe(finding.Evidence)}. Causa: hipótese, {Safe(finding.Cause)}. Recomendação: {Safe(finding.Recommendation)}. Confiança {Math.Clamp(finding.Confidence, 0, 1):P0}; confirmado: não.");
+            text.AppendLine($"Achado {Safe(finding.Category)} ({Safe(HealthOccurrences.ShownSeverity(finding, status))}), {finding.Time:yyyy-MM-dd HH:mm zzz}, {char.ToLowerInvariant(status.Label[0]) + status.Label[1..]}: {Safe(finding.Problem)}. Evidência: {Safe(finding.Evidence)}. Causa: hipótese, {Safe(finding.Cause)}. Recomendação: {Safe(finding.Recommendation)}. Confiança {Math.Clamp(finding.Confidence, 0, 1):P0}; confirmado: não.");
         }
         foreach (var limitation in report.Limitations.Take(10)) text.AppendLine("Limitação: " + Safe(limitation));
         text.AppendLine("Nenhuma alteração foi executada por este relatório. Confirme a função afetada antes de declarar recuperação.");
