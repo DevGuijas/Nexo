@@ -41,6 +41,8 @@ internal static class ValidationFollowUpChecks
             // Junção com a #57 (PR #90).
             ServiceStopLabel(assert);
             SupersededStopOutOfReport(assert);
+            // Junção com a #71 (PR #91): o patamar estável real.
+            StablePlateau(assert);
         }
         finally { store.Data.AiEnabled = previousAi; }
     }
@@ -419,6 +421,62 @@ internal static class ValidationFollowUpChecks
                 "Junção com a #57: a parada superada pela leitura atual não vai ao modelo, nem na parte que não é atual");
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
+    // Patamar estável real da #71 (Navegador em 14000 MB por 2 h, como nos testes dela): atual e informativo. O processo pode
+    // ser citado como atual, ganha os MB, fica na parte atual sem recomendação de ação, e o resumo não diz que é problema
+    // ativo nem que foi resolvido.
+    private static void StablePlateau(Action<bool, string> assert)
+    {
+        const long Mb = 1024 * 1024;
+        var limits = new HealthThresholds { ProcessMemoryGrowthPoints = 7, ProcessMemorySamples = 5 };
+        var end = DateTimeOffset.UtcNow.AddSeconds(-5);
+        var start = end.AddDays(-5);
+        var series = Enumerable.Range(0, 242).Select(i => new HealthSnapshot
+        {
+            Time = end.AddSeconds(-30 * (241 - i)), CollectionStatus = "complete", MemoryUsedPercent = 60, MemoryTotalBytes = 32L * 1024 * Mb, MemoryUsedBytes = 32L * 1024 * Mb * 6 / 10,
+            Processes = [new("Navegador", 20248, 14000 * Mb, null, start), new("explorer", 6400, 310 * Mb, null, start)]
+        }).ToArray();
+        var root = Path.Combine(Path.GetTempPath(), "nexo-88-71-" + Guid.NewGuid().ToString("N"));
+        string report;
+        try
+        {
+            using var db = new OperationalStore(root);
+            db.SaveFindings([
+                new HealthFinding { Id = "memory-growing:s0", Time = series[0].Time, Category = "memory", Severity = "warning", Problem = "Memória em crescimento persistente",
+                    Evidence = "De 45% para 60% em três leituras", Cause = "Processo responsável ainda não identificado", Recommendation = "Compare o uso por processo antes de intervir" },
+                // A evidência no formato da regra (HealthRules): "<processo> PID <n> iniciado em …: de X MB para Y MB…".
+                new HealthFinding { Id = $"process-memory-growing:20248:{start.UtcTicks}:s1", Time = series[1].Time, Category = "memory", Severity = "warning",
+                    Problem = "Processo com memória em crescimento persistente", Evidence = $"Navegador PID 20248 iniciado em {start:yyyy-MM-dd HH:mm:ss zzz}: de 2000 MB para 16000 MB em 5 leituras e 40 pontos da RAM",
+                    Cause = "Crescimento observado neste processo; vazamento e carga legítima não distinguidos", Recommendation = "Verifique se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção",
+                    Confidence = 0.7, MemoryGrowth = new("Navegador", 2000 * Mb, 16000 * Mb) }
+            ]);
+            foreach (var sample in series) { db.SaveSnapshot(sample); HealthOccurrences.RecordPlateaus(db, sample, limits); }
+            report = HealthReportPresentation.FromStore(db, limits).ReplaceLineEndings("\n");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+        var lines = report.Split('\n');
+        var current = Array.IndexOf(lines, HealthReportPresentation.CurrentHeader);
+        var other = Array.IndexOf(lines, HealthReportPresentation.OtherHeader);
+        var process = Array.FindIndex(lines, line => line.StartsWith("Achado memory (info)", StringComparison.Ordinal) && line.Contains("estável em patamar alto (informativo, não é falha ativa): Navegador PID 20248 segue com 14000 MB"));
+        assert(current >= 0 && process > current && (other < 0 || process < other) && lines[process].Contains("Recomendação: Nenhuma ação recomendada")
+            && !report.Contains("Verifique se o aplicativo") && !report.Contains("Compare o uso por processo"),
+            "Junção com a #71: o patamar estável real fica na parte atual, como informativo e sem recomendação de ação");
+
+        var evidence = new InvestigationEvidence();
+        evidence.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(report));
+        var summary = evidence.Report("");
+        assert(summary.Contains("Informação do monitor de saúde, sem falha ativa: Processo mantém a memória num patamar estável") && summary.Contains("Navegador PID 20248")
+            && !summary.Contains("Ocorrência ativa") && !summary.Contains("resolvid", StringComparison.OrdinalIgnoreCase) && !summary.Contains("Recomendação do monitor"),
+            "Junção com a #71: o resumo mostra o patamar como informação, sem dizer que é problema ativo nem que foi resolvido");
+        assert(evidence.WithMemoryFigures("O Navegador PID 20248 está pesado.").EndsWith("Pelo monitor de saúde: “Navegador” (PID 20248) segue com 14000 MB; no alerta, subiu de 2000 MB para 16000 MB.", StringComparison.Ordinal),
+            "Junção com a #71: o processo em patamar estável recebe os MB na resposta");
+        // Com uma ocorrência antiga e resolvida do mesmo processo, o patamar atual é que vale: a frase não é recusada.
+        var withOld = new InvestigationEvidence();
+        withOld.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(report.TrimEnd() + "\n" + HealthReportPresentation.OtherHeader + "\n"
+            + "Achado memory (warning), 2026-11-08 10:00 _00:00, resolvida: 3 leituras seguidas sem a condição: Processo com memória em crescimento persistente. Evidência: Navegador PID 1111 iniciado em 2026-11-08 08:00:00 _00:00: de 900 MB para 5000 MB em 5 leituras. Causa: hipótese, x. Confiança 70%; confirmado: não.\n"));
+        assert(withOld.ValidateStatement("O Navegador está consumindo 14 GB de memória.", false) == null && evidence.ValidateStatement("O Navegador está consumindo 14 GB de memória.", false) == null,
+            "Junção com a #71: \"O Navegador está consumindo 14 GB de memória.\" não é recusada com o processo em patamar estável");
     }
 
     // Relatório real do HealthReportPresentation: o llama-server teve um alerta de memória já resolvido; com holding, o

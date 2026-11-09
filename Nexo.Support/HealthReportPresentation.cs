@@ -384,8 +384,9 @@ public static class HealthReportPresentation
         if (occurrences.Count > 10) text.AppendLine($"Mostrando 10 de {occurrences.Count} ocorrências, as críticas primeiro; as demais foram omitidas deste relatório.");
         // As ocorrências encerradas (resolvidas ou de estado atual desconhecido) ficam fora da parte atual (#88): no PC, o modelo
         // leu como atual uma ocorrência "resolvida" do llama-server. A separação é pelo estado, não pelo texto dele, e qualquer
-        // outro estado, inclusive um novo, fica na parte atual. A parte encerrada não traz recomendação, para não puxar uma
-        // ação sobre algo que não está acontecendo. A gravidade mostrada é a da #71 (ShownSeverity).
+        // outro estado, inclusive um novo, fica na parte atual. O patamar estável da #71 é atual e informativo: a gravidade
+        // mostrada é "info" e a recomendação é a dele ("nenhuma ação recomendada"). A parte encerrada não traz recomendação,
+        // para não puxar uma ação sobre algo que não está acontecendo.
         var shown = occurrences.OrderByDescending(o => o.Finding.Severity == "critical").ThenByDescending(o => o.Finding.Time).Take(10).ToArray();
         static bool Closed(OccurrenceStatus status) => status.State is OccurrenceState.Resolved or OccurrenceState.Unknown;
         var currentPart = shown.Where(o => !Closed(o.Status)).ToArray();
@@ -398,7 +399,7 @@ public static class HealthReportPresentation
         text.AppendLine("Nenhuma alteração foi executada por este relatório. Confirme a função afetada antes de declarar recuperação.");
         return text.ToString()[..Math.Min(text.Length, 7000)];
     }
-    internal const string CurrentHeader = "OCORRÊNCIAS ATUAIS (persistem nas leituras atuais):";
+    internal const string CurrentHeader = "OCORRÊNCIAS ATUAIS (nas leituras atuais; as marcadas como informativas não são falha ativa):";
     internal const string OtherHeader = "OCORRÊNCIAS QUE NÃO SÃO ATUAIS (resolvidas ou com estado atual desconhecido): não as apresente como problemas presentes nem proponha ação para elas.";
     private static string Line(HealthFinding finding, OccurrenceStatus status, bool current) =>
         $"Achado {Safe(finding.Category)} ({Safe(HealthOccurrences.ShownSeverity(finding, status))}), {finding.Time:yyyy-MM-dd HH:mm zzz}, {char.ToLowerInvariant(status.Label[0]) + status.Label[1..]}: {Safe(finding.Problem)}. Evidência: {Safe(finding.Evidence)}. Causa: hipótese, {Safe(finding.Cause)}."

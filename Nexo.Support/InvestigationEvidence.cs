@@ -648,7 +648,7 @@ public sealed class InvestigationEvidence
     private void RememberHealth(string report)
     {
         // Cada relatório substitui as três linhas do anterior; uma parte ausente agora não pode sobrar da leitura velha.
-        findings.RemoveAll(f => f.Key is "health" or "health:unknown" or "health:volumes");
+        findings.RemoveAll(f => f.Key is "health" or "health:unknown" or "health:informative" or "health:volumes");
         memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear();
         if (report.StartsWith("Nenhuma amostra", StringComparison.Ordinal)) { Finding("health", "O relatório de saúde não tem leituras das últimas 24 horas."); return; }
         // O relatório marca a amostra velha na linha de coleta, pelo mesmo critério de HealthOccurrences.CollectionNotice.
@@ -664,8 +664,9 @@ public sealed class InvestigationEvidence
         // atual: o processo dele pode ser citado e os MB dele entram na resposta. "persiste: <processo> segue com N MB…" antes
         // não era reconhecido e tirava do resumo a ocorrência do processo que segura memória; "persiste: <serviço> segue
         // parado…" (#57) também é lido inteiro, para que o problema da linha não comece no meio do estado. O problema e a evidência podem
-        // trazer nome de volume que imita ". Evidência:", então o estado só avança sobre texto do próprio formato dele.
-        var lines = Regex.Matches(report, @"^Achado (?<category>[a-z]+) \([^)\n]*\), [^,\n]*, (?<status>persiste nas leituras atuais|persiste: [^:\n]*|ocorrência histórica; estado atual desconhecido \([^)\n]*\)|resolvida: [^:\n]*|[^:\n]*: [\p{L}\p{N}._-]+ PID \d+ segue com [^:\n]*|[^:\n]*): (?<problem>[^\n]+?)\. Evidência: (?<evidence>[^\n]+?)\. Causa:", RegexOptions.Multiline)
+        // trazer nome de volume que imita ". Evidência:", então o estado só avança sobre texto do próprio formato dele. O estado
+        // "estável em patamar alto (informativo…): <processo> segue com N MB. Patamar de referência: …" (#71) tem dois dois-pontos.
+        var lines = Regex.Matches(report, @"^Achado (?<category>[a-z]+) \([^)\n]*\), [^,\n]*, (?<status>persiste nas leituras atuais|persiste: [^:\n]*|estável em patamar alto \([^)\n]*\): [^:\n]*: [^:\n]*|ocorrência histórica; estado atual desconhecido \([^)\n]*\)|resolvida: [^:\n]*|[^:\n]*: [\p{L}\p{N}._-]+ PID \d+ segue com [^:\n]*|[^:\n]*): (?<problem>[^\n]+?)\. Evidência: (?<evidence>[^\n]+?)\. Causa:", RegexOptions.Multiline)
             .Select(match => (Status: match.Groups["status"].Value, Category: match.Groups["category"].Value, Problem: match.Groups["problem"].Value, Evidence: match.Groups["evidence"].Value,
                 Active: !Closed(match.Groups["status"].Value)))
             .ToArray();
@@ -683,7 +684,7 @@ public sealed class InvestigationEvidence
         var occurrences = lines
             .Where(line => !line.Status.StartsWith("resolvida", StringComparison.Ordinal) && !line.Status.Contains("(há ocorrência mais recente do mesmo alerta)", StringComparison.Ordinal))
             // A evidência pode trazer nome de adaptador, serviço ou processo: vai entre aspas, como todo nome vindo de ferramenta.
-            .Select(line => (line.Active, Unknown: line.Status.StartsWith("ocorrência histórica", StringComparison.Ordinal),
+            .Select(line => (Active: line.Active && !Informative(line.Status), Informative: line.Active && Informative(line.Status), Unknown: line.Status.StartsWith("ocorrência histórica", StringComparison.Ordinal),
                 Text: Clean(Readable(line.Problem)) + " (evidência: " + Quoted(Readable(line.Evidence), MaxEvidenceLength) + ")",
                 Advice: Advice(line.Category, line.Problem)))
             .ToArray();
@@ -695,6 +696,9 @@ public sealed class InvestigationEvidence
         var advice = occurrences.Where(o => o.Active && o.Advice.Text.Length > 0).OrderBy(o => Related(o.Advice.Rule) ? 0 : 1)
             .Select(o => o.Advice.Text).Distinct().Take(2).ToArray();
         var unknown = occurrences.Where(o => o.Unknown).Select(o => o.Text).ToArray();
+        // Atual, mas sem falha (o patamar estável da #71): o processo pode ser citado e ganha os MB, mas o resumo não diz que é
+        // problema ativo nem que foi resolvido.
+        var informative = occurrences.Where(o => o.Informative).Select(o => o.Text).ToArray();
         var volumes = Regex.Matches(report, @"^Volume (?<name>[^\n]+?): (?<free>[\d.,]+% livre)\.", RegexOptions.Multiline)
             // Letra de unidade sai como está; outro nome de volume é dado da ferramenta e vai entre aspas (@qa: nome que imita o relatório).
             .Select(match => (Regex.IsMatch(match.Groups["name"].Value, @"^[A-Za-z]:_?$") ? match.Groups["name"].Value.TrimEnd('_') : Quoted(match.Groups["name"].Value)) + " " + match.Groups["free"].Value).ToArray();
@@ -707,10 +711,13 @@ public sealed class InvestigationEvidence
             advice.Length == 0 ? "" : " Recomendação do monitor: " + string.Join("; ", advice) + ". O Nexo não apaga arquivos nem encerra programas."
                 // Caminho real para ver o uso do disco (#88): o Nexo não lista arquivos nem pastas.
                 + (advice.Contains(Advice("disk", "Pouco espaço no volume ").Text) ? " Para ver o que ocupa espaço, abra Configurações > Sistema > Armazenamento no Windows." : ""));
+        if (informative.Length > 0) Finding("health:informative", "Informação do monitor de saúde, sem falha ativa: " + Within(informative.Take(3), informative.Length) + ".");
         if (unknown.Length > 0) Finding("health:unknown", "Ocorrências do monitor com estado atual desconhecido: " + Within(unknown.Take(3), unknown.Length) + ".");
         if (volumes.Length > 0) Finding("health:volumes", (stale ? "Espaço livre por volume naquela amostra: " : "Espaço livre por volume: ") + Within(volumes.Take(4), volumes.Length) + ".");
     }
 
+    // Estado atual que o próprio relatório marca como informativo, como "Estável em patamar alto (informativo, não é falha ativa)".
+    private static bool Informative(string status) => status.Contains("(informativo", StringComparison.Ordinal);
     // Estados que o relatório dá como encerrados; todo o resto conta como atual.
     private static bool Closed(string status) => status.StartsWith("resolvida", StringComparison.Ordinal) || status.StartsWith("ocorrência histórica", StringComparison.Ordinal);
 
