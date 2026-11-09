@@ -134,20 +134,35 @@ internal static class MonitoringChecks
         var previous = ReadServices(stoppedAtPosition230, now.AddSeconds(-30));
         var latest = ReadServices(stoppedAtPosition230, now);
 
-        check(latest.Services.Count == WindowsHealthSampler.MaxServicesCollected
+        // Desde a #57, o limite de 200 vale só para os serviços fora de execução; os em execução têm limite próprio.
+        check(latest.Services.Count == 250
             && latest.Services[0] is { Name: "Servico230", Status: "Stopped" }
-            && latest.Warnings.Single().Contains("200 de 250")
-            && latest.CollectionStatus == "partial",
-            "Coleta acima do limite mantém o serviço parado da posição 230, informa o corte e fica parcial");
+            && latest.Warnings.Count == 0 && latest.CollectionStatus == "complete",
+            "Coleta com 250 serviços Auto, 1 parado, guarda todos, com o parado da posição 230 primeiro, e fica completa");
 
         var findings = HealthRules.Evaluate([previous, latest], new HealthThresholds());
         check(findings.Any(f => f.Id == "service-stopped:Servico230"),
             "Serviço automático parado depois da posição 80 gera alerta preventivo");
 
-        var report = DiagnosticEngine.BuildReport(latest, findings, new EventBatch(), now);
+        var manyStopped = Enumerable.Range(1, 250).Select(position => (object)new { Name = $"Parado{position:D3}", State = "Stopped" })
+            .Append(new { Name = "Spooler", State = "Running" }).ToArray();
+        var truncated = ReadServices(manyStopped, now);
+        check(truncated.Services.Count(service => service.Status == "Stopped") == WindowsHealthSampler.MaxServicesCollected
+            && truncated.Services.Any(service => service is { Name: "Spooler", Status: "Running" })
+            && truncated.Warnings.Single().Contains("fora de execução: 200 de 250", StringComparison.Ordinal)
+            && truncated.CollectionStatus == "partial",
+            "Coleta com 250 serviços parados guarda 200, informa o corte, fica parcial e não perde o serviço em execução");
+
+        var report = DiagnosticEngine.BuildReport(truncated, [], new EventBatch(), now);
         check(report.Limitations.Contains("A coleta de métricas foi parcial.")
             && report.Limitations.Any(limitation => limitation.Contains("200 de 250")),
             "Relatório de saúde não conclui ausência de falhas quando a coleta de serviços é parcial");
+
+        var manyRunning = ReadServices(AutomaticServices(WindowsHealthSampler.MaxRunningServicesCollected + 5, stoppedPosition: null), now);
+        check(manyRunning.Services.Count == WindowsHealthSampler.MaxRunningServicesCollected
+            && manyRunning.Warnings.Single().Contains($"em execução: {WindowsHealthSampler.MaxRunningServicesCollected} de {WindowsHealthSampler.MaxRunningServicesCollected + 5}", StringComparison.Ordinal)
+            && manyRunning.CollectionStatus == "partial",
+            "Lista anormal de serviços em execução acima do teto é cortada e informada");
 
         var complete = ReadServices(AutomaticServices(83, stoppedPosition: null), now);
         check(complete.Services.Count == 83 && complete.Warnings.Count == 0 && complete.CollectionStatus == "complete",

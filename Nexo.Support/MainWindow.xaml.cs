@@ -298,7 +298,8 @@ public partial class MainWindow : Window
                 }
                 PageContent.Children.Add(Card(overview));
             }
-            var alerts = healthStore.RecentFindings(20);
+            // Parada normal sem prova de execução vai para o aviso informativo, não para as ocorrências (#57).
+            var alerts = healthStore.RecentFindings(20).Where(finding => !HealthOccurrences.SupersededServiceStop(finding, latest)).ToList();
             var occurrenceNow = DateTimeOffset.UtcNow;
             var occurrenceHistory = healthStore.RecentSnapshots(occurrenceNow.AddHours(-6), 20);
             var occurrenceLimits = healthSettings.Thresholds();

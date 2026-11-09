@@ -22,6 +22,8 @@ internal static class ServiceTransitionChecks
         Notice(check);
         await Engine(check);
         Report(check);
+        LargeList(check);
+        Superseded(check);
     }
 
     private static ServiceHealth Running(string name) => new(name, "Running", "Automatic");
@@ -211,6 +213,72 @@ internal static class ServiceTransitionChecks
             check(db.RecentFindings(10).Count == 0, "Monitor não grava alerta para o GoogleUpdater que roda por pouco tempo e para sozinho");
         }
         finally { if (Directory.Exists(googleRoot)) Directory.Delete(googleRoot, true); }
+    }
+
+    // Mais de 200 serviços Auto: o Spooler em execução fica depois da posição 200 em ordem de nome e a prova precisa fechar.
+    private static void LargeList(Action<bool, string> check)
+    {
+        HealthSnapshot Read(DateTimeOffset time, bool spoolerRunning)
+        {
+            var services = Enumerable.Range(1, 230).Select(i => (object)new { Name = $"Executando{i:D3}", State = "Running" })
+                .Concat(Enumerable.Range(1, 5).Select(i => (object)new { Name = $"Atrasado{i}", State = "Stopped", DelayedAutoStart = true, ExitCode = 0, ServiceSpecificExitCode = 0, TriggerStart = false }))
+                .Append(spoolerRunning ? (object)new { Name = "Spooler", State = "Running" }
+                    : (object)new { Name = "Spooler", State = "Stopped", DelayedAutoStart = false, ExitCode = 0, ServiceSpecificExitCode = 0, TriggerStart = false })
+                .ToArray();
+            var snapshot = new HealthSnapshot { Time = time };
+            using var document = JsonDocument.Parse(JsonSerializer.Serialize(new { Services = services }));
+            WindowsHealthSampler.ReadServices(document.RootElement, snapshot);
+            WindowsHealthSampler.ApplyCollectionStatus(snapshot);
+            return snapshot;
+        }
+        var history = Enumerable.Range(0, 23).Select(i => Read(Now.AddSeconds(-30 * (22 - i)), spoolerRunning: i < 21)).ToArray();
+        var running = history[0].Services.FindIndex(service => service.Name == "Spooler");
+        var alert = Alerts(history);
+        check(running > 200 && history.All(h => h.Services.Count == 236 && h.Warnings.Count == 0)
+                && alert is [{ Id: "service-stopped:Spooler", ServiceStop: not null }],
+            "Com 236 serviços Auto, o Spooler em execução na posição " + running + " fica na leitura e a prova da parada fecha");
+    }
+
+    private static void Superseded(Action<bool, string> check)
+    {
+        var old = new HealthFinding { Id = $"service-stopped:{Google}:antigo", Time = Now.AddHours(-2), Source = "rules", Category = "service",
+            Problem = "Serviço automático interrompido", Recommendation = "Consulte eventos do serviço antes de propor reinício", Severity = "warning" };
+        check(HealthOccurrences.SupersededServiceStop(old, At(Now, Clean(Google)))
+                && !HealthOccurrences.SupersededServiceStop(old, At(Now, Clean(Google) with { ExitCode = 1067 }))
+                && !HealthOccurrences.SupersededServiceStop(old, At(Now, new ServiceHealth(Google, "Stopped", "Automatic")))
+                && !HealthOccurrences.SupersededServiceStop(old, At(Now, Running(Google)))
+                && !HealthOccurrences.SupersededServiceStop(old, At(Now))
+                && !HealthOccurrences.SupersededServiceStop(old, null),
+            "Ocorrência sem prova só é superada quando a leitura atual mostra parada normal, sem atraso e sem gatilho");
+        var proven = new HealthFinding { Id = "service-stopped:Spooler:novo", Source = "rules", ServiceStop = new(Now.AddMinutes(-20), Now.AddMinutes(-10)) };
+        check(!HealthOccurrences.SupersededServiceStop(proven, At(Now, Clean("Spooler")))
+                && !HealthOccurrences.SupersededServiceStop(new HealthFinding { Id = $"service-stopped:{Google}:x", Source = "model" }, At(Now, Clean(Google)))
+                && !HealthOccurrences.SupersededServiceStop(new HealthFinding { Id = $"disk-low:{Google}:x", Source = "rules" }, At(Now, Clean(Google))),
+            "Alerta com a prova da execução, achado de outra origem ou de outra regra não é superado");
+
+        var root = Path.Combine(Path.GetTempPath(), "nexo-service-transition-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var db = new OperationalStore(root);
+            var now = DateTimeOffset.UtcNow;
+            old.Time = now.AddHours(-2);
+            var crash = new HealthFinding { Id = "service-stopped:Spooler:antigo", Time = now.AddHours(-2), Source = "rules", Category = "service",
+                Problem = "Serviço automático interrompido", Evidence = "Spooler parado em 2 leituras", Recommendation = "Consulte eventos do serviço antes de propor reinício", Severity = "warning" };
+            db.SaveFindings([old]);
+            db.SaveSnapshot(At(now.AddSeconds(-30), Clean(Google), Clean("Spooler") with { ExitCode = 1067 }));
+            db.SaveSnapshot(At(now, Clean(Google), Clean("Spooler") with { ExitCode = 1067 }));
+            var onlyGoogle = HealthReportPresentation.FromStore(db);
+            check(!onlyGoogle.Contains("GoogleUpdater", StringComparison.Ordinal) && !onlyGoogle.Contains("Consulte eventos do serviço", StringComparison.Ordinal)
+                    && onlyGoogle.Contains("Nenhum achado sustentado", StringComparison.Ordinal),
+                "Ocorrência antiga do GoogleUpdater, hoje parado com saída normal, não chega ao modelo nem traz recomendação");
+            db.SaveFindings([crash]);
+            var withCrash = HealthReportPresentation.FromStore(db);
+            check(!withCrash.Contains("GoogleUpdater", StringComparison.Ordinal)
+                    && withCrash.Contains("persiste nas leituras atuais: Serviço automático interrompido. Evidência: Spooler parado em 2 leituras", StringComparison.Ordinal)
+                    && withCrash.Contains("Consulte eventos do serviço", StringComparison.Ordinal),
+                "Ocorrência antiga com código de saída diferente de 0 na leitura atual continua chegando ao modelo como antes");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
 
     private static void Report(Action<bool, string> check)

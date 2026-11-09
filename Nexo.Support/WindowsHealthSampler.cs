@@ -8,7 +8,14 @@ namespace Nexo.Support;
 
 public sealed class WindowsHealthSampler : IHealthSampler
 {
+    /// <summary>Serviços Auto fora de execução guardados por leitura: são os que levam início atrasado, códigos e gatilho.</summary>
     internal const int MaxServicesCollected = 200;
+    /// <summary>
+    /// Serviços Auto em execução guardados por leitura, só com nome e estado (#57). A regra de parada normal precisa
+    /// deles para provar a execução antes da parada; um Windows comum tem bem menos que isso (59 no PC do ensaio de
+    /// 08/11/2026), e o teto só protege o banco de uma lista anormal.
+    /// </summary>
+    internal const int MaxRunningServicesCollected = 1000;
     private readonly HealthSettings settings;
     private readonly ConnectivityProbe connectivityProbe;
 
@@ -144,14 +151,16 @@ public sealed class WindowsHealthSampler : IHealthSampler
                 OptionalCode(service, "ServiceSpecificExitCode")))
             .ToList();
 
-        snapshot.Services = automatic
-            .OrderBy(service => service.Status.Equals("Running", StringComparison.OrdinalIgnoreCase))
-            .ThenBy(service => service.Name, StringComparer.OrdinalIgnoreCase)
-            .Take(MaxServicesCollected)
-            .ToList();
+        // Os limites são separados: muitos serviços parados não podem tirar da leitura um serviço em execução (#57).
+        bool IsRunning(ServiceHealth service) => service.Status.Equals("Running", StringComparison.OrdinalIgnoreCase);
+        var notRunning = automatic.Where(service => !IsRunning(service)).OrderBy(service => service.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        var running = automatic.Where(IsRunning).OrderBy(service => service.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        snapshot.Services = [.. notRunning.Take(MaxServicesCollected), .. running.Take(MaxRunningServicesCollected)];
 
-        if (automatic.Count > snapshot.Services.Count)
-            snapshot.Warnings.Add($"Serviços automáticos: {snapshot.Services.Count} de {automatic.Count} coletados; os demais não foram avaliados.");
+        if (notRunning.Count > MaxServicesCollected)
+            snapshot.Warnings.Add($"Serviços automáticos fora de execução: {MaxServicesCollected} de {notRunning.Count} coletados; os demais não foram avaliados.");
+        if (running.Count > MaxRunningServicesCollected)
+            snapshot.Warnings.Add($"Serviços automáticos em execução: {MaxRunningServicesCollected} de {running.Count} coletados; os demais não foram avaliados.");
     }
 
     private static long? OptionalCode(JsonElement service, string name)

@@ -101,6 +101,20 @@ public static class HealthOccurrences
         }
     }
 
+    /// <summary>
+    /// Ocorrência de serviço parado sem a prova da execução (gravada antes da regra da #57, ou por código de saída) cujo
+    /// serviço, na leitura atual, está parado com saída normal, sem atraso e sem gatilho. Reavaliada pela regra atual,
+    /// ela não alertaria: sai do relatório do modelo e das ocorrências do painel, e o serviço aparece no aviso informativo.
+    /// Uma leitura atual com código diferente de 0, ou com campo não lido, mantém a ocorrência como antes.
+    /// </summary>
+    public static bool SupersededServiceStop(HealthFinding finding, HealthSnapshot? latest)
+    {
+        var id = BaseId(finding);
+        const string prefix = "service-stopped:";
+        return finding.Source == "rules" && finding.ServiceStop == null && latest != null && id.StartsWith(prefix, StringComparison.Ordinal)
+            && latest.Services.FirstOrDefault(service => service.Name == id[prefix.Length..]) is { } current && HealthRules.CleanStop(current);
+    }
+
     public static string CollectionNotice(HealthSnapshot? latest, HealthThresholds thresholds, DateTimeOffset now)
     {
         if (latest == null) return "Nenhuma coleta disponível. O estado atual das ocorrências é desconhecido.";
@@ -209,7 +223,8 @@ public static class HealthReportPresentation
         var since = DateTimeOffset.UtcNow.AddDays(-1);
         var latest = store.RecentSnapshots(since, 1).FirstOrDefault();
         if (latest == null) return "Nenhuma amostra de saúde foi coletada nas últimas 24 horas. O monitoramento funciona enquanto o Nexo está aberto. Nenhum problema ou reparo pode ser confirmado com esses dados.";
-        var known = store.FindingsSince(since);
+        // Parada normal sem prova de execução não chega ao modelo como problema atual, nem com recomendação (#57).
+        var known = store.FindingsSince(since).Where(finding => !HealthOccurrences.SupersededServiceStop(finding, latest)).ToList();
         var events = new EventBatch { Events = store.RecentEvents(100).Where(e => e.Time >= since).ToList(), Gaps = store.RecentEventGaps(10, since) };
         var report = DiagnosticEngine.BuildReport(latest, known, events, DateTimeOffset.UtcNow);
         var text = new StringBuilder();
