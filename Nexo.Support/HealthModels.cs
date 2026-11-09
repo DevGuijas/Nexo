@@ -65,12 +65,32 @@ public sealed class HealthFinding
     /// a execução estável observada antes da parada, que é a prova do alerta. Nos demais fica nulo e não é gravado.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ServiceStopEvidence? ServiceStop { get; set; }
+    // Gravada pelo monitor quando o 1º patamar do processo é comprovado ou descartado (#71).
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public MemoryPlateauEvidence? MemoryPlateau { get; set; }
 
     /// <summary>Cópia para exibição: o registro gravado não muda.</summary>
     public HealthFinding WithCause(string cause)
     {
         var copy = (HealthFinding)MemberwiseClone();
         copy.Cause = cause;
+        return copy;
+    }
+
+    public HealthFinding WithMemoryPlateau(MemoryPlateauEvidence plateau)
+    {
+        var copy = (HealthFinding)MemberwiseClone();
+        copy.MemoryPlateau = plateau;
+        return copy;
+    }
+
+    /// <summary>Cópia exibida de uma ocorrência de memória em patamar estável (#71): informativa, sem recomendar ação.</summary>
+    public HealthFinding AsStablePlateau()
+    {
+        var copy = (HealthFinding)MemberwiseClone();
+        copy.Problem = Id.StartsWith("process-memory-growing:", StringComparison.Ordinal)
+            ? "Processo mantém a memória num patamar estável, sem passar de 10% sobre o patamar de referência" : "Uso de memória ligado a processo em patamar estável";
+        copy.Impact = "Informativo: o processo usa bastante memória, sem passar de 10% sobre o patamar de referência";
+        copy.Recommendation = "Nenhuma ação recomendada; o Nexo volta a alertar se a memória do processo subir de novo";
         return copy;
     }
 }
@@ -83,6 +103,12 @@ public sealed record ProcessMemoryGrowth(string Name, long FromBytes, long ToByt
 
 /// <summary>Serviço visto em execução em todas as leituras desde RunningSince até a parada observada em StoppedAt (#57).</summary>
 public sealed record ServiceStopEvidence(DateTimeOffset RunningSince, DateTimeOffset StoppedAt);
+/// <summary>
+/// 1º patamar do processo depois do alerta (#71): PID e início, a média de referência e quando foi comprovada; ExceededAt marca a
+/// leitura que passou de 10% sobre ela. Sem referência, Unavailable diz por que o patamar não pode ser comprovado.
+/// </summary>
+public sealed record MemoryPlateauEvidence(int Pid, long StartTicks, long? ReferenceBytes, DateTimeOffset? ProvenAt,
+    DateTimeOffset? ExceededAt = null, long? ExceededBytes = null, string? Unavailable = null);
 
 public sealed class SystemEvent
 {

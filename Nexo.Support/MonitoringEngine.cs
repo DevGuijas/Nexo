@@ -19,6 +19,9 @@ public sealed class MonitoringEngine : IDisposable
     private Task? loop;
     public event Action<HealthSnapshot, IReadOnlyList<HealthFinding>>? Updated;
     public string? LastError { get; private set; }
+    // Gravação do patamar de memória (#71); trocada nos testes para simular falha do banco.
+    internal Action<OperationalStore, HealthSnapshot, HealthThresholds> PlateauRecorder { get; init; } = HealthOccurrences.RecordPlateaus;
+    internal const string PlateauFailure = "Falha ao gravar o patamar de memória dos processos; a leitura e os alertas continuam, e as ocorrências de memória seguem como persistentes até a próxima gravação.";
 
     public MonitoringEngine(IHealthSampler sampler, OperationalStore store, TimeSpan interval, HealthThresholds? thresholds = null)
     {
@@ -48,7 +51,12 @@ public sealed class MonitoringEngine : IDisposable
             // A memória de um processo oscila: uma janela abaixo do limiar não encerra a ocorrência.
             foreach (var expired in processAlerts.Where(alert => snapshot.Time - alert.Value >= thresholds.ProcessMemoryAlertCooldown).Select(alert => alert.Key).ToArray()) processAlerts.Remove(expired);
             foreach (var key in keys.Where(key => key.StartsWith("process-memory-", StringComparison.Ordinal))) processAlerts[key] = snapshot.Time;
-            LastError = null;
+            // Referência do 1º patamar de memória de cada processo apontado, gravada na ocorrência (#71). Uma falha aqui não
+            // interrompe a leitura: fica no aviso do monitor, com texto fixo, e a gravação é tentada de novo na próxima leitura.
+            string? plateauError = null;
+            try { PlateauRecorder(store, snapshot, thresholds); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { plateauError = PlateauFailure; }
+            LastError = plateauError;
             Updated?.Invoke(snapshot, fresh);
         }
         finally { gate.Release(); }
