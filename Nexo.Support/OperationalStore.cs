@@ -170,6 +170,46 @@ public sealed class OperationalStore : IDisposable
     }
 
     public List<HealthSnapshot> RecentSnapshots(DateTimeOffset since, int limit) => Read<HealthSnapshot>("snapshots", limit, since);
+
+    /// <summary>
+    /// Working set de um processo (PID e início) em cada leitura desde since, em ordem cronológica (#71). Lê só esse campo
+    /// do payload, sem desserializar as leituras inteiras. Leitura sem lista de processos ou sem o processo vem com Bytes nulo.
+    /// </summary>
+    public List<HealthOccurrences.ProcessReading> ProcessReadings(int pid, long startTicks, DateTimeOffset since)
+    {
+        lock (gate)
+        {
+            try
+            {
+                using var connection = Open();
+                using var command = connection.CreateCommand();
+                command.CommandText = """
+                    SELECT s.time, (SELECT json_group_array(json_array(json_extract(p.value, '$.WorkingSetBytes'), json_extract(p.value, '$.StartTime')))
+                        FROM json_each(s.payload, '$.Processes') p WHERE json_extract(p.value, '$.Id') = $pid)
+                    FROM snapshots s WHERE s.time >= $since ORDER BY s.time
+                    """;
+                command.Parameters.AddWithValue("$pid", pid);
+                command.Parameters.AddWithValue("$since", since.ToUniversalTime().ToString("O"));
+                using var reader = command.ExecuteReader();
+                var result = new List<HealthOccurrences.ProcessReading>();
+                while (reader.Read())
+                {
+                    var time = DateTimeOffset.Parse(reader.GetString(0), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind);
+                    long? bytes = null;
+                    using var entries = JsonDocument.Parse(reader.IsDBNull(1) ? "[]" : reader.GetString(1));
+                    foreach (var entry in entries.RootElement.EnumerateArray())
+                        if (entry[0].ValueKind == JsonValueKind.Number && entry[1].ValueKind == JsonValueKind.String
+                            && DateTimeOffset.TryParse(entry[1].GetString(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var start)
+                            && start.UtcTicks == startTicks)
+                            bytes = entry[0].GetInt64();
+                    result.Add(new(time, bytes));
+                }
+                return result;
+            }
+            catch (Exception ex) when (ex is SqliteException or JsonException or FormatException or InvalidOperationException)
+            { throw new OperationalStoreException("Falha ao consultar o histórico operacional.", ex); }
+        }
+    }
     public List<HealthFinding> RecentFindings(int limit) => Read<HealthFinding>("findings", limit);
     public List<HealthFinding> FindingsSince(DateTimeOffset since) => Read<HealthFinding>("findings", null, since);
     public List<SystemEvent> RecentEvents(int limit) => Read<SystemEvent>("events", limit);

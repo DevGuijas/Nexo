@@ -66,6 +66,17 @@ public sealed class HealthFinding
         copy.Cause = cause;
         return copy;
     }
+
+    /// <summary>Cópia exibida de uma ocorrência de memória em patamar estável (#71): informativa, sem recomendar ação.</summary>
+    public HealthFinding AsStablePlateau()
+    {
+        var copy = (HealthFinding)MemberwiseClone();
+        copy.Problem = Id.StartsWith("process-memory-growing:", StringComparison.Ordinal)
+            ? "Processo mantém a memória num patamar estável, sem crescer" : "Uso de memória ligado a processo em patamar estável";
+        copy.Impact = "Informativo: o processo usa bastante memória, mas parou de crescer";
+        copy.Recommendation = "Nenhuma ação recomendada; o Nexo volta a alertar se a memória do processo subir de novo";
+        return copy;
+    }
 }
 
 /// <summary>
