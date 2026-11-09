@@ -283,6 +283,9 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         // Componentes cuja alteração a trava de tópico já barrou neste turno. O pedido não muda dentro do turno,
         // então uma segunda tentativa do mesmo componente seria barrada de novo: o turno para em vez de repetir (#63).
         var topicBlocked = new HashSet<string>();
+        // Consultas que o próprio Nexo já fez neste turno antes de reavaliar uma alteração (#70): uma por consulta, não por alvo,
+        // porque get_printers já mostra todas as filas e diagnose_device todos os dispositivos do tópico.
+        var autoObserved = new HashSet<string>();
         var dnsServersBlocked = false;
         for (var step = 0; step < 16; step++)
         {
@@ -419,9 +422,18 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     if (functionalCheck != null && ToolCatalog.IsMutation(name)) throw new InvalidOperationException("O ajuste anterior foi concluído. Aguarde o teste funcional do usuário antes de propor outra alteração.");
                     if (networkFailure != null) throw new InvalidOperationException("Etapa interrompida após falha de alteração da rede. Verifique o resultado e a restauração antes de novas ações.");
                     if (readOnly && !ToolCatalog.IsReadOnly(name)) throw new InvalidOperationException("Este pedido permite somente leitura. Não proponha mudanças; conclua com as consultas solicitadas.");
+                    // #70 (validação no PC): no turno da resposta, o modelo pediu a alteração do alvo que o usuário acabou de nomear
+                    // sem consultar de novo, e a trava pedia o nome que o usuário já tinha dado. Quando o alvo ainda não apareceu em
+                    // nenhuma consulta deste turno e o componente é o do incidente, o Nexo faz ele mesmo a consulta somente-leitura e
+                    // reavalia a mesma chamada por todas as travas abaixo; a alteração continua dependendo da aprovação do usuário.
+                    // Ofertas de driver ficam fora: a busca é lenta e depende da rede.
+                    if (ToolCatalog.IsMutation(name) && !evidence.TargetObserved(name, arguments) && toolCount < 24
+                        && AutoObservation(name) is { } automatic && autoObserved.Add(automatic.Name + ":" + automatic.Arguments.GetRawText()))
+                        await ControllerCall("Consulta antes da alteração", automatic.Name, automatic.Arguments);
                     if (ToolCatalog.IsMutation(name) && !MutationMatchesIncident(name, arguments))
                     {
                         var missing = MutationTopic(name, arguments) is { } needed && !incidentTopics.Contains(needed) ? needed : null;
+                        if (missing == null) evidence.NoteTargetBlock(name, arguments, userRequest);
                         block = (ControlBlock.Topic, missing);
                         awaitingEvidence = missing == null && !evidence.TargetObserved(name, arguments) && unobservedCalls.Add(signature);
                         // A mesma chamada barrada de novo, ou outra alteração do componente que o pedido não cita, encerra o turno:
@@ -640,6 +652,15 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             var said = string.Join("\n", conversation.Entries.Where(e => e.Role == "user").Select(e => e.Text));
             return servers.EnumerateArray().Any(server => server.ValueKind != JsonValueKind.String || server.GetString() is not { Length: > 0 } address
                 || !System.Text.RegularExpressions.Regex.IsMatch(said, @"(?<![\w:.])" + System.Text.RegularExpressions.Regex.Escape(address) + @"(?![\w:]|\.\d)"));
+        }
+        // A consulta que observa o alvo de uma alteração de impressora ou dispositivo, quando o componente está no incidente.
+        (string Name, JsonElement Arguments)? AutoObservation(string name)
+        {
+            if (name == "clear_print_queue")
+                return incidentTopics.Contains("printer") ? InitialObservation("printer") : null;
+            if (name is not ("enable_camera" or "enable_device" or "restart_device")) return null;
+            var topics = incidentTopics.Where(topic => name == "enable_camera" ? topic == "camera" : topic is "camera" or "audio" or "bluetooth").ToArray();
+            return topics.Length == 1 ? InitialObservation(topics[0]) : null;
         }
         bool MutationMatchesIncident(string name, JsonElement args)
         {

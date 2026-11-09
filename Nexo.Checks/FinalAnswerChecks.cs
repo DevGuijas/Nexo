@@ -598,11 +598,23 @@ internal static class FinalAnswerChecks
             [Call("get_printers", new { }), Call("clear_print_queue", new { printer_name = "HP LaserJet Recepção" }), Call("clear_print_queue", new { printer_name = "HP LaserJet Recepção" }),
                 Call("get_printers", new { }), promise, promise, promise, promise]);
         assert(wrong.Calls.SequenceEqual(["get_printers"]), "2º turno: alteração barrada por alvo errado e repetida encerra o turno sem chegar ao executor (" + string.Join(",", wrong.Calls) + ")");
-        // Sem evidência, só a primeira tentativa é perdoada: a segunda conta como falha, e a terceira encerra o turno pela trava.
+        // #70 (validação no PC): pedida antes da consulta, a alteração faz o próprio Nexo consultar as impressoras e reavaliar a
+        // mesma chamada; a fila escolhida é limpa uma vez só, sem depender de o modelo consultar.
         var thrice = await TwoTurns("a impressora não imprime", "Canon Sala", Printers, [],
             [Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("clear_print_queue", new { printer_name = "Canon Sala" }),
                 Call("get_printers", new { }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), promise, promise, promise, promise]);
-        assert(thrice.Calls.Count == 0, "2º turno: a mesma alteração pedida três vezes sem consulta encerra o turno (" + string.Join(",", thrice.Calls) + ")");
+        assert(thrice.Calls.SequenceEqual(["get_printers", "clear_print_queue"]), "2º turno: a alteração pedida sem consulta leva à consulta automática e à fila escolhida, uma vez (" + string.Join(",", thrice.Calls) + ")");
+        // Sem a consulta disponível (Spooler parado), só a primeira tentativa é perdoada: a segunda conta como falha, e a terceira
+        // encerra o turno pela trava. A consulta automática acontece uma vez só.
+        // A consulta do 1º turno mostra as duas impressoras (e a pergunta); no 2º, o Spooler parou e a consulta falha.
+        var printerQueries = 0;
+        string PrintersDown(string name, JsonElement args) => name == "get_printers"
+            ? ++printerQueries == 1 ? Printers(name, args) : """{"success":false,"error":"O serviço de impressão não está em execução."}"""
+            : throw new Exception("Alteração chegou ao executor sem consulta: " + name);
+        var down = await TwoTurns("a impressora não imprime", "Canon Sala", PrintersDown, [],
+            [Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("clear_print_queue", new { printer_name = "Canon Sala" }),
+                Call("clear_print_queue", new { printer_name = "Canon Sala" }), promise, promise, promise, promise]);
+        assert(down.Calls.SequenceEqual(["get_printers"]), "2º turno: sem consulta possível, a mesma alteração pedida três vezes encerra o turno, com uma consulta automática só (" + string.Join(",", down.Calls) + ")");
     }
 
     // #73: toda resposta final do turno termina com a linha de fatos, montada só a partir do que o executor e as travas
@@ -854,8 +866,11 @@ internal static class FinalAnswerChecks
         };
         var mic = New();
         await Turn(mic, "meu microfone parou de funcionar", Mic);
-        var enabled = await Turn(mic, "Microfone Fifine USB", Mic, Call("enable_device", new { device_id = fifineId }), Call("diagnose_device", new { topic = "audio" }), Call("enable_device", new { device_id = fifineId }));
-        assert(Closes(enabled.Answer, facts + "habilitação do dispositivo “Microfone Fifine USB”."), "#73: alteração barrada pelo ID e concluída pelo nome aparece uma vez, como feita (" + enabled.Answer + ")");
+        // Desde a #70 (validação no PC), pedida antes da consulta, a alteração faz o Nexo consultar e é reavaliada na mesma chamada:
+        // não há mais tentativa barrada pelo ID. A identidade pela ferramenta e pelo alvo continua coberta pela oferta abaixo.
+        var enabled = await Turn(mic, "Microfone Fifine USB", Mic, Call("enable_device", new { device_id = fifineId }));
+        assert(Closes(enabled.Answer, facts + "habilitação do dispositivo “Microfone Fifine USB”.") && enabled.Tools.Calls.SequenceEqual(["diagnose_device", "enable_device"]),
+            "#73/#70: alteração pedida pelo ID antes da consulta aparece uma vez, como feita, depois da consulta automática (" + enabled.Answer + ")");
         // A oferta de driver pedida antes do scan (GUID) e instalada depois (título).
         const string gpuId = "PCI\\VEN_1234&DEV_5678";
         string Gpu(string name, JsonElement args) => name switch
@@ -874,7 +889,8 @@ internal static class FinalAnswerChecks
             Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }), Call("install_driver_update", new { update_id = "00000000-0000-0000-0000-0000000000d2" }));
         assert(Closes(installed.Answer, facts + "instalação do driver “Driver gráfico Pro”."), "#73: oferta pedida pelo GUID antes do scan e instalada pelo título aparece uma vez (" + installed.Answer + ")");
 
-        // Caso normal: barrada antes da consulta e concluída depois com a mesma chamada (perdão da #72): o texto do modelo fica.
+        // Caso normal: pedida antes da consulta, a alteração leva à consulta automática (#70) e é concluída na mesma chamada: o
+        // texto do modelo fica, e a linha vale pelo estado final.
         string TwoQueues(string name, JsonElement args) => name switch
         {
             "get_printers" => WindowsTools.Ok("""[{"Name":"Canon Sala","Jobs":[{"ID":1}]},{"Name":"HP Recepção","Jobs":[{"ID":2}]}]"""),
@@ -884,9 +900,9 @@ internal static class FinalAnswerChecks
         const string empty = "A fila da Canon Sala já estava vazia; nada precisou ser removido.";
         var retry = New();
         await Turn(retry, "a impressora não imprime", TwoQueues);
-        var retried = await Turn(retry, "Canon Sala", TwoQueues, Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("get_printers", new { }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), Finish(empty));
+        var retried = await Turn(retry, "Canon Sala", TwoQueues, Call("clear_print_queue", new { printer_name = "Canon Sala" }), Finish(empty));
         assert(retried.Tools.Calls.SequenceEqual(["get_printers", "clear_print_queue"]) && retried.Answer == empty + "\n\n" + none + " Concluídas sem mudança: limpeza da fila de “Canon Sala”.",
-            "#73: alteração barrada por falta de consulta e concluída depois vale pelo estado final (" + retried.Answer + ")");
+            "#73/#70: alteração pedida antes da consulta e concluída depois da consulta automática vale pelo estado final (" + retried.Answer + ")");
 
         // Falsificação: o modelo escreve uma linha que imita a de fatos. Ela sai, e a verdadeira fica no fim, uma vez só.
         foreach (var forged in new[]

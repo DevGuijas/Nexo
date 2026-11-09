@@ -282,8 +282,24 @@ internal static class TargetChoiceChecks
         var single = Printers(oneWord);
         assert(Chooses(single, oneWord, "Brother", "é a Brother.") && new[] { "Brother não", "Brother, a outra", "Brother está ok", "Brother da sala" }.All(reply => PrintersAsk(single, oneWord, reply)),
             "Impressora: nome de uma palavra só escolhe sozinho; com outras palavras depois, pergunta de novo");
-        string[] shortName = ["Canon", "HP LaserJet Recepção"];
-        assert(PrintersAsk(Printers(shortName), shortName, "Canon"), "Impressora: nome com menos de 6 caracteres não escolhe, como antes");
+        // #70, validação no PC: "Fax" nunca era escolhida pelo mínimo de 6 caracteres. A regra é a resposta inteira ser o nome:
+        // nomes curtos escolhem; com qualquer outra palavra, perguntam de novo.
+        string[] pc = ["Fax", "Microsoft Print to PDF", "Microsoft XPS Document Writer", "OneNote"];
+        var virtuals = Printers(pc);
+        assert(Chooses(virtuals, pc, "Fax", "Fax") && Chooses(virtuals, pc, "Fax", "é a Fax.") && Chooses(virtuals, pc, "Fax", "fax")
+            && new[] { "não é a Fax", "Fax não", "a Fax tá ok", "Fax e OneNote", "Fa", "Faxx" }.All(reply => PrintersAsk(virtuals, pc, reply)),
+            "Impressora: nome curto (“Fax”) escolhe sozinho; com outra palavra, pergunta de novo");
+        foreach (var tiny in new[] { new[] { "HP", "Canon Sala" }, new[] { "X", "Canon Sala" }, new[] { "AB", "Canon Sala" }, new[] { "HP1", "Canon Sala" } })
+            assert(Chooses(Printers(tiny), tiny, tiny[0], tiny[0]) && Chooses(Printers(tiny), tiny, tiny[0], "foi na " + tiny[0]) && PrintersAsk(Printers(tiny), tiny, tiny[0] + " não"),
+                "Impressora: nome de 1 a 3 caracteres escolhe só como resposta inteira: " + tiny[0]);
+        // Um nome vazio ou igual a um prefixo da resposta nunca é escolhido: "sim" ou "é a" sozinhos são confirmação, não nome.
+        foreach (var (reserved, reply) in new[] { ("Sim", "sim"), ("Sim", "Sim."), ("É a", "é a"), ("A", "a"), ("No", "no"), ("Foi", "foi"), ("Sim,", "sim,"), ("E", "é"), ("Não", "não"), ("Não", "Não."), ("OK", "ok"), ("Ok", "OK"), ("Nenhuma", "nenhuma"), ("Todas", "todas"), ("Qualquer uma", "qualquer uma") })
+        {
+            string[] names = [reserved, "Canon Sala"];
+            assert(PrintersAsk(Printers(names), names, reply), "Impressora: nome igual a um prefixo da resposta (“" + reserved + "”) não é escolhido por “" + reply + "”");
+        }
+        assert(InvestigationEvidence.NamedCandidate("é a", [("1", "Canon Sala"), ("2", "")]) is null && InvestigationEvidence.NamedCandidate("", [("1", "")]) is null,
+            "Impressora: prefixo sozinho ou nome vazio não casam com nada");
         assert(PrintersAsk(printers, Two, "não sei qual, talvez Canon Sala") && PrintersAsk(printers, Two, "Canon Sala, não tenho certeza"),
             "Impressora: incerteza continua perguntando");
     }
