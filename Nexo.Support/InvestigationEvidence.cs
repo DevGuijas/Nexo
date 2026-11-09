@@ -64,12 +64,21 @@ public sealed class InvestigationEvidence
     internal static string? NamedCandidate(string request, IEnumerable<(string Key, string Name)> candidates)
     {
         if (ReplyForms(request) is not { Count: > 0 } replies) return null;
+        // Sem mínimo de tamanho (validação no PC, #70: "Fax" nunca era escolhida): a regra é a resposta inteira ser o nome, e o
+        // comprimento não protege nada. O que protege é que um nome vazio ou igual a um prefixo da resposta ("sim", "é a") nunca
+        // é escolhido, porque aí a resposta curta de confirmação casaria com ele.
+        static bool Usable(string? form) => form is { Length: > 0 } && !ReservedForms.Contains(form);
         var chosen = candidates.Select(candidate => (candidate.Key, Full: NameForm(candidate.Name), Cut: CutNameForm(candidate.Name)))
-            .Where(candidate => candidate.Full.Length >= 6 && (replies.Contains(candidate.Full) || candidate.Cut is { Length: >= 6 } cut && replies.Contains(cut))).ToArray();
+            .Where(candidate => Usable(candidate.Full) && (replies.Contains(candidate.Full) || Usable(candidate.Cut) && replies.Contains(candidate.Cut!))).ToArray();
         return chosen.Length == 1 ? chosen[0].Key : null;
     }
     private static readonly string[] ReplyPrefixes = (from yes in new[] { "", "sim ", "sim, " } from verb in new[] { "", "e ", "foi " }
         from article in new[] { "", "a ", "o ", "na ", "no " } select yes + verb + article).Distinct().ToArray();
+    // Os prefixos sozinhos, como a resposta normalizada os mostra ("sim", "sim,", "e a", "foi no"…), e as respostas que recusam
+    // ou não escolhem ("não", "ok", "nenhuma", "qualquer uma"…): nunca são um nome, nem de uma impressora chamada assim.
+    private static readonly HashSet<string> ReservedForms = ReplyPrefixes.Select(prefix => TrimReplyEnd(prefix.Trim()))
+        .Concat(["nao", "ok", "nenhuma", "nenhum", "todas", "todos", "qualquer", "qualquer uma", "qualquer um"])
+        .SelectMany(form => new[] { form, form.TrimEnd(',') }).Where(form => form.Length > 0).ToHashSet(StringComparer.Ordinal);
     // As formas possíveis do nome na resposta, já sem o prefixo, as aspas em volta e o ponto final. Caractere de controle ou
     // de formatação (largura zero, direção de texto) no meio da resposta não forma nome: a resposta não conta como escolha.
     private static HashSet<string>? ReplyForms(string request)
@@ -107,7 +116,9 @@ public sealed class InvestigationEvidence
         {
             var printerCandidates = PrinterCandidates();
             if (printerCandidates.Length <= 1 || printerCandidates.Any(name => PrinterTargetUnambiguous(name, request))) return null;
-            return "Encontrei mais de uma impressora com indício de falha: " + string.Join("; ", printerCandidates.Order(StringComparer.CurrentCultureIgnoreCase).Select(name => Quoted(name))) + ". Qual delas recebeu o documento que falhou? " + ReplyWithName;
+            // "Com indício de falha" só quando as candidatas têm fila com trabalhos ou estado de erro; sem nenhuma, são todas (#70).
+            var flagged = observedPrinters.Values.Any(relevant => relevant);
+            return "Encontrei mais de uma impressora" + (flagged ? " com indício de falha" : "") + ": " + string.Join("; ", printerCandidates.Order(StringComparer.CurrentCultureIgnoreCase).Select(name => Quoted(name))) + ". Qual delas recebeu o documento que falhou? " + ReplyWithName;
         }
         var candidates = observedDevices.Where(device => device.Value.Topic == topic && device.Value.Code == 22).ToArray();
         if (candidates.Length <= 1 || candidates.Any(device => DeviceTargetUnambiguous(device.Key, request, true))) return null;
@@ -136,6 +147,41 @@ public sealed class InvestigationEvidence
         return UserNamedExactlyOneTarget(request, candidates.Select(candidate => (candidate, observedUpdates[candidate].Title)), id, StringComparer.Ordinal);
     }
     private string[] ambiguousUpdateTitles = [];
+    // Por que a trava barrou uma alteração de impressora ou dispositivo cujo componente o pedido cita (#70, validação no PC).
+    // Sem isso, a explicação pedia "responda só com o nome" mesmo quando o usuário já tinha respondido só com o nome.
+    private readonly Dictionary<string, string> targetBlockDetails = [];
+    public void NoteTargetBlock(string name, JsonElement args, string request)
+    {
+        string? Argument(string key) => args.ValueKind == JsonValueKind.Object && args.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        string Listed(IEnumerable<string> names) => string.Join("; ", names.Order(StringComparer.CurrentCultureIgnoreCase).Take(MaxListed).Select(item => Quoted(item)));
+        string? detail = null;
+        if (name == "clear_print_queue" && Argument("printer_name") is { } printer)
+        {
+            var named = NamedCandidate(request, observedPrinters.Keys.Select(key => (key, key)));
+            if (!observedPrinters.ContainsKey(printer))
+                detail = Quoted(printer) + " não aparece na consulta de impressoras deste turno" + (observedPrinters.Count > 0 ? " (a consulta mostrou " + Listed(observedPrinters.Keys) + ")" : "");
+            else if (named != null && !named.Equals(printer, StringComparison.OrdinalIgnoreCase))
+                detail = "você indicou " + Quoted(named) + ", mas a alteração pedida era para " + Quoted(printer);
+            else if (named != null)
+                detail = "a consulta deste turno não confirma " + Quoted(printer) + " como a impressora com a falha: as filas com indício de falha são " + Listed(PrinterCandidates());
+        }
+        else if (name is "enable_camera" or "enable_device" or "restart_device" && Argument("device_id") is { } id)
+        {
+            if (!observedDevices.TryGetValue(id, out var target))
+                detail = "o dispositivo indicado não aparece na consulta de dispositivos deste turno";
+            else
+            {
+                var named = NamedCandidate(request, observedDevices.Where(device => device.Value.Topic == target.Topic).Select(device => (device.Key, device.Value.Name)));
+                if (named != null && named != id)
+                    detail = "você indicou " + Quoted(observedDevices[named].Name) + ", mas a alteração pedida era para " + Quoted(target.Name);
+                else if (named != null && name != "restart_device" && target.Code != 22)
+                    detail = Quoted(target.Name) + " não está desabilitado nesta consulta, então não há o que habilitar";
+                else if (named != null)
+                    detail = "o nome " + Quoted(target.Name) + " não identifica um único dispositivo nesta consulta";
+            }
+        }
+        if (detail != null) targetBlockDetails[name] = detail; else targetBlockDetails.Remove(name);
+    }
     // Se o alvo de uma alteração já apareceu numa consulta deste turno. Sem isso, a trava barra por falta de evidência, e não
     // por alvo errado: o controlador não conta essa primeira tentativa como falha repetida.
     public bool TargetObserved(string name, JsonElement args)
@@ -336,7 +382,9 @@ public sealed class InvestigationEvidence
         ControlBlock.UninformedDnsServers => "O Nexo não executou " + Describe(block.Name) + " porque os servidores DNS escolhidos pela IA não foram informados por você, e o Nexo não usa endereços de DNS inventados. Se o computador obtinha o DNS automaticamente, a correção indicada é voltar ao DNS automático, que continua dependendo da sua aprovação; para usar outro DNS, diga quais servidores a sua rede usa.",
         _ => block.Topic is { } topic
             ? "O Nexo não executou " + Describe(block.Name) + " porque o seu pedido não cita " + Component(topic) + ", a parte do Windows que essa alteração muda. Essa trava evita mexer em algo diferente do que você relatou. Se o problema for com " + Component(topic) + ", diga isso com suas palavras; a alteração continua dependendo da sua aprovação."
-            : "O Nexo não executou " + Describe(block.Name) + " porque o alvo não foi identificado sem ambiguidade nas consultas deste turno. Diga qual dispositivo ou impressora apresenta a falha respondendo só com o nome dele, como aparece no cartão da consulta."
+            : targetBlockDetails.TryGetValue(block.Name, out var detail)
+                ? "O Nexo não executou " + Describe(block.Name) + " porque " + detail + ". Nenhuma alteração foi feita nessa etapa; se o problema continuar, diga o que acontece para investigarmos a próxima hipótese."
+                : "O Nexo não executou " + Describe(block.Name) + " porque o alvo não foi identificado sem ambiguidade nas consultas deste turno. Diga qual dispositivo ou impressora apresenta a falha respondendo só com o nome dele, como aparece no cartão da consulta."
     };
 
     // Ofertas com o mesmo nome (depois de ignorar caixa, acento e pontuação final) não se distinguem pela resposta: a pergunta
