@@ -777,6 +777,9 @@ public static class ToolCatalog
     public static bool IsObservationTool(string name) => name is "finish_support" or "ask_user" or "get_network" or "diagnose_device" or "get_hardware_inventory" or "wait_for_reconnect" or "test_connection" or "probe_network_interfaces";
     public static bool IsMutation(string name) => !IsReadOnly(name) && name is not ("wait_for_reconnect" or "prepare_restart");
     public static bool IsReadOnly(string name) => name is "finish_support" or "ask_user" or "get_network" or "test_connection" or "diagnose_device" or "get_hardware_inventory" or "get_printers" or "get_services" or "get_recent_errors" or "get_processes" or "get_health_report" or "get_driver_store" or "scan_driver_updates" or "find_official_nvidia_driver" or "get_boot_status" or "probe_network_interfaces";
+    private static readonly HashSet<string> knownNames = Definitions.Select(d => JsonSerializer.SerializeToElement(d).GetProperty("function").GetProperty("name").GetString()!).ToHashSet(StringComparer.Ordinal);
+    // Se o nome é de uma ferramenta do Nexo, em qualquer escopo (#84).
+    public static bool IsKnown(string name) => knownNames.Contains(name);
     public static object[] ForScope(bool readOnly, bool allowFlushDns = true, bool allowWatch = true, bool allowMutations = true) => Definitions.Where(d => { var name = JsonSerializer.SerializeToElement(d).GetProperty("function").GetProperty("name").GetString()!; return (!readOnly || IsReadOnly(name)) && (allowFlushDns || name != "flush_dns") && (allowWatch || name != "wait_for_reconnect") && (allowMutations || !IsMutation(name)); }).ToArray();
     private static object Str(string description) => new { type = "string", description };
     private static object Int(string description) => new { type = "integer", description };

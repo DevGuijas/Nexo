@@ -47,6 +47,9 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     internal Func<string, CancellationToken, Task<string>> NetworkReader { get; init; } = (script, token) => SupportService.Powershell(script, token);
     internal Func<NetworkRequest, Func<ChangeRequest, Task<bool>>, CancellationToken, Task<string>>? NetworkApplier { get; init; }
     internal Func<string, Process> ElevatedStarter { get; init; } = StartElevated;
+    // Leitura das impressoras e do diagnóstico de dispositivos; os testes trocam pelo resultado do PowerShell (#84).
+    internal Func<string, CancellationToken, Task<string>> PrinterReader { get; init; } = (script, token) => SupportService.Powershell(script, token);
+    internal Func<string, CancellationToken, Task<string>> DeviceReader { get; init; } = (script, token) => SupportService.Powershell(script, token, 75);
     private static readonly IReadOnlyDictionary<string, JsonElement> toolSchemas = ToolCatalog.ForScope(false)
         .Select(tool => JsonSerializer.SerializeToElement(tool))
         .ToDictionary(tool => tool.GetProperty("function").GetProperty("name").GetString()!, tool => tool.GetProperty("function").GetProperty("parameters").Clone(), StringComparer.Ordinal);
@@ -101,6 +104,56 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         _ => throw new InvalidOperationException("Categoria de hardware não permitida.")
     };
     private static string HardwareTopic(string category) => category is "camera" or "audio" or "bluetooth" or "printer" or "network" ? category : "hardware";
+
+    // A consulta de impressoras confere antes o estado do Spooler (#84). Parado ou em outro estado que não Running, o script
+    // devolve só esse estado, num objeto; em execução, a lista de sempre, num array.
+    internal const string PrintersScript = "$spooler=Get-Service -Name Spooler -ErrorAction Stop; if([string]$spooler.Status -ne 'Running'){ ConvertTo-Json -Compress -InputObject ([pscustomobject]@{Spooler=[string]$spooler.Status;StartType=[string]$spooler.StartType}) } else { ConvertTo-Json -Depth 5 -Compress -InputObject @(Get-Printer | ForEach-Object { $p=$_; [pscustomobject]@{Name=$p.Name;Status=[string]$p.PrinterStatus;Driver=$p.DriverName;Port=$p.PortName;Jobs=@(Get-PrintJob -PrinterName $p.Name -ErrorAction SilentlyContinue | Select-Object ID,JobStatus)} }) }";
+
+    // O estado do Spooler quando o script confirmou que ele não está em execução; null para a lista de impressoras.
+    // Um objeto sem o estado, ou dizendo Running, é formato inesperado: a consulta falha como antes, sem diagnóstico inventado.
+    internal static (string Status, string StartType)? SpoolerNotRunning(string output)
+    {
+        using var document = JsonDocument.Parse(output);
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        if (!root.TryGetProperty("Spooler", out var status) || status.ValueKind != JsonValueKind.String || status.GetString() is not { Length: > 0 } state
+            || string.Equals(state, "Running", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("A consulta de impressoras retornou um formato inesperado.");
+        var start = root.TryGetProperty("StartType", out var type) && type.ValueKind == JsonValueKind.String ? type.GetString() ?? "" : "";
+        return (state, start);
+    }
+
+    internal static string SpoolerStoppedResult(string status, string startType) => Ok(new
+    {
+        SpoolerRunning = false, SpoolerStatus = status, SpoolerStartType = startType, Printers = Array.Empty<object>(),
+        note = (string.Equals(status, "Stopped", StringComparison.OrdinalIgnoreCase)
+            ? "O serviço de impressão (Spooler) está parado."
+            : "O serviço de impressão (Spooler) não está em execução (estado " + status + ").")
+            + " Sem ele o Windows não lista impressoras nem filas e nada imprime; este é o achado da consulta, não uma falha dela."
+            + (string.Equals(startType, "Disabled", StringComparison.OrdinalIgnoreCase)
+                ? " O serviço está desabilitado: verifique a política da organização antes de mudar o modo de inicialização."
+                : " Reiniciar o Spooler (restart_service) depende da aprovação do usuário.")
+    });
+
+    // Corte por caractere visível (text element), não por unidade UTF-16: não parte par substituto, emoji nem acento combinado.
+    internal static string Limited(string text, int limit)
+    {
+        var info = new System.Globalization.StringInfo(text);
+        return info.LengthInTextElements > limit ? info.SubstringByTextElements(0, limit) : text;
+    }
+
+    // Texto da janela de aprovação de enable_device/restart_device (#84): o driver aparece quando a consulta do turno trouxe
+    // o INF, a versão ou o fornecedor desse ID. Tudo vem da observação do executor, nada dos argumentos do modelo.
+    internal static string DeviceChangeDetails(string action, Device device)
+    {
+        // O nome do dispositivo também vem do Windows (do descritor USB, por exemplo): sem quebra de linha, não imita a linha do driver.
+        static string Part(string value, int limit = 80) => Limited(InvestigationEvidence.Clean(value).Trim(), limit);
+        var parts = new[] { Part(device.InfName), Part(device.DriverVersion) is { Length: > 0 } version ? "versão " + version : "", Part(device.DriverProvider) }
+            .Where(part => part.Length > 0).ToArray();
+        return (action == "restart_device" ? "Reiniciar " : "Habilitar ") + Part(device.Name, 160) + "."
+            + (parts.Length > 0 ? "\nDriver: " + string.Join(" · ", parts) + "." : "")
+            + "\nO dispositivo poderá ficar temporariamente indisponível.";
+    }
 
     // The schema sent to Ollama is advisory. Enforce it again at the executor boundary.
     // A recusa volta ao modelo como resultado da ferramenta: ela diz o que é aceito, para que a próxima chamada seja corrigida
@@ -343,7 +396,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 observedDevicesAt = null;
                 if (topic == "system") return Ok((await support.Diagnose(actor, topic, progress, token)).Summary);
                 var classes = DeviceClasses(topic);
-                var diagnosis = DriverStoreInventory.ParseDeviceDiagnosis(await SupportService.Powershell(DriverStoreInventory.DeviceDiagnosisScript(classes), token, 75));
+                var diagnosis = DriverStoreInventory.ParseDeviceDiagnosis(await DeviceReader(DriverStoreInventory.DeviceDiagnosisScript(classes), token));
                 var devices = diagnosis.Devices;
                 foreach (var device in devices.Where(d => !string.IsNullOrWhiteSpace(d.Id))) observedDevices[device.Id] = (topic, device);
                 var extra = topic == "camera" ? await SupportService.Powershell("Get-ItemProperty -LiteralPath 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -ErrorAction SilentlyContinue | Select-Object Value | ConvertTo-Json -Compress", token) : "";
@@ -370,7 +423,13 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             case "get_printers":
                 observedPrinters.Clear(); observedPrinterDetails.Clear();
                 observedPrintersAt = null;
-                var printers = await SupportService.Powershell("ConvertTo-Json -Depth 5 -Compress -InputObject @(Get-Printer | ForEach-Object { $p=$_; [pscustomobject]@{Name=$p.Name;Status=[string]$p.PrinterStatus;Driver=$p.DriverName;Port=$p.PortName;Jobs=@(Get-PrintJob -PrinterName $p.Name -ErrorAction SilentlyContinue | Select-Object ID,JobStatus)} })", token);
+                var printers = await PrinterReader(PrintersScript, token);
+                if (SpoolerNotRunning(printers) is { } spooler)
+                {
+                    // Sem o Spooler o Windows não lista impressoras: o estado do serviço é o resultado da consulta (#84).
+                    observedServiceDetails["Spooler"] = JsonSerializer.SerializeToElement(new { Name = "Spooler", spooler.Status, spooler.StartType });
+                    return SpoolerStoppedResult(spooler.Status, spooler.StartType);
+                }
                 using (var printerDoc = JsonDocument.Parse(printers)) foreach (var entry in printerDoc.RootElement.EnumerateArray())
                     if (entry.TryGetProperty("Name", out var printerName) && printerName.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(printerName.GetString()))
                     { observedPrinters.Add(printerName.GetString()!); observedPrinterDetails[printerName.GetString()!] = entry.Clone(); }
@@ -427,7 +486,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 var id = Value(args, "device_id");
                 if (!Fresh(observedDevicesAt) || !observedDevices.TryGetValue(id, out var known)) throw new InvalidOperationException("Consulte o dispositivo nesta etapa antes de alterá-lo.");
                 ValidateDeviceTarget(name, known.Topic, known.Device);
-                if (!await Approve(new ChangeRequest("Ajustar dispositivo", (name == "restart_device" ? "Reiniciar " : "Habilitar ") + known.Device.Name + ".\nO dispositivo poderá ficar temporariamente indisponível."), token)) return Denied();
+                if (!await Approve(new ChangeRequest("Ajustar dispositivo", DeviceChangeDetails(name, known.Device)), token)) return Denied();
                 var allowedClasses = name == "enable_camera" ? "'Camera','Image'" : "'Camera','Image','AudioEndpoint','MEDIA','Bluetooth','Printer','PrintQueue'";
                 var codeCheck = name == "restart_device" ? "" : "if([int]$d[0].ConfigManagerErrorCode -ne 22){throw 'Dispositivo não está mais desabilitado; faça novo diagnóstico'}; ";
                 var deviceScript = "$d=@(Get-CimInstance Win32_PnPEntity | Where-Object {$_.PNPDeviceID -eq " + Quote(id) + " -and $_.PNPClass -in " + allowedClasses + "}); if($d.Count -ne 1){throw 'Dispositivo permitido não encontrado ou ambíguo'}; " + codeCheck + "& \"$env:WINDIR\\System32\\pnputil.exe\" " + (name == "restart_device" ? "/restart-device " : "/enable-device ") + Quote(id) + " | Out-Null; if($LASTEXITCODE -notin 0,3010){throw 'Falha do PnPUtil'}; Start-Sleep -Seconds 2; $after=@(Get-CimInstance Win32_PnPEntity | Where-Object {$_.PNPDeviceID -eq " + Quote(id) + "}); if($after.Count -ne 1 -or [int]$after[0].ConfigManagerErrorCode -ne 0){throw 'Windows ainda reporta erro no dispositivo; confirme se precisa reiniciar'}; $after[0] | Select-Object Name,ConfigManagerErrorCode,Status";
