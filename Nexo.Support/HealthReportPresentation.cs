@@ -176,7 +176,7 @@ public static class HealthOccurrences
                     // Qualquer processo que segura a memória sem patamar estável mantém a ocorrência persistindo.
                     if (ReferenceOf(holder) is not { } reference)
                         return new(OccurrenceState.Persistent, $"Persiste: {holder.Label} segue com {Megabytes(bytes)} MB, mais da metade da subida de {Megabytes(holder.Growth!.FromBytes)} para {Megabytes(holder.Growth.ToBytes)} MB registrada no alerta do processo");
-                    stable ??= new(OccurrenceState.Stable, $"Estável em patamar alto (informativo, não é falha ativa): {holder.Label} segue com {Megabytes(bytes)} MB. "
+                    stable ??= new(OccurrenceState.Stable, $"{StablePlateauLabel}: {holder.Label} segue com {Megabytes(bytes)} MB. "
                         + $"Patamar de referência: cerca de {Megabytes(reference)} MB, o primeiro medido depois do alerta, em {PlateauWindow.TotalMinutes:F0} min seguidos com variação abaixo de {PlateauAmplitude * 100:F0}% e sem tendência de alta. "
                         + $"Volta a persistir se chegar a {Megabytes((long)(reference * (1 + PlateauRise)))} MB");
                 }
@@ -217,6 +217,8 @@ public static class HealthOccurrences
         return IsRecent(latest, thresholds, now) ? time : time + ". Sem leitura recente: o estado atual das ocorrências é desconhecido.";
     }
 
+    /// <summary>Começo exato do rótulo do patamar estável (#71). O resumo ao modelo (#88) reconhece o estado informativo só por ele.</summary>
+    public const string StablePlateauLabel = "Estável em patamar alto (informativo, não é falha ativa)";
     /// <summary>Severidade exibida: o patamar estável é informativo, qualquer que seja a do registro (#71).</summary>
     public static string ShownSeverity(HealthFinding finding, OccurrenceStatus status) => status.State == OccurrenceState.Stable ? "info" : finding.Severity;
 
@@ -382,14 +384,28 @@ public static class HealthReportPresentation
         var now = DateTimeOffset.UtcNow;
         var occurrences = HealthOccurrences.Classify(report.Findings, store.RecentSnapshots(since, 20), thresholds ?? new(), now);
         if (occurrences.Count > 10) text.AppendLine($"Mostrando 10 de {occurrences.Count} ocorrências, as críticas primeiro; as demais foram omitidas deste relatório.");
-        foreach (var (finding, status) in occurrences.OrderByDescending(o => o.Finding.Severity == "critical").ThenByDescending(o => o.Finding.Time).Take(10))
-        {
-            text.AppendLine($"Achado {Safe(finding.Category)} ({Safe(HealthOccurrences.ShownSeverity(finding, status))}), {finding.Time:yyyy-MM-dd HH:mm zzz}, {char.ToLowerInvariant(status.Label[0]) + status.Label[1..]}: {Safe(finding.Problem)}. Evidência: {Safe(finding.Evidence)}. Causa: hipótese, {Safe(finding.Cause)}. Recomendação: {Safe(finding.Recommendation)}. Confiança {Math.Clamp(finding.Confidence, 0, 1):P0}; confirmado: não.");
-        }
+        // As ocorrências encerradas (resolvidas ou de estado atual desconhecido) ficam fora da parte atual (#88): no PC, o modelo
+        // leu como atual uma ocorrência "resolvida" do llama-server. A separação é pelo estado, não pelo texto dele, e qualquer
+        // outro estado, inclusive um novo, fica na parte atual. O patamar estável da #71 é atual e informativo: a gravidade
+        // mostrada é "info" e a recomendação é a dele ("nenhuma ação recomendada"). A parte encerrada não traz recomendação,
+        // para não puxar uma ação sobre algo que não está acontecendo.
+        var shown = occurrences.OrderByDescending(o => o.Finding.Severity == "critical").ThenByDescending(o => o.Finding.Time).Take(10).ToArray();
+        static bool Closed(OccurrenceStatus status) => status.State is OccurrenceState.Resolved or OccurrenceState.Unknown;
+        var currentPart = shown.Where(o => !Closed(o.Status)).ToArray();
+        var otherPart = shown.Where(o => Closed(o.Status)).ToArray();
+        if (currentPart.Length > 0) text.AppendLine(CurrentHeader);
+        foreach (var (finding, status) in currentPart) text.AppendLine(Line(finding, status, true));
+        if (otherPart.Length > 0) text.AppendLine(OtherHeader);
+        foreach (var (finding, status) in otherPart) text.AppendLine(Line(finding, status, false));
         foreach (var limitation in report.Limitations.Take(10)) text.AppendLine("Limitação: " + Safe(limitation));
         text.AppendLine("Nenhuma alteração foi executada por este relatório. Confirme a função afetada antes de declarar recuperação.");
         return text.ToString()[..Math.Min(text.Length, 7000)];
     }
+    internal const string CurrentHeader = "OCORRÊNCIAS ATUAIS (nas leituras atuais; as marcadas como informativas não são falha ativa):";
+    internal const string OtherHeader = "OCORRÊNCIAS QUE NÃO SÃO ATUAIS (resolvidas ou com estado atual desconhecido): não as apresente como problemas presentes nem proponha ação para elas.";
+    private static string Line(HealthFinding finding, OccurrenceStatus status, bool current) =>
+        $"Achado {Safe(finding.Category)} ({Safe(HealthOccurrences.ShownSeverity(finding, status))}), {finding.Time:yyyy-MM-dd HH:mm zzz}, {char.ToLowerInvariant(status.Label[0]) + status.Label[1..]}: {Safe(finding.Problem)}. Evidência: {Safe(finding.Evidence)}. Causa: hipótese, {Safe(finding.Cause)}."
+        + (current ? $" Recomendação: {Safe(finding.Recommendation)}." : "") + $" Confiança {Math.Clamp(finding.Confidence, 0, 1):P0}; confirmado: não.";
     public static string InterventionState(InterventionRecord intervention) => intervention.State switch
     {
         _ when PendingOperations.IsWaiting(intervention) => "em andamento ou incerto, aguardando o resultado do Windows",

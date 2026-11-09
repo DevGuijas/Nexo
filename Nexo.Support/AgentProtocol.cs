@@ -32,6 +32,18 @@ public static class AgentProtocol
         catch (JsonException) { return null; }
     }
 
+    internal const string PendingActionReason = "Há uma ação pendente anunciada. Chame a ferramenta correspondente agora; uma promessa não encerra o turno. Se está bloqueado, explique a limitação sem prometer executar.";
+    private static readonly Regex PendingAction = new(@"\b(vou|vamos|farei|iremos)\s+(agora\s+)?(fazer|executar|tentar|acessar|investigar|(?:test|verific|consult|list|limp|ativ|configur|habilit|reinici|instal)\w{1,8}(?:-(?:lo|la|los|las))?)\b");
+
+    // O trecho que a regra da ação anunciada recusou, já normalizado (#88). Ele vai só na instrução ao modelo, nunca na
+    // auditoria: na validação no PC, o qwen3:8b repetiu "Vamos verificar…" seis vezes sem saber qual parte era recusada.
+    public static string? PendingActionPhrase(string message) => PendingAction.Match(Normalize(message)) is { Success: true } match ? match.Value : null;
+
+    // Instrução que acompanha a recusa: o motivo fixo e, para a ação anunciada, o trecho e a saída quando não há ferramenta.
+    public static string Guidance(string reason, string message) => reason == PendingActionReason && PendingActionPhrase(message) is { } phrase
+        ? reason + " Trecho recusado: “" + phrase + "”. Se nenhuma ferramenta disponível faz essa ação, não a anuncie nem a ofereça: diga o que as consultas mostraram, explique que o Nexo não faz isso e indique o que o usuário pode fazer por conta própria."
+        : reason;
+
     public static string? Validate(string name, JsonElement args, string message, bool readOnly = false)
     {
         if (string.IsNullOrWhiteSpace(message)) return "Informe uma conclusão ou pergunta não vazia.";
@@ -44,8 +56,8 @@ public static class AgentProtocol
             return "Não transfira a escolha da interface ao usuário. Consulte get_network e probe_network_interfaces para comparar as saídas. Se faltar evidência, pergunte sobre um sintoma observável, como outros aparelhos ou sites afetados.";
         if (Regex.IsMatch(text, @"\b(confirme se|confirma se|deseja obter|quer obter|autoriza)\b"))
             return readOnly ? "O usuário pediu apenas consulta. Apresente os dados e achados observados, sem pedir confirmação ou propor mudanças." : "Não peça confirmação no chat para uma mudança identificada. Use a ferramenta correspondente para apresentar a confirmação concreta; para uma informação ausente pergunte o dado específico.";
-        if (Regex.IsMatch(text, @"\b(vou|vamos|farei|iremos)\s+(agora\s+)?(fazer|executar|tentar|acessar|investigar|(?:test|verific|consult|list|limp|ativ|configur|habilit|reinici|instal)\w{1,8}(?:-(?:lo|la|los|las))?)\b"))
-            return "Há uma ação pendente anunciada. Chame a ferramenta correspondente agora; uma promessa não encerra o turno. Se está bloqueado, explique a limitação sem prometer executar.";
+        if (PendingAction.IsMatch(text))
+            return PendingActionReason;
         if (Regex.IsMatch(text, @"\b(posso|podemos|devo|deseja que eu|quer que eu)\s+(executar|execute|testar|teste|verificar|verifique|consultar|consulte|listar|liste|limpar|limpe|ativar|ative|configurar|configure|continuar|continue|prosseguir|prossiga|habilitar|habilita|habilite|reiniciar|reinicia|reinicie|instalar|instala|instale)\b"))
             return "Use a ferramenta para a próxima consulta ou correção. A autorização para mudanças é apresentada pelo executor; não encerre pedindo Ok no chat.";
         if (name == "ask_user")

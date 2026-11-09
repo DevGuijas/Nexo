@@ -20,6 +20,8 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private readonly Dictionary<int, ObservedAdapter> observedAdapters = [];
     private readonly Dictionary<int, JsonElement> observedNetworkDetails = [];
     private readonly Dictionary<string, JsonElement> observedServiceDetails = new(StringComparer.OrdinalIgnoreCase);
+    // Quando cada estado de serviço foi lido (#88): o pedido de aprovação só mostra uma leitura recente.
+    private readonly Dictionary<string, DateTimeOffset> observedServiceAt = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, JsonElement> observedPrinterDetails = new(StringComparer.OrdinalIgnoreCase);
     // Última leitura dos eventos de cada serviço (#58), já na frase que vai para o pedido de aprovação do reinício.
     private readonly Dictionary<string, (DateTimeOffset At, string Note)> observedServiceEvents = new(StringComparer.OrdinalIgnoreCase);
@@ -140,6 +142,49 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     {
         var info = new System.Globalization.StringInfo(text);
         return info.LengthInTextElements > limit ? info.SubstringByTextElements(0, limit) : text;
+    }
+
+    // Estado do serviço antes do reinício, para a janela de aprovação (#88): só a leitura recente do executor (get_printers com o
+    // Spooler parado ou get_services), nunca os argumentos do modelo. Sem leitura, a janela fica como antes.
+    internal string? ObservedServiceState(string service)
+    {
+        if (!observedServiceAt.TryGetValue(service, out var at) || ServiceEventsClock() - at > TimeSpan.FromMinutes(5) || !observedServiceDetails.TryGetValue(service, out var detail)
+            || detail.ValueKind != JsonValueKind.Object || !detail.TryGetProperty("Status", out var status) || status.ValueKind != JsonValueKind.String) return null;
+        var start = detail.TryGetProperty("StartType", out var type) && type.ValueKind == JsonValueKind.String ? type.GetString() ?? "" : "";
+        return ServiceStateText(status.GetString() ?? "", start);
+    }
+
+    private void RememberRestarted(string service, string result)
+    {
+        observedServiceDetails.Remove(service); observedServiceAt.Remove(service);
+        try
+        {
+            using var document = JsonDocument.Parse(result);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True
+                && root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object && data.TryGetProperty("Status", out var status) && status.ValueKind == JsonValueKind.String)
+            {
+                observedServiceDetails[service] = JsonSerializer.SerializeToElement(new { Name = service, Status = status.GetString() });
+                observedServiceAt[service] = ServiceEventsClock();
+            }
+        }
+        catch (JsonException) { /* Sem resultado legível, a leitura anterior já saiu. */ }
+    }
+
+    internal static string? ServiceStateText(string status, string startType)
+    {
+        static string Part(string value) => Limited(InvestigationEvidence.Clean(value).Trim(), 30);
+        var state = status.ToLowerInvariant() switch
+        {
+            "stopped" => "parado", "running" => "em execução", "paused" => "pausado", "startpending" => "iniciando",
+            "stoppending" => "parando", "pausepending" => "pausando", "continuepending" => "retomando", _ => Part(status)
+        };
+        if (state.Length == 0) return null;
+        var start = startType.ToLowerInvariant() switch
+        {
+            "automatic" => "automático", "manual" => "manual", "disabled" => "desabilitado", "" => "", _ => Part(startType)
+        };
+        return "Estado atual: " + state + (start.Length > 0 ? " (início " + start + ")" : "") + ".";
     }
 
     // Texto da janela de aprovação de enable_device/restart_device (#84): o driver aparece quando a consulta do turno trouxe
@@ -428,8 +473,11 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 {
                     // Sem o Spooler o Windows não lista impressoras: o estado do serviço é o resultado da consulta (#84).
                     observedServiceDetails["Spooler"] = JsonSerializer.SerializeToElement(new { Name = "Spooler", spooler.Status, spooler.StartType });
+                    observedServiceAt["Spooler"] = ServiceEventsClock();
                     return SpoolerStoppedResult(spooler.Status, spooler.StartType);
                 }
+                // A lista só vem com o Spooler em execução: uma leitura anterior dele parado deixou de valer.
+                observedServiceDetails.Remove("Spooler"); observedServiceAt.Remove("Spooler");
                 using (var printerDoc = JsonDocument.Parse(printers)) foreach (var entry in printerDoc.RootElement.EnumerateArray())
                     if (entry.TryGetProperty("Name", out var printerName) && printerName.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(printerName.GetString()))
                     { observedPrinters.Add(printerName.GetString()!); observedPrinterDetails[printerName.GetString()!] = entry.Clone(); }
@@ -437,9 +485,10 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 return Ok(printers);
             case "get_services":
                 var serviceRaw = await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Service -Name " + string.Join(",", ObservedServices) + " | Select-Object Name,@{N='Status';E={[string]$_.Status}},@{N='StartType';E={[string]$_.StartType}})", token);
-                observedServiceDetails.Clear();
+                observedServiceDetails.Clear(); observedServiceAt.Clear();
                 using (var serviceDoc = JsonDocument.Parse(serviceRaw)) foreach (var entry in serviceDoc.RootElement.EnumerateArray())
-                    if (entry.TryGetProperty("Name", out var serviceName) && serviceName.ValueKind == JsonValueKind.String) observedServiceDetails[serviceName.GetString() ?? ""] = entry.Clone();
+                    if (entry.TryGetProperty("Name", out var serviceName) && serviceName.ValueKind == JsonValueKind.String)
+                    { observedServiceDetails[serviceName.GetString() ?? ""] = entry.Clone(); observedServiceAt[serviceName.GetString() ?? ""] = ServiceEventsClock(); }
                 return Ok(serviceRaw);
             case "get_recent_errors":
                 if (args.TryGetProperty("service", out _)) return await ReadServiceEvents(Value(args, "service"), token);
@@ -506,8 +555,14 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                     catch (Exception ex) when (ex is not OperationCanceledException) { /* A falha fica registrada como consulta indisponível. */ }
                     serviceEvents = observedServiceEvents[service];
                 }
-                if (!await Approve(new ChangeRequest("Reiniciar serviço", ServiceEvents.RestartDetails(service, serviceEvents.Note)), token)) return Denied();
-                return await Elevated("$s=Get-Service -Name " + Quote(service) + "; if($s.StartType -eq 'Disabled'){throw 'Serviço desabilitado. Verifique a política da organização antes de mudar o modo de inicialização'}; Restart-Service -Name " + Quote(service) + " -ErrorAction Stop; $s=Get-Service -Name " + Quote(service) + "; $s.WaitForStatus('Running',[timespan]::FromSeconds(20)); [pscustomobject]@{Service=$s.Name;Status=[string]$s.Status}", token);
+                if (!await Approve(new ChangeRequest("Reiniciar serviço", ServiceEvents.RestartDetails(service, serviceEvents.Note, ObservedServiceState(service))), token)) return Denied();
+                string restarted;
+                // Depois do reinício, a leitura de antes deixa de valer (#88): um 2º pedido não pode mostrar "parado" velho. Com o
+                // resultado do Windows, ela vira o estado informado; sem ele, sai. Se o processo elevado nem iniciou, nada mudou.
+                try { restarted = await Elevated("$s=Get-Service -Name " + Quote(service) + "; if($s.StartType -eq 'Disabled'){throw 'Serviço desabilitado. Verifique a política da organização antes de mudar o modo de inicialização'}; Restart-Service -Name " + Quote(service) + " -ErrorAction Stop; $s=Get-Service -Name " + Quote(service) + "; $s.WaitForStatus('Running',[timespan]::FromSeconds(20)); [pscustomobject]@{Service=$s.Name;Status=[string]$s.Status}", token); }
+                catch (Exception ex) when (!ex.Data.Contains(TurnFacts.NotStartedKey)) { observedServiceDetails.Remove(service); observedServiceAt.Remove(service); throw; }
+                RememberRestarted(service, restarted);
+                return restarted;
             case "clear_print_queue":
                 var printer = Value(args, "printer_name");
                 if (!Fresh(observedPrintersAt) || !observedPrinters.Contains(printer)) throw new InvalidOperationException("Consulte get_printers e escolha uma impressora encontrada nesta etapa.");

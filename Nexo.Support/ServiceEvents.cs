@@ -123,8 +123,8 @@ public static class ServiceEvents
 
     public static string Unavailable(string service) => $"Não foi possível consultar os eventos do serviço {service}; a causa da parada não foi verificada.";
 
-    public static string RestartDetails(string service, string events) =>
-        "Reiniciar " + service + ". Áudio, impressão, Bluetooth ou Wi-Fi poderão ser interrompidos conforme o serviço escolhido.\n" + events;
+    public static string RestartDetails(string service, string events, string? state = null) =>
+        "Reiniciar " + service + ". Áudio, impressão, Bluetooth ou Wi-Fi poderão ser interrompidos conforme o serviço escolhido.\n" + (state == null ? "" : state + "\n") + events;
 
     // Resultado da ferramenta: a frase pronta e os eventos, com a mensagem limpa, entre aspas e curta.
     public static string Result(Reading reading, DateTimeOffset now) => WindowsTools.Ok(new
