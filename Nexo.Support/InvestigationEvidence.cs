@@ -403,6 +403,8 @@ public sealed class InvestigationEvidence
     // quando uma consulta traz o nome no lugar do ID.
     public static string ChangeKey(string name, JsonElement args)
     {
+        // Ferramentas inventadas pelo modelo contam como uma só na linha (#84): o nome delas não identifica nada no Windows.
+        if (!ToolCatalog.IsKnown(name)) return UnknownToolKey;
         string Target(string key) => Text(args, key) is { } value ? value.ToUpperInvariant() : "";
         var target = name switch
         {
@@ -416,6 +418,11 @@ public sealed class InvestigationEvidence
         };
         return name + "|" + target;
     }
+
+    internal const string UnknownToolKey = "?ferramenta-inexistente|";
+    // Na linha de fatos e nas explicações, uma ferramenta que não existe no Nexo (#84). O nome que o modelo inventou não
+    // entra: a linha é escrita só pelo Nexo.
+    internal const string UnknownToolDescription = "ferramenta inexistente pedida pelo modelo";
 
     // Como uma alteração aparece na linha de fatos (#73): o que muda e em quê, com o nome vindo de ferramenta entre aspas.
     public string ChangeDescription(string name, JsonElement args)
@@ -440,6 +447,7 @@ public sealed class InvestigationEvidence
             "install_driver_update" => "instalação do driver" + (Argument("update_id") is { } update ? " " + Quoted(observedUpdates.TryGetValue(update, out var offer) && offer.Title.Length > 0 ? offer.Title : update) : ""),
             "install_official_nvidia_driver" => "instalação do driver NVIDIA" + (Argument("driver_id") is { } driver ? " " + Quoted(driver) : ""),
             "download_nvidia_app" => "download do aplicativo da NVIDIA",
+            _ when !ToolCatalog.IsKnown(name) => UnknownToolDescription,
             _ => ToolCatalog.Label(name).TrimEnd('…').ToLowerInvariant()
         };
     }
@@ -454,6 +462,7 @@ public sealed class InvestigationEvidence
         "get_health_report" => "o relatório de saúde",
         "get_services" => "a consulta de serviços",
         "get_printers" => "a consulta de impressoras",
+        _ when !ToolCatalog.IsKnown(name) => "a " + UnknownToolDescription,
         _ => "a etapa “" + ToolCatalog.Label(name).TrimEnd('…') + "”"
     };
 
@@ -521,6 +530,15 @@ public sealed class InvestigationEvidence
                     break;
                 case "get_health_report":
                     if (data.ValueKind == JsonValueKind.String) RememberHealth(data.GetString() ?? "");
+                    break;
+                // Só o resultado em que o executor confirmou o estado do serviço (#84); a lista de impressoras não vira achado aqui.
+                case "get_printers" when data.ValueKind == JsonValueKind.Object && data.TryGetProperty("SpoolerRunning", out var running) && running.ValueKind == JsonValueKind.False:
+                    var state = Text(data, "SpoolerStatus") ?? "";
+                    var disabled = string.Equals(Text(data, "SpoolerStartType"), "Disabled", StringComparison.OrdinalIgnoreCase);
+                    Finding("printer", (string.Equals(state, "Stopped", StringComparison.OrdinalIgnoreCase) ? "O serviço de impressão (Spooler) está parado"
+                        : "O serviço de impressão (Spooler) não está em execução (estado " + Quoted(state, 20) + ")") + (disabled ? " e desabilitado" : "")
+                        + ": sem ele o Windows não lista impressoras nem filas, e nada imprime.",
+                        disabled ? " Verifique a política da organização antes de mudar o modo de inicialização do serviço." : " Reiniciar o serviço de impressão depende da sua aprovação.");
                     break;
             }
         }

@@ -67,15 +67,20 @@ public static class DriverWorkflow
         if (inventoryData.TryGetProperty("Truncated", out var truncated) && truncated.ValueKind == JsonValueKind.True)
             return "O inventário dessa categoria foi truncado. Não consigo escolher um alvo com segurança; informe o nome exato do dispositivo ou encaminhe à TI. Nenhum driver foi alterado.";
         if (devices.GetArrayLength() == 0) return "O Windows não encontrou um dispositivo presente dessa categoria. Não há alvo identificado para atualizar; nenhum driver foi alterado.";
-        var target = devices[0];
-        if (devices.GetArrayLength() > 1 || choice != null)
+        // Só dispositivos com driver próprio são alvo (#84): as entradas e saídas de áudio (endpoints) pertencem ao dispositivo
+        // de áudio e não têm driver para atualizar. A pergunta, a escolha e a retomada usam só esta lista.
+        var functions = devices.EnumerateArray().Where(HasOwnDriver).ToArray();
+        if (functions.Length == 0)
+            return "O Windows listou só entradas e saídas de áudio (como microfones e alto-falantes), que não têm driver próprio, e nenhum dispositivo com driver para atualizar. Nenhum driver foi alterado; encaminhe o caso à TI se a falha persistir.";
+        var target = functions[0];
+        if (functions.Length > 1 || choice != null)
         {
-            var candidates = devices.EnumerateArray().Select(device => (Key: Field(device, "Id"), Name: Field(device, "Name")))
+            var candidates = functions.Select(device => (Key: Field(device, "Id"), Name: Field(device, "Name")))
                 .Where(candidate => candidate.Key.Length > 0 && candidate.Name.Length > 0).ToArray();
             var chosenId = choice == null ? null : InvestigationEvidence.NamedCandidate(choice, candidates);
-            var chosen = chosenId == null ? [] : devices.EnumerateArray().Where(device => Field(device, "Id") == chosenId).ToArray();
+            var chosen = chosenId == null ? [] : functions.Where(device => Field(device, "Id") == chosenId).ToArray();
             if (chosen.Length == 1) target = chosen[0];
-            else if (devices.GetArrayLength() == 1)
+            else if (functions.Length == 1)
                 // O dispositivo indicado sumiu entre os turnos: o que restou não foi escolhido pelo usuário.
                 return "O dispositivo que você indicou não aparece mais nesta consulta; agora o Windows lista só " + InvestigationEvidence.Quoted(Field(target, "Name"))
                     + ". Se o problema é nele, peça de novo a atualização do driver. Nenhum driver foi alterado.";
@@ -85,9 +90,10 @@ public static class DriverWorkflow
             {
                 var shown = candidates.Select(candidate => candidate.Name).Order(StringComparer.CurrentCultureIgnoreCase).ToArray();
                 askedForDevice?.Invoke(shown.Take(6).ToArray());
+                // O pedido de resposta é a última frase (#84).
                 return "Encontrei mais de um dispositivo possível: " + string.Join("; ", shown.Take(6).Select(name => InvestigationEvidence.Quoted(name)))
-                    + (shown.Length > 6 ? " e mais " + (shown.Length - 6) : "") + ". Qual deles apresenta o problema? "
-                    + InvestigationEvidence.ReplyWithName + " Nenhum driver foi alterado.";
+                    + (shown.Length > 6 ? " e mais " + (shown.Length - 6) : "") + ". Nenhum driver foi alterado. Qual deles apresenta o problema? "
+                    + InvestigationEvidence.ReplyWithName;
             }
         }
 
@@ -208,6 +214,12 @@ public static class DriverWorkflow
             return observed + ". O Windows relatou a instalação, mas a nova versão não foi confirmada. Não considero o problema resolvido; confira o Gerenciador de Dispositivos e encaminhe à TI se necessário.";
         }
     }
+
+    // Endpoint de áudio: classe PnP AudioEndpoint ou instância de software do MMDevAPI (SWD\MMDEVAPI\...). Os dois vêm do
+    // Windows no inventário; o nome não entra no critério.
+    internal static bool HasOwnDriver(JsonElement device) => device.ValueKind == JsonValueKind.Object
+        && !string.Equals(Field(device, "Class"), "AudioEndpoint", StringComparison.OrdinalIgnoreCase)
+        && !Field(device, "Id").StartsWith("SWD\\MMDEVAPI\\", StringComparison.OrdinalIgnoreCase);
 
     private static bool Succeeded(JsonElement result) => result.ValueKind == JsonValueKind.Object
         && result.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True;

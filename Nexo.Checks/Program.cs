@@ -216,6 +216,7 @@ try
     await DriverChoiceChecks.Run(store, admin, Assert);
     await ToolArgumentChecks.Run(store, admin, Assert);
     await PcChoiceChecks.Run(store, admin, Assert);
+    await ValidationAdjustmentChecks.Run(store, admin, Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);
