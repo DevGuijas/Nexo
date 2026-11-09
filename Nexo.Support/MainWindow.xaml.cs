@@ -298,14 +298,19 @@ public partial class MainWindow : Window
                 }
                 PageContent.Children.Add(Card(overview));
             }
-            var alerts = healthStore.RecentFindings(20);
+            // Parada normal sem prova de execução vai para o aviso informativo, não para as ocorrências (#57).
+            var alerts = healthStore.RecentFindings(20).Where(finding => !HealthOccurrences.SupersededServiceStop(finding, latest)).ToList();
             var occurrenceNow = DateTimeOffset.UtcNow;
             var occurrenceHistory = healthStore.RecentSnapshots(occurrenceNow.AddHours(-6), 20);
             var occurrenceLimits = healthSettings.Thresholds();
             PageContent.Children.Add(SectionHeading("health", "Ocorrências preventivas"));
             PageContent.Children.Add(Card(Text(HealthOccurrences.CollectionNotice(latest, occurrenceLimits, occurrenceNow), 12, "Secondary")));
             if (alerts.Count == 0) PageContent.Children.Add(Card(Text("Nenhuma ocorrência registrada.", 13, "Secondary")));
-            foreach (var (finding, status) in HealthOccurrences.Classify(alerts, occurrenceHistory, occurrenceLimits, occurrenceNow, HealthOccurrences.ReadingsFrom(healthStore, occurrenceNow)))
+            var occurrences = HealthOccurrences.Classify(alerts, occurrenceHistory, occurrenceLimits, occurrenceNow, HealthOccurrences.ReadingsFrom(healthStore, occurrenceNow));
+            // Parada normal sem execução estável observada antes: visível, mas não conta como alerta (#57).
+            if (HealthReportPresentation.CleanStopNotice(latest, occurrences) is { } cleanStops)
+                PageContent.Children.Add(Card(Text(cleanStops, 12, "Secondary")));
+            foreach (var (finding, status) in occurrences)
             {
                 var detail = new StackPanel();
                 detail.Children.Add(Text($"{finding.Time.ToLocalTime():g}  ·  {HealthOccurrences.ShownSeverity(finding, status)}", 11, status.State != OccurrenceState.Persistent ? "Secondary" : finding.Severity == "critical" ? "Danger" : "Warning"));
