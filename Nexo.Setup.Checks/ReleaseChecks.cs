@@ -4,6 +4,10 @@ using System.Xml.Linq;
 
 internal static class ReleaseChecks
 {
+    // Passo do docs/INSTALADOR-NUVEM.md: a data e a tabela entram juntas, depois do Build-CloudRelease.
+    private const string DatedTable = "A versão atual, quando já tem data de publicação, registra tamanho e SHA-256 do Nexo.exe e do pacote: "
+        + "preencha a tabela com os hashes impressos pelo Build-CloudRelease antes de commitar a data";
+
     public static void Run(Action<bool, string> check)
     {
         var root = RepositoryRoot();
@@ -51,7 +55,7 @@ internal static class ReleaseChecks
         check(published != null && Registered(changelog, published), "A última versão publicada registra tamanho e SHA-256 do Nexo.exe e do pacote");
         // Ao trocar "não publicada" pela data, a mesma entrada precisa trazer a tabela preenchida com o que o script imprimiu.
         check(current.Version == null || !IsDate(current.Date) || Registered(changelog, current.Version),
-            "A versão atual, quando já tem data de publicação, registra tamanho e SHA-256 do Nexo.exe e do pacote");
+            DatedTable);
     }
 
     // Tabela de artefatos da entrada da versão: só o trecho entre o título dela e o próximo título "## [".
@@ -95,8 +99,8 @@ internal static class ReleaseChecks
             "Data de publicação inexistente no calendário (2026-02-30) na versão atual reprova");
         check(lower.SequenceEqual([Newer]) && unregistered.SequenceEqual([Registered]),
             "Versão atual abaixo da publicada, ou publicada sem hashes, reprova só a regra correspondente");
-        check(datedEmpty.SequenceEqual(["A versão atual, quando já tem data de publicação, registra tamanho e SHA-256 do Nexo.exe e do pacote"])
-            && datedHalf.SequenceEqual(["A versão atual, quando já tem data de publicação, registra tamanho e SHA-256 do Nexo.exe e do pacote"]) && datedRegistered.Length == 0,
+        check(datedEmpty.SequenceEqual([DatedTable])
+            && datedHalf.SequenceEqual([DatedTable]) && datedRegistered.Length == 0,
             "Versão atual com data e tabela vazia reprova; com a tabela preenchida passa, sem usar os hashes da versão anterior");
     }
 

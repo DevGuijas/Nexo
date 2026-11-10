@@ -8,8 +8,11 @@ using System.Text.Json.Nodes;
 // Travas de publicação (#21): roda scripts/Release-Guard.ps1 de verdade, com a leitura da Oracle trocada por respostas
 // falsas e um par de chaves RSA gerado no teste. Nenhuma rede é usada. A trava exige PowerShell 7 (RSA.ImportFromPem):
 // usa NEXO_CHECKS_PWSH e, no Windows, o pwsh do PATH (presente no windows-latest do CI). Sem pwsh, imprime IGNORADO,
-// exceto no CI (CI=true) ou com NEXO_CHECKS_PWSH apontando para um arquivo que não existe: aí reprova.
-// A leitura HTTP real (Invoke-NexoHttp) é testada contra um HttpListener em 127.0.0.1, também sem sair da máquina.
+// exceto no CI (CI=true) ou com NEXO_CHECKS_PWSH apontando para um caminho que não existe: aí reprova. Um nome sem
+// separador de diretório (ex.: "pwsh") é um comando do PATH.
+// A leitura HTTP real (Invoke-NexoHttp) é testada contra um HttpListener em localhost, também sem sair da máquina. O
+// prefixo é "localhost" porque, no Windows sem administrador, o HTTP.sys só aceita esse nome; se mesmo assim o
+// listener não abrir, a parte HTTP fica IGNORADA fora do CI e reprova no CI.
 internal static class ReleaseGuardChecks
 {
     private const string Origin = "https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/";
@@ -18,10 +21,8 @@ internal static class ReleaseGuardChecks
     {
         var configured = Environment.GetEnvironmentVariable("NEXO_CHECKS_PWSH");
         var ci = string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase);
-        if (!string.IsNullOrWhiteSpace(configured))
-        {
-            check(File.Exists(configured), "Trava de publicação: NEXO_CHECKS_PWSH aponta para um pwsh que existe (" + configured + ")");
-        }
+        var path = !string.IsNullOrWhiteSpace(configured) && configured.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0;
+        if (path) check(File.Exists(configured), "Trava de publicação: NEXO_CHECKS_PWSH aponta para um pwsh que existe (" + configured + ")");
         var shell = !string.IsNullOrWhiteSpace(configured) ? configured : OperatingSystem.IsWindows() ? "pwsh" : null;
         if (shell == null) { Skip(check, ci); return; }
         var guard = Guard();
@@ -77,7 +78,7 @@ internal static class ReleaseGuardChecks
         };
 
         var signed = Manifest("1.6.3");
-        using var server = new LocalOrigin(new Dictionary<string, (int Status, string Type, byte[] Body)>
+        using var server = LocalOrigin.TryStart(new Dictionary<string, (int Status, string Type, byte[] Body)>
         {
             ["GET /latest.json"] = (200, "application/json", signed),
             ["GET /latest.sig"] = (200, "text/plain", Encoding.UTF8.GetBytes(Sign(key, signed))),
@@ -85,6 +86,11 @@ internal static class ReleaseGuardChecks
             ["HEAD /releases/1.6.3/nexo-app.zip"] = (200, "application/zip", []),
             ["GET /erro"] = (500, "text/plain", Encoding.UTF8.GetBytes("falha")),
         });
+        if (server == null)
+        {
+            if (ci) check(false, "Trava de publicação: no CI o HttpListener em localhost precisa abrir para testar a leitura HTTP real");
+            Console.WriteLine("IGNORADO: leitura HTTP real da trava de publicação, sem HttpListener em localhost neste computador");
+        }
         var closed = LocalOrigin.ClosedPrefix();
         var dir = Path.Combine(Path.GetTempPath(), "nexo-release-guard-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
@@ -97,7 +103,7 @@ internal static class ReleaseGuardChecks
             File.WriteAllText(Path.Combine(dir, "cases.json"), cases.ToJsonString(), new UTF8Encoding(false));
             File.WriteAllText(Path.Combine(dir, "closed.txt"), closed, new UTF8Encoding(false));
             var start = new ProcessStartInfo(shell) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-            foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-File", harness, "-Guard", guard, "-Dir", dir, "-Local", server.Prefix })
+            foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-File", harness, "-Guard", guard, "-Dir", dir, "-Local", server?.Prefix ?? "nenhum" })
                 start.ArgumentList.Add(argument);
             Process process;
             try { process = Process.Start(start)!; }
@@ -137,18 +143,21 @@ internal static class ReleaseGuardChecks
                 "Trava de publicação: versão fora de MAJOR.MINOR.PATCH, publicada ou do projeto, é recusada");
             var http = output.RootElement.GetProperty("http");
             string Http(string name) => http.GetProperty(name).GetString() ?? "";
-            check(Http("manifesto") == "200 texto " + Encoding.UTF8.GetString(signed) && Http("binario") == "200 bytes 1,2,3,250"
-                && Http("head-ausente") == "404" && Http("head-presente") == "200" && Http("erro") == "500 texto falha",
-                "Trava de publicação: a leitura HTTP real devolve o código (404 no HEAD, 500) sem exceção e o conteúdo em texto ou bytes");
             check(Http("fetch-padrao") == "${function:Invoke-NexoHttp}",
-                "Trava de publicação: sem -Fetch, a trava usa essa mesma leitura HTTP real");
-            check(Http("fechada").StartsWith("ERRO ", StringComparison.Ordinal),
-                "Trava de publicação: porta sem servidor vira erro de conexão, não um 404");
-            check(Http("ponta-a-ponta") == "OK 1.6.3" && Http("ponta-a-ponta-publicada").StartsWith("ERRO A versão 1.6.3 não é maior", StringComparison.Ordinal)
-                && Http("ponta-a-ponta-pacote").StartsWith("ERRO A versão 1.7.1 já está publicada", StringComparison.Ordinal),
-                "Trava de publicação: com HTTP real em 127.0.0.1, manifesto assinado em texto passa e versão igual ou pacote presente são recusados");
-            check(server.Requests.Contains("HEAD /releases/1.7.0/nexo-app.zip") && server.Requests.Contains("GET /latest.sig"),
-                "Trava de publicação: o servidor local recebeu o HEAD do pacote e a leitura da assinatura");
+                "Trava de publicação: sem -Fetch, a trava usa a leitura HTTP real (Invoke-NexoHttp)");
+            if (server != null)
+            {
+                check(Http("manifesto") == "200 texto " + Encoding.UTF8.GetString(signed) && Http("binario") == "200 bytes 1,2,3,250"
+                    && Http("head-ausente") == "404" && Http("head-presente") == "200" && Http("erro") == "500 texto falha",
+                    "Trava de publicação: a leitura HTTP real devolve o código (404 no HEAD, 500) sem exceção e o conteúdo em texto ou bytes");
+                check(Http("fechada").StartsWith("ERRO ", StringComparison.Ordinal),
+                    "Trava de publicação: porta sem servidor vira erro de conexão, não um 404");
+                check(Http("ponta-a-ponta") == "OK 1.6.3" && Http("ponta-a-ponta-publicada").StartsWith("ERRO A versão 1.6.3 não é maior", StringComparison.Ordinal)
+                    && Http("ponta-a-ponta-pacote").StartsWith("ERRO A versão 1.7.1 já está publicada", StringComparison.Ordinal),
+                    "Trava de publicação: com HTTP real em localhost, manifesto assinado em texto passa e versão igual ou pacote presente são recusados");
+                check(server.Requests.Contains("HEAD /releases/1.7.0/nexo-app.zip") && server.Requests.Contains("GET /latest.sig"),
+                    "Trava de publicação: o servidor local recebeu o HEAD do pacote e a leitura da assinatura");
+            }
             var parse = output.RootElement.GetProperty("parse");
             check(parse.GetProperty("Release-Guard.ps1").GetInt32() == 0 && parse.GetProperty("Build-CloudRelease.ps1").GetInt32() == 0,
                 "Trava de publicação: Release-Guard.ps1 e Build-CloudRelease.ps1 são PowerShell válido");
@@ -173,16 +182,24 @@ internal static class ReleaseGuardChecks
         public readonly System.Collections.Concurrent.ConcurrentQueue<string> Requests = new();
         public string Prefix { get; }
 
-        public LocalOrigin(Dictionary<string, (int Status, string Type, byte[] Body)> routes)
+        private LocalOrigin(Dictionary<string, (int Status, string Type, byte[] Body)> routes)
         {
             this.routes = routes;
-            Prefix = "http://127.0.0.1:" + FreePort() + "/";
+            Prefix = "http://localhost:" + FreePort() + "/";
             listener.Prefixes.Add(Prefix);
-            listener.Start();
-            _ = Task.Run(Serve);
         }
 
-        public static string ClosedPrefix() => "http://127.0.0.1:" + FreePort() + "/";
+        // Abre o listener; no Windows sem permissão de reserva de URL, o HTTP.sys recusa com HttpListenerException.
+        public static LocalOrigin? TryStart(Dictionary<string, (int Status, string Type, byte[] Body)> routes)
+        {
+            var origin = new LocalOrigin(routes);
+            try { origin.listener.Start(); }
+            catch (System.Net.HttpListenerException) { origin.Dispose(); return null; }
+            _ = Task.Run(origin.Serve);
+            return origin;
+        }
+
+        public static string ClosedPrefix() => "http://localhost:" + FreePort() + "/";
 
         private static int FreePort()
         {
@@ -257,6 +274,7 @@ internal static class ReleaseGuardChecks
             if ($response.Content -is [byte[]]) { return "$($response.Status) bytes $($response.Content -join ',')" }
             return "$($response.Status) texto $($response.Content)"
         }
+        if ($Local -ne 'nenhum') {
         foreach ($probe in @(@('manifesto', 'latest.json', 'Get'), @('binario', 'binario', 'Get'), @('head-ausente', 'releases/1.7.0/nexo-app.zip', 'Head'),
                 @('head-presente', 'releases/1.6.3/nexo-app.zip', 'Head'), @('erro', 'erro', 'Get'))) {
             try { $http[$probe[0]] = Describe (Invoke-NexoHttp ($Local + $probe[1]) $probe[2]) } catch { $http[$probe[0]] = "ERRO $($_.Exception.Message)" }
@@ -274,6 +292,7 @@ internal static class ReleaseGuardChecks
         $viaPresent = { param($Uri, $Method) Invoke-NexoHttp ($Uri.Replace($origin, $Local).Replace('releases/1.7.1/', 'releases/1.6.3/')) $Method }.GetNewClosure()
         try { $http['ponta-a-ponta-pacote'] = "OK $((Assert-NexoNewRelease -Version '1.7.1' -PublicKeyPath (Join-Path $Dir 'public.pem') -Fetch $viaPresent).Version)" }
         catch { $http['ponta-a-ponta-pacote'] = "ERRO $($_.Exception.Message)" }
+        }
         # Sem -Fetch, a trava usa a leitura HTTP real testada acima (não dá para chamá-la sem rede, então confere o padrão).
         $fetchParameter = (Get-Command Assert-NexoNewRelease).ScriptBlock.Ast.Body.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Fetch' }
         $http['fetch-padrao'] = [string]$fetchParameter.DefaultValue.Extent.Text
