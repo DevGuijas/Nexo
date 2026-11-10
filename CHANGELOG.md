@@ -11,17 +11,29 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 ### Antes de publicar
 
 - [ ] Validar as sete falhas controladas em VM Windows (#8).
-- [ ] Concluir as correções críticas da recuperação: prazo e saída segura para transações de rede travadas (#9), recuperação após encerramento abrupto do executor de rede (#10), autenticação da decisão de manter uma mudança de rede (#11) e prazo da instalação NVIDIA alinhado ao supervisor (#12).
+- [ ] Concluir as correções críticas da recuperação: prazo e saída segura para transações de rede travadas (#9, PR #78), recuperação após encerramento abrupto do executor de rede (#10, PR #76), autenticação da decisão de manter uma mudança de rede (#11, sem PR) e prazo da instalação NVIDIA alinhado ao supervisor (#12).
+- [ ] Concluir a validação no PC das ocorrências estáveis de memória (#71) e dos ajustes do disco e da memória na resposta (#88).
+- [ ] Completar a seção "A incluir antes de publicar" abaixo com o que for mesclado e removê-la.
 - [ ] Trocar "não publicada" pela data de publicação, gerar os pacotes e registrar abaixo o commit e os hashes impressos pelo script.
+
+### A incluir antes de publicar
+
+Mudanças ainda em PR aberto para a `development`. Ao mesclar cada uma, mova a linha para a seção certa acima e tire-a daqui.
+
+- [ ] PR #76 (#10): oferta de restauração da rede depois de encerramento abrupto do executor elevado.
+- [ ] PR #78 (#9): prazo para transação de rede travada e estado desconhecido informado na resposta.
+- [ ] PR #79 (#19): temperatura da CPU e estado dos discos, com origem e horário da leitura.
+- [ ] Correção da #88 (branch `fix/88-validacao-11fa078`): caminho de Configurações > Sistema > Armazenamento acrescentado pelo Nexo, oferta de achar os maiores arquivos recusada, alerta de disco encerrado não apresentado como atual e MB do processo que segura memória sempre presentes.
 
 ### Saúde do computador
 
 - Página **Saúde do PC** com CPU, memória, volumes, serviços automáticos, adaptadores e eventos do Windows coletados enquanto a janela está aberta.
 - Histórico operacional em SQLite (`operations.db`), separado das conversas, com retenção configurável.
 - Ocorrências persistentes com estado atual: persiste, resolvida ou desconhecida. Resolver exige leituras seguidas sem a condição.
-- Crescimento de memória por processo, identificado por PID e horário de início.
+- Crescimento de memória por processo, identificado por PID e horário de início. Um processo que se estabiliza num patamar alto por 30 minutos passa a "Estável em patamar alto", informativo; volta a "Persiste" se subir 10% sobre a referência gravada na ocorrência (#71).
 - Sondagens opcionais de gateway, DNS e destino HTTP(S), desligadas por padrão.
 - Serviços automáticos que o Windows deixa parados de propósito (início atrasado ou por gatilho com código 0) não geram alerta.
+- Serviço automático parado com saída normal só gera alerta se o Nexo o viu em execução estável nos 10 minutos anteriores; os demais, como os GoogleUpdater, ficam num cartão informativo e não vão ao modelo como problema (#57). Saída com erro continua gerando alerta.
 - Limiares digitados com ponto não são mais multiplicados por dez.
 
 ### Diagnóstico e assistente
@@ -33,6 +45,11 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - Triagem reconhece falta de espaço, lentidão e sites que não abrem.
 - Resposta final cita a evidência trazida pelas ferramentas.
 - Com mais de um alvo possível, só o nome sozinho escolhe o dispositivo, a impressora ou a oferta de driver.
+- Toda resposta termina com a linha de fatos do turno ("Alterações feitas pelo Nexo neste turno: …"), e uma alteração recusada ou não confirmada nunca aparece como feita (#73).
+- Recusa de ferramenta devolve ao modelo o motivo e o que é aceito; o turno não termina mais em erro por argumento inválido (#83).
+- O alvo nomeado pelo usuário é consultado antes e chega ao pedido de aprovação (#70).
+- Ocorrência encerrada (resolvida ou histórica) não é apresentada como problema atual; ocorrências estáveis e informativas vão ao modelo marcadas como tal (#88).
+- Rótulos de progresso para todas as ferramentas, e "ferramenta inexistente pedida pelo modelo" quando ele pede uma que não existe (#84, #88).
 
 ### Recuperação e drivers
 
@@ -40,6 +57,12 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - Ponto de restauração confirmado antes de instalar driver; sem ele, a instalação para.
 - Retomada salva quando o driver pede reinício.
 - Instalação NVIDIA preserva o áudio HDMI, reconhece GeForce sem o prefixo NVIDIA e confere a versão instalada com a oferta.
+- A pergunta de qual dispositivo do fluxo de driver passa a aceitar resposta, e lista só dispositivos com driver próprio, sem os endpoints de áudio (#74, #84).
+- O pedido de aprovação mostra o driver atual do dispositivo ("Driver: …") e, no reinício de serviço, o estado atual dele ("Estado atual: parado (início automático).") (#84, #88).
+
+### Impressão
+
+- Spooler parado é lido e informado na consulta de impressoras, sem falhar a consulta (#84).
 
 ### Rede
 
@@ -50,6 +73,8 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - Navegação, formulários e confirmações redesenhados, com tema claro e ícones vetoriais.
 - Título da janela lido da versão do aplicativo, sem número fixo no código.
 - CI na `development` com compilação e regressões.
+- Testes que dependiam da data do dia passam a usar relógio injetado.
+- `scripts/Build-CloudRelease.ps1` só gera os pacotes se o `latest.json` publicado tiver assinatura válida e a versão do projeto for maior que a publicada; a origem da Oracle é fixa (#21).
 
 ### Artefatos publicados
 
