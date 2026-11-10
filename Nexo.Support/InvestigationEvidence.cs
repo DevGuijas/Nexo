@@ -262,31 +262,40 @@ public sealed class InvestigationEvidence
     // ocupa espaço. A oferta, a busca e o alvo vêm nessa ordem, na mesma oração (sem ":" ou ";" no meio): "Vou verificar o
     // relatório: os maiores arquivos não aparecem nele" passa. A frase que leva ao caminho do Armazenamento também passa
     // ("posso orientar você a ver o que ocupa espaço em Configurações > Sistema > Armazenamento"), porque é o que o motivo
-    // pede; sem isso, obedecer ao motivo levava à 4ª recusa (@qa). "Não posso listar os maiores arquivos" passa.
+    // pede; sem isso, obedecer ao motivo levava à 4ª recusa (@qa). A isenção vale só quando o que vem entre a oferta e a
+    // busca é orientação ao usuário ("explicar como", "orientar você a", "abra"): "posso ajudar a identificar os maiores
+    // arquivos e depois você confere em Configurações…" continua recusada. O ":" logo depois da oferta, com no máximo "se
+    // quiser" no meio ("Posso, se quiser: identificar…"), não quebra a oração. "Não posso listar os maiores arquivos" passa.
     private static readonly Regex OfferedSearch = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo|(?:gostaria|quer|deseja|precisa)(?: de)? (?:uma )?ajuda)\b"
-        + @"[^:;]*?\b(?:identific\w*|list\w*|ach\w*|encontr\w*|localiz\w*|procur\w*|busc\w*|verific\w*|mostr\w*|analis\w*|descobr\w*|apont\w*|ver|veja)\b"
+        + @"(?<lead>(?:,?\s*(?:se (?:quiser|precisar|preferir)|claro|sim)?\s*:)?[^:;]*?)\b(?:identific\w*|list\w*|ach\w*|encontr\w*|localiz\w*|procur\w*|busc\w*|verific\w*|mostr\w*|analis\w*|descobr\w*|apont\w*|ver|veja)\b"
         + @"[^:;]*?\b(?:maiores (?:arquivos|pastas)|(?:arquivos|pastas) (?:mais )?(?:grandes|pesad\w*|volumos\w*)|(?:arquivos|pastas) (?:que )?(?:(?:esta|estao|estejam) )?ocupa\w*|(?:arquivos|pastas) (?:com|de) mais espaco|o que (?:(?:esta|estao) )?ocupa\w* (?:mais )?(?:o )?espaco)");
     private static readonly Regex StoragePath = new(@"configurac\w*\W+sistema\W+armazenamento");
+    private static readonly Regex Guide = new(@"\b(?:explic\w*|orient\w*|ensin\w*|indic\w*|como|abra|abre|abrir|acess\w*|va|vai)\b");
     private static bool OffersFileSearch(string normalized) => Sentences(normalized).Any(sentence =>
-        !StoragePath.IsMatch(sentence) && OfferedSearch.Matches(sentence).Any(offer => !Negated(sentence, offer)));
+        OfferedSearch.Matches(sentence).Any(offer => !Negated(sentence, offer)
+            && !(StoragePath.IsMatch(sentence) && Guide.IsMatch(offer.Groups["lead"].Value))));
 
     // Na validação da 11fa078 (conversa 2f762bbb), com o C: 87% livre e o alerta do T: encerrado depois de o VHDX sair, a
     // resposta mandou "Libere espaço no disco". Com alguma ocorrência de disco encerrada, nenhuma atual e nenhum volume do
     // relatório abaixo de 10% livre, a frase que diz que falta espaço ou manda liberar espaço é recusada. A frase com "?",
     // com condição ("se o disco encher"), no passado ou que diz que foi resolvido ou está encerrado passa, e a negação vale como no processo.
     // Passam também a frase sobre o estado do alerta ("o alerta de pouco espaço no T: não está mais ativo", "saiu do
-    // relatório") e a negação logo depois do trecho ("liberar espaço não é necessário") (@qa).
+    // relatório") e a negação logo depois do trecho ("liberar espaço não é necessário", "não deve ajudar"), e a frase com
+    // "não há necessidade" ou "não existe motivo". Depois de "mas" ou "porém", cada trecho é avaliado sozinho: "o alerta não
+    // está ativo, mas libere espaço no disco" é recusada (@qa).
     private static readonly Regex LowSpace = new(@"\b(?:liber\w*|abr\w*|desocup\w*) (?:\w+ ){0,2}espaco\b|\b(?:disco|unidade|volume|armazenamento|hd|ssd)\b(?: \S+){0,3} (?:cheio|cheia|lotad[oa]|sem espaco)\b|\bpouco espaco\b|\bfalta de espaco\b|\bespaco (?:\w+ ){0,2}(?:insuficiente|baixo|acabando)\b");
     private bool PresentsClosedDisk(string normalized)
     {
         if (!diskClosed || diskActive || lowestFreePercent < LowFreePercent) return false;
-        return Sentences(normalized).Any(sentence =>
+        return Sentences(normalized).SelectMany(sentence => Contrast.Split(sentence)).Any(sentence =>
             !sentence.Contains('?') && !Regex.IsMatch(sentence, @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve)\b|resolvid|encerrad|\bnormal|\bja foi\b|\bantes\b")
-            && !AlertState.IsMatch(sentence)
+            && !AlertState.IsMatch(sentence) && !NoNeed.IsMatch(sentence)
             && LowSpace.Matches(sentence).Any(match => !Negated(sentence, match) && !NotNeeded.IsMatch(sentence[(match.Index + match.Length)..])));
     }
     private static readonly Regex AlertState = new(@"\b(?:alerta|ocorrencia|aviso)s?\b.*(?:\bnao (?:esta|estao|e|sao|fica|ficou)(?: mais)? (?:ativ\w*|atua(?:l|is))\b|\bsaiu do relatorio\b|\bnao aparece(?:m)? mais\b)");
-    private static readonly Regex NotNeeded = new(@"^\W*(?:\w+\W+)?nao (?:(?:e|sera|seria|esta) (?:necessari\w*|precis\w*)|precis\w*)\b");
+    private static readonly Regex NotNeeded = new(@"^\W*(?:\w+\W+){0,2}?nao (?:(?:e|sera|seria|esta) (?:necessari\w*|precis\w*)|precis\w*|dev\w*)\b");
+    private static readonly Regex NoNeed = new(@"\bnao (?:ha|existe) (?:necessidade|motivo)\b");
+    private static readonly Regex Contrast = new(@"\b(?:mas|porem|contudo|entretanto|todavia|no entanto)\b");
 
     internal const string StaleProcessReason = "A resposta apresenta como atual o consumo de memória de um processo que o relatório de saúde só mostra em ocorrência encerrada (resolvida ou com estado atual desconhecido). Cite apenas o que continua nas leituras atuais, ou diga que essa ocorrência não está ativa.";
 

@@ -112,7 +112,10 @@ internal static class ValidationRetestChecks
             "Quer que eu liste os maiores arquivos do disco?",
             "Posso verificar o que está ocupando mais espaço no seu disco.",
             "Gostaria de ajuda para encontrar as pastas mais pesadas?",
-            "Vou procurar os arquivos que ocupam mais espaço no T:."
+            "Vou procurar os arquivos que ocupam mais espaço no T:.",
+            // Revisão do @qa no ceb7f40: o caminho não isenta a oferta do próprio Nexo, e o ":" depois da oferta não a quebra.
+            "Posso ajudar a identificar os maiores arquivos e depois você confere em Configurações > Sistema > Armazenamento.",
+            "Posso, se quiser: identificar os maiores arquivos."
         };
         var refused = offers.Where(offer => empty.ValidateStatement(offer, false) == InvestigationEvidence.FileSearchReason).Count();
         assert(refused == offers.Length,
@@ -193,7 +196,9 @@ internal static class ValidationRetestChecks
             ClosedDiskAnswer,
             "Libere espaço no disco.",
             "O disco está quase cheio, o que deixa o PC lento.",
-            "Há pouco espaço no disco T:."
+            "Há pouco espaço no disco T:.",
+            // Depois de "mas", o trecho é avaliado sozinho (@qa, no ceb7f40).
+            "O alerta de pouco espaço não está ativo, mas libere espaço no disco."
         };
         var refusedCount = refused.Count(text => closed.ValidateStatement(text, false) == InvestigationEvidence.ClosedDiskReason);
         assert(refusedCount == refused.Length,
@@ -212,7 +217,10 @@ internal static class ValidationRetestChecks
             "O alerta de pouco espaço no T: não está ativo agora.",
             "A ocorrência de pouco espaço no T: não é atual.",
             "O T: não existe mais; o aviso de pouco espaço dele saiu do relatório.",
-            "Liberar espaço não é necessário: o C: tem 87% livre."
+            "Liberar espaço não é necessário: o C: tem 87% livre.",
+            // Revisão do @qa no ceb7f40.
+            "Não há necessidade de liberar espaço.",
+            "Abrir espaço no disco não deve ajudar agora."
         };
         var passed = allowed.Count(text => closed.ValidateStatement(text, false) == null);
         assert(passed == allowed.Length,
