@@ -10,20 +10,12 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 
 ### Antes de publicar
 
+- [ ] **Prioridade alta:** o executor de rede elevado deixa de gravar resultados na pasta do usuário (`%LOCALAPPDATA%`) e passa a gravar só na pasta protegida em `%ProgramData%` (#95).
+- [ ] Corrigir as respostas do modelo fora do lugar vistas na validação da `11fa078` (#93).
 - [ ] Validar as sete falhas controladas em VM Windows (#8).
-- [ ] Concluir as correções críticas da recuperação: prazo e saída segura para transações de rede travadas (#9, PR #78), recuperação após encerramento abrupto do executor de rede (#10, PR #76), autenticação da decisão de manter uma mudança de rede (#11, sem PR) e prazo da instalação NVIDIA alinhado ao supervisor (#12).
-- [ ] Concluir a validação no PC das ocorrências estáveis de memória (#71) e dos ajustes do disco e da memória na resposta (#88).
-- [ ] Completar a seção "A incluir antes de publicar" abaixo com o que for mesclado e removê-la.
+- [ ] Autenticar a decisão de manter uma mudança de rede elevada (#11) e alinhar o prazo da instalação NVIDIA ao supervisor (#12).
+- [ ] Validar no PC: a recuperação e o prazo da rede com ACL e UAC reais (#9, #10); o custo da coleta de sensores, com e sem o Libre Hardware Monitor, e os discos atrás do AMD-RAID (#19); o patamar estável de memória com o NexoMemTeste-toca (#71); e o disco e a memória na resposta (#88).
 - [ ] Trocar "não publicada" pela data de publicação, gerar os pacotes e registrar abaixo o commit e os hashes impressos pelo script.
-
-### A incluir antes de publicar
-
-Mudanças ainda em PR aberto para a `development`. Ao mesclar cada uma, mova a linha para a seção certa acima e tire-a daqui.
-
-- [ ] PR #76 (#10): oferta de restauração da rede depois de encerramento abrupto do executor elevado.
-- [ ] PR #78 (#9): prazo para transação de rede travada e estado desconhecido informado na resposta.
-- [ ] PR #79 (#19): temperatura da CPU e estado dos discos, com origem e horário da leitura.
-- [ ] Correção da #88 (branch `fix/88-validacao-11fa078`): caminho de Configurações > Sistema > Armazenamento acrescentado pelo Nexo, oferta de achar os maiores arquivos recusada, alerta de disco encerrado não apresentado como atual e MB do processo que segura memória sempre presentes.
 
 ### Saúde do computador
 
@@ -33,6 +25,7 @@ Mudanças ainda em PR aberto para a `development`. Ao mesclar cada uma, mova a l
 - Crescimento de memória por processo, identificado por PID e horário de início. Um processo que se estabiliza num patamar alto por 30 minutos passa a "Estável em patamar alto", informativo; volta a "Persiste" se subir 10% sobre a referência gravada na ocorrência (#71).
 - Sondagens opcionais de gateway, DNS e destino HTTP(S), desligadas por padrão.
 - Serviços automáticos que o Windows deixa parados de propósito (início atrasado ou por gatilho com código 0) não geram alerta.
+- Temperatura da CPU pelo Libre Hardware Monitor (sensor de pacote ou die) e estado dos discos físicos pelo Windows Storage, com origem e horário da leitura; sem fonte confiável, o painel diz "indisponível" e o motivo (#19, PR #79).
 - Serviço automático parado com saída normal só gera alerta se o Nexo o viu em execução estável nos 10 minutos anteriores; os demais, como os GoogleUpdater, ficam num cartão informativo e não vão ao modelo como problema (#57). Saída com erro continua gerando alerta.
 - Limiares digitados com ponto não são mais multiplicados por dez.
 
@@ -49,6 +42,7 @@ Mudanças ainda em PR aberto para a `development`. Ao mesclar cada uma, mova a l
 - Recusa de ferramenta devolve ao modelo o motivo e o que é aceito; o turno não termina mais em erro por argumento inválido (#83).
 - O alvo nomeado pelo usuário é consultado antes e chega ao pedido de aprovação (#70).
 - Ocorrência encerrada (resolvida ou histórica) não é apresentada como problema atual; ocorrências estáveis e informativas vão ao modelo marcadas como tal (#88).
+- Os MB do processo que segura memória e, com alerta de pouco espaço ativo, a indicação de Configurações > Sistema > Armazenamento entram na resposta pelo próprio Nexo; a oferta de achar os maiores arquivos é recusada, e um alerta de disco já encerrado não vira pedido para liberar espaço (#88, PR #94).
 - Rótulos de progresso para todas as ferramentas, e "ferramenta inexistente pedida pelo modelo" quando ele pede uma que não existe (#84, #88).
 
 ### Recuperação e drivers
@@ -67,6 +61,8 @@ Mudanças ainda em PR aberto para a `development`. Ao mesclar cada uma, mova a l
 ### Rede
 
 - DNS fixo com DHCP apontado, teste TCP por IP e preferência por DNS automático.
+- Transação de rede interrompida (executor elevado encerrado no meio) é detectada na hora ou na próxima abertura e, se a mudança ficou pendente, o Nexo oferece restaurar a configuração anterior, com autorização e UAC. O backup confiável fica numa cópia protegida em `%ProgramData%`, e o que vem da pasta do usuário não é aplicado (#10, PR #76).
+- Prazo total de 5 minutos para a transação de rede, por fase; esgotado o prazo, o estado fica desconhecido e a resposta diz que nenhuma restauração foi confirmada, sem encerrar nem disputar com o executor ainda ativo (#9, PR #78).
 
 ### Interface e repositório
 
