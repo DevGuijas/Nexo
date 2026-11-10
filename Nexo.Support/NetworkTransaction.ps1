@@ -60,11 +60,38 @@ function Open-ProtectedDir {
     Use-ProtectedDirectory $protectedDir
     $protectedState.Opened = $true
 }
+# Descritor dos arquivos protegidos: dono Administradores, herança desligada, SYSTEM e Administradores com controle
+# total, Usuários só leitura. O dono não fica a cargo do padrão do processo (num administrador sem UAC ele é o usuário).
+function New-ProtectedFileSecurity {
+    $security = New-Object System.Security.AccessControl.FileSecurity
+    $security.SetOwner([System.Security.Principal.SecurityIdentifier]'S-1-5-32-544')
+    $security.SetAccessRuleProtection($true, $false)
+    foreach ($entry in @(@('S-1-5-18', 'FullControl'), @('S-1-5-32-544', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
+        $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.SecurityIdentifier]$entry[0], [System.Security.AccessControl.FileSystemRights]$entry[1], [System.Security.AccessControl.AccessControlType]::Allow)))
+    }
+    $security
+}
+# O arquivo nasce já com o descritor, numa única chamada (CreateNew), num temporário da pasta protegida, e substitui o
+# destino na mesma pasta: a troca mantém o descritor do novo arquivo. Sem conseguir o dono Administradores, falha.
+function Write-ProtectedFile($path, $text) {
+    $temporary = $path + '.tmp'
+    if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    $security = New-ProtectedFileSecurity
+    $rights = [System.Security.AccessControl.FileSystemRights]'Write, ReadData, Synchronize'
+    if ([IO.FileStream].GetConstructor([type[]]@([string], [IO.FileMode], [System.Security.AccessControl.FileSystemRights], [IO.FileShare], [int], [IO.FileOptions], [System.Security.AccessControl.FileSecurity]))) {
+        $stream = New-Object System.IO.FileStream($temporary, [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)
+    } else {
+        $stream = [System.IO.FileSystemAclExtensions]::Create((New-Object System.IO.FileInfo($temporary)), [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)
+    }
+    try {
+        [byte[]]$bytes = (New-Object System.Text.UTF8Encoding($true)).GetPreamble() + [System.Text.Encoding]::UTF8.GetBytes([string]$text)
+        $stream.Write($bytes, 0, $bytes.Length)
+    } finally { $stream.Dispose() }
+    Move-Item -LiteralPath $temporary -Destination $path -Force
+    Assert-Trusted $path
+}
 function Save-Protected($filename, $value) {
-    $destination = Join-Path $protectedDir $filename
-    $temporary = $destination + '.tmp'
-    $value | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $temporary -Encoding UTF8
-    Move-Item -LiteralPath $temporary -Destination $destination -Force
+    Write-ProtectedFile (Join-Path $protectedDir $filename) ($value | ConvertTo-Json -Depth 10)
 }
 # Registro protegido com a fase (applying, confirming, restoring): a janela de restauração usa esta fase, e não os
 # arquivos de %LOCALAPPDATA%.
@@ -74,7 +101,8 @@ function Save-ProtectedRecord($phase) {
 # Remove só os arquivos conhecidos e a pasta vazia: nunca apaga recursivamente com elevação (um link poderia apontar
 # para outro lugar).
 function Remove-ProtectedFolder($path) {
-    foreach ($name in 'before.json', 'transaction.json', 'recovery-result.json') { $file = Join-Path $path $name; if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } }
+    # Lista fechada, sem curinga: os três arquivos e os temporários que uma gravação interrompida pode deixar.
+    foreach ($name in 'before.json', 'transaction.json', 'recovery-result.json', 'before.json.tmp', 'transaction.json.tmp', 'recovery-result.json.tmp') { $file = Join-Path $path $name; if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } }
     [IO.Directory]::Delete($path, $false)
 }
 function Remove-Protected { if ($protectedState.Opened) { try { Remove-ProtectedFolder $protectedDir } catch { } } }

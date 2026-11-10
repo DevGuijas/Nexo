@@ -599,9 +599,11 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         return Finish(evidence.Report("Cheguei ao limite de etapas desta investigação. Os resultados acima podem orientar o próximo teste ou o encaminhamento à TI."));
 
         // O texto do modelo só é a resposta final quando nenhuma alteração pedida neste turno ficou sem chegar ao executor.
+        // Aceito, ele ganha as linhas do Nexo que não dependem do modelo: os MB do processo e, com pouco espaço atual, onde
+        // ver o uso do disco (validação da 11fa078).
         // Havendo alguma, a resposta é montada pelo Nexo: o que as consultas mostraram, as alterações concluídas e, pela trava,
         // o que não foi feito e por quê. Reconhecer as frases do modelo não basta (#73): "a fila da X foi limpa" escapava.
-        string ModelAnswer(string text) => refusedMutations.Count == 0 ? evidence.WithMemoryFigures(text) : evidence.Report("");
+        string ModelAnswer(string text) => refusedMutations.Count == 0 ? evidence.WithStorageGuidance(evidence.WithMemoryFigures(text)) : evidence.Report("");
         // Cada recusa do controle fica na auditoria com o motivo (#83): na validação no PC, o "[error]" não dizia qual regra recusou.
         // O motivo é sempre um texto fixo dos validadores; o texto do modelo não entra no registro.
         void Rejected(string what, string reason) => store.Log(actor, "Controle de execução recusou " + what + ": " + reason);

@@ -86,7 +86,7 @@ O painel e o relatório distinguem ocorrência persistente, resolvida nas leitur
 - O armazenamento local contém histórico e resultados técnicos em JSON e em `operations.db`; trate backups e exportações como dados potencialmente sensíveis.
 - Sem resultado no prazo, uma operação elevada fica em estado desconhecido, nunca como concluída. O processo não é encerrado nem revertido por isso, e continua podendo terminar depois.
 - Ainda estão abertos: prazo e saída segura para transações de rede travadas (#9), recuperação após encerramento abrupto do executor (#10), autenticação da decisão de manter uma mudança de rede (#11), prazo da instalação NVIDIA (#12) e conferência de que a versão instalada é a oferecida (#13).
-- O monitoramento só vê o período com a janela aberta. Temperatura e SMART ficam indisponíveis quando o Windows não fornece leitura confiável, e os sete cenários de falha ainda dependem da VM de laboratório (#8).
+- O monitoramento só vê o período com a janela aberta. A temperatura da CPU depende do Libre Hardware Monitor em execução, e o estado dos discos é o informado pelo Windows Storage, não um SMART completo ([limites da coleta](AVALIACAO-MONITORAMENTO-E-RECUPERACAO.md#escopo-implementado)). Os sete cenários de falha ainda dependem da VM de laboratório (#8).
 
 ## Evolução controlada
 

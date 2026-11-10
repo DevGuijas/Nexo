@@ -294,7 +294,10 @@ internal static class NetworkRecoveryChecks
             {
                 var executor = reader.ReadToEnd();
                 check(!executor.Contains("$env:ProgramData", StringComparison.OrdinalIgnoreCase) && executor.Contains("[Environment]::GetFolderPath('CommonApplicationData')")
-                    && !executor.Contains("Set-Acl", StringComparison.OrdinalIgnoreCase) && executor.Contains("[IO.Directory]::CreateDirectory($path, $security)"),
+                    && !executor.Contains("Set-Acl", StringComparison.OrdinalIgnoreCase) && executor.Contains("[IO.Directory]::CreateDirectory($path, $security)")
+                    && System.Text.RegularExpressions.Regex.Match(executor, @"function Save-Protected\(.*?\n\}", System.Text.RegularExpressions.RegexOptions.Singleline).Value is var saveProtected
+                    && saveProtected.Contains("Write-ProtectedFile") && !saveProtected.Contains("Set-Content") && executor.Contains("New-Object System.IO.FileStream($temporary, [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)")
+                    && executor.Contains("::Create((New-Object System.IO.FileInfo($temporary)), [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)"),
                     "Rede: o executor usa a API do Windows para %ProgramData%, cria a pasta já protegida e não reescreve ACL");
                 RealAcl(check, executor);
             }
@@ -376,20 +379,21 @@ internal static class NetworkRecoveryChecks
             File.WriteAllText(wrapperPath, "$source=Get-Content -LiteralPath '" + executorPath.Replace("'", "''") + "' -Raw -Encoding UTF8\n"
                 + "$ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)\n"
                 + "$definitions=@(($source -split \"`r?`n\") | Where-Object {$_ -match '^\\$trustedSids = '})\n"
-                + "foreach($function in 'New-ProtectedSecurity','New-ProtectedDirectory','Assert-Trusted','Use-ProtectedDirectory'){ $definitions+=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $function},$true).Extent.Text }\n"
+                + "foreach($function in 'New-ProtectedSecurity','New-ProtectedDirectory','Assert-Trusted','Use-ProtectedDirectory','New-ProtectedFileSecurity','Write-ProtectedFile'){ $definitions+=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $function},$true).Extent.Text }\n"
                 + ". ([scriptblock]::Create($definitions -join \"`n\"))\n"
                 + "foreach($path in @('" + nexo.Replace("'", "''") + "','" + Path.Combine(nexo, "operations").Replace("'", "''") + "','" + operation.Replace("'", "''") + "')){ Use-ProtectedDirectory $path }\n"
-                + "foreach($name in 'before.json','transaction.json'){ Set-Content -LiteralPath (Join-Path '" + operation.Replace("'", "''") + "' $name) -Value '{}' }\n", new UTF8Encoding(true));
+                + "foreach($name in 'before.json','transaction.json'){ Write-ProtectedFile (Join-Path '" + operation.Replace("'", "''") + "' $name) '{}' }\n", new UTF8Encoding(true));
             using var process = Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + wrapperPath + "\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true })!;
             var error = process.StandardError.ReadToEnd();
             process.WaitForExit(60000);
-            var created = process.ExitCode == 0 && NetworkRecovery.TrustedOnWindows(operation);
-            check(created, "Rede: pasta criada pelas funções reais do executor é aceita pela conferência de ACL do aplicativo" + (created ? "" : " (" + error.Trim() + ")"));
+            var reason = process.ExitCode == 0 ? NetworkRecovery.UntrustedReasonOnWindows(operation) : "executor saiu com " + process.ExitCode;
+            check(reason == null, "Rede: pasta criada pelas funções reais do executor é aceita pela conferência de ACL do aplicativo" + (reason == null ? "" : " (" + reason + "; " + error.Trim() + ")"));
             var file = new FileInfo(Path.Combine(operation, "before.json"));
             var security = file.GetAccessControl();
             security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), FileSystemRights.Modify, AccessControlType.Allow));
             file.SetAccessControl(security);
-            check(!NetworkRecovery.TrustedOnWindows(operation), "Rede: arquivo protegido com Users:Modify é recusado pela conferência de ACL do aplicativo");
+            var refused = NetworkRecovery.UntrustedReasonOnWindows(operation);
+            check(refused != null && refused.Contains("ACE de escrita"), "Rede: arquivo protegido com Users:Modify é recusado pela conferência de ACL do aplicativo (" + refused + ")");
         }
         finally
         {
