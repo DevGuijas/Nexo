@@ -158,8 +158,8 @@ internal static class HardwareSensorChecks
                 "Sensores: relatório de saúde para o assistente traz temperatura, discos e o limite da fonte");
             var lines = text.Split('\n').Select(l => l.TrimEnd('\r')).ToList();
             var scope = lines.IndexOf(HealthReportPresentation.PhysicalDiskScope);
-            check(scope > 0 && scope == lines.FindLastIndex(l => l.StartsWith("Disco ")) + 1 && HealthReportPresentation.PhysicalDiskScope.Contains("não estão ligados às letras de unidade"),
-                "Sensores: relatório avisa, logo depois dos discos físicos, que eles não estão ligados às letras de unidade (#93)");
+            check(scope > 0 && scope == lines.FindLastIndex(l => l.StartsWith("Disco ")) + 1 && HealthReportPresentation.PhysicalDiskScope.StartsWith("Esta leitura não liga os discos físicos às letras de unidade"),
+                "Sensores: relatório avisa, logo depois dos discos físicos, que a leitura não os liga às letras de unidade (#93)");
             var noDisks = new HealthSnapshot { Time = DateTimeOffset.UtcNow.AddSeconds(1), Storage = new StorageReading("unavailable", HardwareSensors.StorageSource, DateTimeOffset.UtcNow, 0, [], "O Windows não listou discos físicos."), StorageHealth = "unavailable" };
             store.SaveSnapshot(noDisks);
             check(!HealthReportPresentation.FromStore(store).Contains(HealthReportPresentation.PhysicalDiskScope),

@@ -56,8 +56,10 @@ public static class HardwareSensors
         var now = clock ?? (() => DateTimeOffset.UtcNow);
         var temperature = Attempt(() => run(TemperatureScript, TemperatureTimeoutSeconds, token), token);
         var storage = Attempt(() => run(StorageScript, StorageTimeoutSeconds, token), token);
-        var (temperatureOutput, temperatureError) = await temperature;
-        var (storageOutput, storageError) = await storage;
+        // Attempt só deixa subir o cancelamento pedido; WhenAll observa as duas tarefas mesmo quando ele acontece.
+        await Task.WhenAll(temperature, storage);
+        var (temperatureOutput, temperatureError) = temperature.Result;
+        var (storageOutput, storageError) = storage.Result;
         try
         {
             if (temperatureError != null) throw temperatureError;
@@ -88,7 +90,8 @@ public static class HardwareSensors
         catch (Exception ex) { return (null, ex); }
     }
 
-    public static void Read(JsonElement root, HealthSnapshot snapshot, DateTimeOffset fallbackTime)
+    // Leitura das duas partes de um JSON só; usada pelas verificações.
+    internal static void Read(JsonElement root, HealthSnapshot snapshot, DateTimeOffset fallbackTime)
     {
         ReadTemperature(root, snapshot, fallbackTime);
         ReadStorage(root, snapshot, fallbackTime);
@@ -131,7 +134,8 @@ public static class HardwareSensors
         snapshot.Warnings.Add("Estado dos discos: " + detail);
     }
 
-    public static void Unavailable(HealthSnapshot snapshot, DateTimeOffset time, string detail)
+    // As duas fontes indisponíveis de uma vez; usada pelas verificações.
+    internal static void Unavailable(HealthSnapshot snapshot, DateTimeOffset time, string detail)
     {
         snapshot.CpuTemperature = new TemperatureReading("error", Source: TemperatureSource, Time: time, Detail: detail);
         snapshot.CpuTemperatureC = null;
