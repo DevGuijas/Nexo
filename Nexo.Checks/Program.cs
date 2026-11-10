@@ -220,11 +220,11 @@ try
     await ValidationAdjustmentChecks.Run(store, admin, Assert);
     await ServiceTransitionChecks.Run(Assert);
     await ValidationFollowUpChecks.Run(store, admin, Assert);
+    await NetworkRecoveryChecks.Run(Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);
     await MultiInterfaceChecks.Run(Assert);
-    await NetworkRecoveryChecks.Run(Assert);
     await PeripheralRegressionChecks.Run(store, admin, Assert);
     if (args.Contains("--interface-probe-live"))
     {

@@ -5,6 +5,71 @@ $before = $null
 $changed = $false
 $dhcpTransition = @{}
 $failureState = $null
+# Cópia protegida (#10): o backup e o registro também ficam em %ProgramData%, numa pasta que só SYSTEM e
+# Administradores podem alterar. A restauração lê só de lá; os arquivos em %LOCALAPPDATA% podem ser forjados por
+# qualquer processo do usuário e nunca definem o que é aplicado com elevação.
+$protectedRoot = Join-Path $env:ProgramData 'NexoSupport\operations'
+$protectedDir = Join-Path $protectedRoot ([string]$operationId)
+$protectedState = @{Opened=$false}
+$trustedSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+function Assert-OperationId {
+    if ([string]$operationId -cnotmatch '^[0-9a-f]{32}$' -or (Split-Path -Leaf $operationDir) -cne [string]$operationId) { throw 'Identificador de operação inválido. Nenhuma alteração foi feita.' }
+}
+function Protect-Directory($path) {
+    if (Test-Path -LiteralPath $path) {
+        if ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'A pasta protegida do Nexo é um link. Nenhuma alteração foi feita.' }
+    } else { New-Item -ItemType Directory -Path $path -Force | Out-Null }
+    $acl = New-Object System.Security.AccessControl.DirectorySecurity
+    $acl.SetOwner([System.Security.Principal.SecurityIdentifier]'S-1-5-32-544')
+    $acl.SetAccessRuleProtection($true, $false)
+    $inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit'
+    foreach ($entry in @(@('S-1-5-18', 'FullControl'), @('S-1-5-32-544', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.SecurityIdentifier]$entry[0], [System.Security.AccessControl.FileSystemRights]$entry[1], $inherit, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)))
+    }
+    Set-Acl -LiteralPath $path -AclObject $acl
+}
+function Assert-Trusted($path) {
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'O backup protegido está em um link. A restauração automática foi recusada.' }
+    $acl = Get-Acl -LiteralPath $path
+    if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $trustedSids) { throw 'O backup protegido não pertence ao sistema nem aos administradores. A restauração automática foi recusada.' }
+    # Escrita, criação, exclusão, troca de permissão ou de dono, e os direitos genéricos de escrita.
+    $write = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+    foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -ne 'Allow' -or ($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
+        if (([int64]$rule.FileSystemRights -band $write) -and $rule.IdentityReference.Value -notin $trustedSids) { throw 'O backup protegido pode ser alterado por outros usuários. A restauração automática foi recusada.' }
+    }
+}
+function Open-ProtectedDir {
+    Protect-Directory (Split-Path -Parent $protectedRoot)
+    Protect-Directory $protectedRoot
+    Remove-StaleProtected
+    # O id é um GUID novo do aplicativo: uma pasta que já existe não foi criada por esta operação.
+    if (Test-Path -LiteralPath $protectedDir) { throw 'A pasta protegida desta operação já existia. Nenhuma alteração foi feita.' }
+    Protect-Directory $protectedDir
+    $protectedState.Opened = $true
+}
+function Save-Protected($filename, $value) {
+    $destination = Join-Path $protectedDir $filename
+    $temporary = $destination + '.tmp'
+    $value | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $destination -Force
+}
+# Remove só os arquivos conhecidos e a pasta vazia: nunca apaga recursivamente com elevação (um link poderia apontar
+# para outro lugar).
+function Remove-ProtectedFolder($path) {
+    foreach ($name in 'before.json', 'transaction.json') { $file = Join-Path $path $name; if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } }
+    [IO.Directory]::Delete($path, $false)
+}
+function Remove-Protected { if ($protectedState.Opened) { try { Remove-ProtectedFolder $protectedDir } catch { } } }
+function Remove-StaleProtected {
+    try {
+        $limit = (Get-Date).ToUniversalTime().AddDays(-7)
+        foreach ($folder in @(Get-ChildItem -LiteralPath $protectedRoot -Directory -Force)) {
+            if ($folder.Name -cmatch '^[0-9a-f]{32}$' -and -not ($folder.Attributes -band [IO.FileAttributes]::ReparsePoint) -and $folder.LastWriteTimeUtc -lt $limit) { try { Remove-ProtectedFolder $folder.FullName } catch { } }
+        }
+    } catch { }
+}
 function Set-AutomaticIP {
     $current = Get-NetAdapter -InterfaceIndex $interfaceIndex -ErrorAction Stop
     if ([guid]$current.InterfaceGuid -ne [guid]$before.Guid) { throw 'A identidade da interface mudou antes da transição DHCP.' }
@@ -92,10 +157,16 @@ function Assert-Restored($restored) {
         if (-not [string]::IsNullOrWhiteSpace($restored.StaticDns)) { throw 'DNS automático anterior não restaurado.' }
     } elseif ((@($restored.Dns) -join ',') -ne (@($before.Dns) -join ',')) { throw 'Os servidores DNS anteriores não foram restaurados.' }
 }
-if ($recoveryBeforeJson) {
-    $before = $recoveryBeforeJson | ConvertFrom-Json
+if ($recoveryMode) {
     $found = $null
     try {
+        Assert-OperationId
+        foreach ($path in @((Split-Path -Parent $protectedRoot), $protectedRoot, $protectedDir, (Join-Path $protectedDir 'transaction.json'), (Join-Path $protectedDir 'before.json'))) { Assert-Trusted $path }
+        $protectedState.Opened = $true
+        $record = Get-Content -LiteralPath (Join-Path $protectedDir 'transaction.json') -Raw | ConvertFrom-Json
+        $before = Get-Content -LiteralPath (Join-Path $protectedDir 'before.json') -Raw | ConvertFrom-Json
+        if ([string]::IsNullOrWhiteSpace($request.ExpectedGuid) -or [string]$record.Action -ne [string]$request.Action -or [int]$record.Index -ne $interfaceIndex -or [guid]$record.ExpectedGuid -ne [guid]$request.ExpectedGuid -or [int]$before.Index -ne $interfaceIndex -or [guid]$before.Guid -ne [guid]$record.ExpectedGuid) { throw 'O pedido de restauração não corresponde ao registro protegido. Nenhuma alteração foi feita.' }
+        $request = [pscustomobject]@{Action=[string]$record.Action;Index=[int]$record.Index;ExpectedGuid=[string]$record.ExpectedGuid}
         $adapter = Get-NetAdapter -InterfaceIndex $interfaceIndex -ErrorAction Stop
         if ([guid]$adapter.InterfaceGuid -ne [guid]$before.Guid -or [guid]$adapter.InterfaceGuid -ne [guid]$request.ExpectedGuid) { throw 'A interface neste índice não é a mesma da transação interrompida. Nenhuma alteração foi feita.' }
         $found = Snapshot
@@ -112,15 +183,20 @@ if ($recoveryBeforeJson) {
         try { $state = Snapshot } catch { $state = @{error=$_.Exception.Message} }
         Save-Result 'recovery-result.json' @{success=$false;restored=$false;alreadyRestored=$false;error=$failure;found=$found;state=$state}
     }
+    Remove-Protected
     return
 }
 try {
+    Assert-OperationId
     $adapter = Get-NetAdapter -InterfaceIndex $interfaceIndex
     if ([string]::IsNullOrWhiteSpace($request.ExpectedGuid) -or [guid]$adapter.InterfaceGuid -ne [guid]$request.ExpectedGuid) { throw 'A identidade da interface mudou desde a consulta. Consulte a rede novamente.' }
     $hostHyperV = [string]$adapter.InterfaceDescription -match '^Hyper-V Virtual Ethernet Adapter( #\d+)?$'
     $managedSwitch = [string]$adapter.Name -match '(Default Switch|Comutador Padrão|Switch Padrão)'
     if ($managedSwitch -or (($adapter.Virtual -or -not $adapter.HardwareInterface) -and -not $hostHyperV)) { throw 'Esta interface é gerenciada pelo Windows ou por VPN. Reconfiguração de IP/DNS não permitida.' }
     $before = Snapshot
+    Open-ProtectedDir
+    Save-Protected 'transaction.json' @{Action=[string]$request.Action;Index=$interfaceIndex;ExpectedGuid=[string]$request.ExpectedGuid;Created=(Get-Date).ToUniversalTime().ToString('o')}
+    Save-Protected 'before.json' $before
     Save-Result 'before.json' $before
     $changed = $true
     if ($request.Action -eq 'set_dns') {
@@ -183,3 +259,4 @@ try {
     if ($changed -and $before) { try { Restore-Network; $reverted=$true } catch { $rollbackError=$_.Exception.Message } }
     Save-Result 'result.json' @{success=$false;error=$failure;changed=$changed;reverted=$reverted;rollbackError=$rollbackError;dhcpTransition=$dhcpTransition;failureState=$failureState;backup=(Join-Path $operationDir 'before.json')}
 }
+Remove-Protected

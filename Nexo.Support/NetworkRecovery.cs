@@ -2,6 +2,9 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.Versioning;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -11,6 +14,18 @@ namespace Nexo.Support;
 public sealed record NetworkTransactionRecord(string Action, int Index, string ExpectedGuid, DateTimeOffset Created, int? ProcessId = null, int? RecoveryProcessId = null);
 
 public sealed record InterruptedNetworkTransaction(string Directory, NetworkTransactionRecord Record, string Phase, string? Before, string? Resolution);
+
+/// <summary>
+/// Onde fica a cópia protegida de cada transação (#10) e como conferir que ela só pode ter sido gravada com elevação.
+/// O executor elevado grava backup e registro em %ProgramData%\NexoSupport\operations\&lt;id&gt;, com dono Administradores,
+/// herança desligada, SYSTEM e Administradores com controle total e Usuários só com leitura.
+/// </summary>
+public sealed record NetworkRecoveryTrust(string ProtectedRoot, Func<string, bool> Trusted)
+{
+    public static NetworkRecoveryTrust Default { get; } = new(
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexoSupport", "operations"),
+        directory => OperatingSystem.IsWindows() && NetworkRecovery.TrustedOnWindows(directory));
+}
 
 public interface IElevatedProcess : IDisposable
 {
@@ -33,24 +48,38 @@ public static class NetworkRecovery
     public const string ResultFile = "recovery-result.json";
     public static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(120);
     private static readonly TimeSpan StartGrace = TimeSpan.FromMinutes(10);
+    /// <summary>Uma transação interrompida há mais tempo que isso não tem a restauração oferecida (#10).</summary>
+    public static readonly TimeSpan MaxAge = TimeSpan.FromDays(7);
+    public const string NotStartedMessage = "O executor de rede não foi iniciado ({0}). Nenhuma alteração de rede foi feita.";
 
     public static IElevatedProcess StartElevated(string script) => new ElevatedProcess(WindowsTools.StartElevated(script));
 
     public static void WriteRecord(string directory, NetworkTransactionRecord record) => WriteJson(Path.Combine(directory, RecordFile), record);
 
-    public static List<InterruptedNetworkTransaction> Scan(string root, DateTimeOffset now, Func<int, bool>? isRunning = null)
+    /// <summary>Id de operação aceito: GUID no formato "N" (32 dígitos hexadecimais minúsculos), como o NetworkChange cria.</summary>
+    public static bool IsOperationId(string? id) => id is { Length: 32 } && id.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    /// <summary>Registra que o executor não chegou a iniciar (UAC recusado, por exemplo): a abertura seguinte não oferece nada.</summary>
+    public static void MarkNotStarted(string directory, string reason)
+        => WriteJson(Path.Combine(directory, ResultFile), new { success = false, restored = false, started = false, unchanged = true, message = string.Format(System.Globalization.CultureInfo.InvariantCulture, NotStartedMessage, reason), recordedAt = DateTimeOffset.UtcNow });
+
+    public static List<InterruptedNetworkTransaction> Scan(string root, DateTimeOffset now, Func<int, bool>? isRunning = null, NetworkRecoveryTrust? trust = null)
     {
         var found = new List<InterruptedNetworkTransaction>();
         var operations = Path.Combine(root, "operations");
         if (!System.IO.Directory.Exists(operations)) return found;
-        foreach (var directory in System.IO.Directory.EnumerateDirectories(operations).OrderBy(d => System.IO.Directory.GetCreationTimeUtc(d)))
-            if (Inspect(directory, now, isRunning) is { } item) found.Add(item);
+        foreach (var directory in System.IO.Directory.EnumerateDirectories(operations).Where(d => IsOperationId(Path.GetFileName(d))).OrderBy(d => System.IO.Directory.GetCreationTimeUtc(d)))
+            if (Inspect(directory, now, isRunning, trust: trust) is { } item) found.Add(item);
         return found;
     }
 
-    public static InterruptedNetworkTransaction? Inspect(string directory, DateTimeOffset now, Func<int, bool>? isRunning = null, bool exited = false)
+    public static InterruptedNetworkTransaction? Inspect(string directory, DateTimeOffset now, Func<int, bool>? isRunning = null, bool exited = false, NetworkRecoveryTrust? trust = null)
     {
         isRunning ??= Running;
+        trust ??= NetworkRecoveryTrust.Default;
+        // Só uma pasta de operação de verdade: GUID "N" e nenhum "..". Outra pasta é ignorada, sem gravar nada nela.
+        var id = Path.GetFileName(Path.TrimEndingDirectorySeparator(directory));
+        if (!IsOperationId(id) || directory.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Contains("..")) return null;
         var recordPath = Path.Combine(directory, RecordFile);
         if (!File.Exists(recordPath) || File.Exists(Path.Combine(directory, "result.json")) || File.Exists(Path.Combine(directory, ResultFile))) return null;
         NetworkTransactionRecord record;
@@ -68,10 +97,30 @@ public static class NetworkRecovery
         var beforePath = Path.Combine(directory, "before.json");
         if (!File.Exists(beforePath))
             return Resolved(directory, record, "before-backup", new { success = true, restored = false, unchanged = true, message = "A transação de rede foi interrompida antes de salvar o estado anterior; o executor não chegou a alterar a rede. Nenhuma restauração é necessária." });
+        // A cópia em %LOCALAPPDATA% pode ser forjada por qualquer processo do usuário (#10): o que é mostrado e restaurado
+        // vem só da cópia protegida, gravada pelo executor elevado.
+        var protectedDirectory = Path.Combine(trust.ProtectedRoot, id);
+        var protectedBefore = Path.Combine(protectedDirectory, "before.json");
+        var protectedRecord = Path.Combine(protectedDirectory, RecordFile);
+        if (!File.Exists(protectedBefore) || !File.Exists(protectedRecord))
+            return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "Não há cópia protegida do estado anterior desta alteração de rede (ela é gravada pelo executor com permissão de administrador). A restauração automática não foi oferecida; confira a rede manualmente.", backup = beforePath });
+        if (!trust.Trusted(protectedDirectory))
+            return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "A cópia protegida do estado anterior tem dono ou permissões inesperados e pode ter sido alterada. A restauração automática não foi oferecida; confira a rede manualmente.", backup = beforePath });
+        NetworkTransactionRecord secured;
+        try { secured = JsonSerializer.Deserialize<NetworkTransactionRecord>(File.ReadAllText(protectedRecord)) ?? throw new JsonException("Registro vazio."); }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "O registro protegido da transação de rede está ilegível (" + ex.Message + "). A restauração automática não foi oferecida; confira a rede manualmente.", backup = beforePath });
+        }
+        if (secured.Action != record.Action || secured.Index != record.Index || !SameGuid(secured.ExpectedGuid, record.ExpectedGuid))
+            return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "O registro da transação de rede não corresponde à cópia protegida. A restauração automática não foi oferecida; confira a rede manualmente.", backup = beforePath });
+        record = secured with { ProcessId = record.ProcessId, RecoveryProcessId = record.RecoveryProcessId };
+        if (now - secured.Created > MaxAge)
+            return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "A alteração de rede interrompida foi iniciada há mais de " + MaxAge.TotalDays.ToString("F0", System.Globalization.CultureInfo.InvariantCulture) + " dias (" + secured.Created.ToLocalTime().ToString("dd/MM/yyyy HH:mm", System.Globalization.CultureInfo.InvariantCulture) + "). A restauração automática não é oferecida para uma configuração tão antiga; confira a rede antes de outra alteração.", backup = beforePath });
         if (decision == "keep")
             return Resolved(directory, record, "keeping", new { success = false, restored = false, uncertain = true, message = "Você confirmou manter a nova configuração de rede, mas o executor terminou antes de registrar o resultado. A configuração atual não foi conferida; consulte a rede antes de outra alteração.", backup = beforePath });
-        try { return new InterruptedNetworkTransaction(directory, record, phase, Validate(File.ReadAllText(beforePath), record), null); }
-        catch (Exception ex) when (ex is JsonException or InvalidDataException or FormatException or IOException)
+        try { return new InterruptedNetworkTransaction(directory, record, phase, Validate(File.ReadAllText(protectedBefore), record), null); }
+        catch (Exception ex) when (ex is JsonException or InvalidDataException or FormatException or IOException or UnauthorizedAccessException)
         {
             return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "O backup da configuração anterior não pôde ser validado (" + ex.Message + "). A restauração automática não foi oferecida; confira a rede manualmente.", backup = beforePath });
         }
@@ -115,7 +164,7 @@ public static class NetworkRecovery
     {
         using var before = JsonDocument.Parse(item.Before ?? "{}");
         var root = before.RootElement;
-        var name = root.TryGetProperty("Name", out var n) ? n.GetString() : "";
+        var name = SafeName(root.TryGetProperty("Name", out var n) ? n.GetString() : "");
         var dhcp = root.GetProperty("Dhcp").GetString() == "Enabled";
         var addresses = string.Join(", ", root.GetProperty("Addresses").EnumerateArray().Where(a => a.GetProperty("PrefixOrigin").GetString() is "Manual" or "1").Select(a => a.GetProperty("IPAddress").GetString() + "/" + a.GetProperty("PrefixLength").GetInt32()));
         var gateways = string.Join(", ", root.GetProperty("Routes").EnumerateArray().Select(r => r.GetProperty("NextHop").GetString()));
@@ -148,7 +197,8 @@ public static class NetworkRecovery
         using var source = typeof(NetworkRecovery).Assembly.GetManifestResourceStream("Nexo.NetworkTransaction.ps1") ?? throw new IOException("Executor de rede ausente.");
         using var reader = new StreamReader(source);
         var request = new NetworkRequest(item.Record.Action, item.Record.Index, "", [], "", 0, "") { ExpectedGuid = item.Record.ExpectedGuid };
-        var script = "$requestJson=" + Decode(JsonSerializer.Serialize(request)) + "; $recoveryBeforeJson=" + Decode(item.Before) + "; $operationDir=" + WindowsTools.Quote(item.Directory) + ";\n" + await reader.ReadToEndAsync(token);
+        // O estado anterior não vai no script: o processo elevado lê a cópia protegida e confere dono e permissões (#10).
+        var script = "$requestJson=" + Decode(JsonSerializer.Serialize(request)) + "; $recoveryMode=$true; $operationId=" + WindowsTools.Quote(Path.GetFileName(Path.TrimEndingDirectorySeparator(item.Directory))) + "; $operationDir=" + WindowsTools.Quote(item.Directory) + ";\n" + await reader.ReadToEndAsync(token);
         IElevatedProcess process;
         try { process = start(script); }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or InvalidOperationException)
@@ -190,6 +240,47 @@ public static class NetworkRecovery
         }
         catch (JsonException) { return false; }
     }
+
+    /// <summary>
+    /// A pasta protegida e os dois arquivos só valem se nenhum deles é link, todos têm dono SYSTEM, Administradores ou
+    /// TrustedInstaller, e nenhuma outra conta tem direito de escrita, exclusão, troca de permissão ou de dono. A pasta
+    /// "operations" e a "NexoSupport" acima dela também são conferidas.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static bool TrustedOnWindows(string directory)
+    {
+        try
+        {
+            var operations = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(directory))!;
+            var items = new FileSystemInfo[] { new DirectoryInfo(Path.GetDirectoryName(operations)!), new DirectoryInfo(operations), new DirectoryInfo(directory), new FileInfo(Path.Combine(directory, "before.json")), new FileInfo(Path.Combine(directory, RecordFile)) };
+            foreach (var item in items)
+            {
+                if (!item.Exists || item.Attributes.HasFlag(FileAttributes.ReparsePoint)) return false;
+                FileSystemSecurity security = item is DirectoryInfo folder ? folder.GetAccessControl() : ((FileInfo)item).GetAccessControl();
+                if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner || !TrustedSid(owner)) return false;
+                foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+                    if (rule.AccessControlType == AccessControlType.Allow && !rule.PropagationFlags.HasFlag(PropagationFlags.InheritOnly)
+                        && ((long)rule.FileSystemRights & WriteRights) != 0 && !(rule.IdentityReference is SecurityIdentifier sid && TrustedSid(sid))) return false;
+            }
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or SystemException) { return false; }
+    }
+
+    // WriteData/CreateFiles, AppendData/CreateDirectories, WriteExtendedAttributes, DeleteSubdirectoriesAndFiles,
+    // WriteAttributes, Delete, ChangePermissions, TakeOwnership, GENERIC_ALL e GENERIC_WRITE.
+    private const long WriteRights = 0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000;
+    private const string TrustedInstaller = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+
+    [SupportedOSPlatform("windows")]
+    private static bool TrustedSid(SecurityIdentifier sid)
+        => sid.IsWellKnown(WellKnownSidType.LocalSystemSid) || sid.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid) || sid.Value == TrustedInstaller;
+
+    private static bool SameGuid(string first, string second) => Guid.TryParse(first, out var a) && Guid.TryParse(second, out var b) && a == b;
+
+    // O nome do adaptador vai para a janela de aprovação: só letras, dígitos e pontuação comum de nomes de interface.
+    internal static string SafeName(string? value)
+        => new string((value ?? "").Take(80).Select(c => char.IsLetterOrDigit(c) || c is ' ' or '-' or '_' or '.' or '(' or ')' or '#' ? c : '_').ToArray()).Trim();
 
     private static bool Running(int pid)
     {
