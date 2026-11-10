@@ -391,7 +391,7 @@ internal static class TriageChecks
         // O sintoma citado na resposta ("os sites não abrem") não é um componente que a resposta diz ter verificado.
         const string slowFinish = "Verifiquei a memória: há 5 GB livres de 31.9 GB, por isso o pc trava e até os sites não abrem direito.";
         var slowAnswer = await Run(store, actor, [User("o pc tá travando")], slow, Call("finish_support", new { message = slowFinish }));
-        assert(slow.Calls.SequenceEqual(["get_health_report", "diagnose_device"]) && slowAnswer == slowFinish,
+        assert(slow.Calls.SequenceEqual(["get_health_report", "diagnose_device"]) && slowAnswer == slowFinish + "\n\n" + TurnFacts.Prefix + " nenhuma.",
             "Fluxo: travamento abre a mesma observação do sistema, e o sintoma citado na resposta não exige outra consulta");
 
         // Relatório de saúde não identifica alvo: sem a verificação do sistema, o acompanhamento de reconexão continua indisponível.
@@ -412,7 +412,7 @@ internal static class TriageChecks
         var reportOnly = new FlowTools((name, _) => name == "get_health_report" ? WindowsTools.Ok(FinalAnswerChecks.DiskLowReport(withHistoricalCpu: false)) : throw new Exception("Ferramenta inesperada: " + name));
         const string reportFinish = "Consultei o relatório de saúde: o disco T: está com 7% livre. Revise o uso do disco; o Nexo não apaga arquivos.";
         var reportAnswer = await Run(store, actor, [User("Meu computador está estranho desde ontem")], reportOnly, Call("get_health_report", new { }), Call("finish_support", new { message = reportFinish }));
-        assert(reportOnly.Calls.SequenceEqual(["get_health_report"]) && reportAnswer == reportFinish, "Fluxo: relatório de saúde conta como verificação do sistema na resposta do modelo");
+        assert(reportOnly.Calls.SequenceEqual(["get_health_report"]) && reportAnswer == reportFinish + "\n\n" + TurnFacts.Prefix + " nenhuma.", "Fluxo: relatório de saúde conta como verificação do sistema na resposta do modelo");
     }
 
     private static string Network(bool dhcp = true) => WindowsTools.Ok(new { Adapters = new[] {

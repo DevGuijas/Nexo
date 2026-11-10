@@ -19,6 +19,7 @@ try
     ScenarioChecks.Run(Assert);
     HealthOccurrenceChecks.Run(Assert);
     MemoryOccurrenceChecks.Run(Assert);
+    MemoryPlateauChecks.Run(Assert);
     var freshDirectRoot = Path.Combine(root, "direct-fresh");
     var freshDirectStore = new Store(freshDirectRoot, directAccess: true);
     var directSession = freshDirectStore.GetLocalSession();
@@ -213,6 +214,12 @@ try
     await DnsRepairChecks.Run(store, admin, Assert);
     await ServiceEventChecks.Run(store, admin, Assert);
     TargetChoiceChecks.Run(Assert);
+    await DriverChoiceChecks.Run(store, admin, Assert);
+    await ToolArgumentChecks.Run(store, admin, Assert);
+    await PcChoiceChecks.Run(store, admin, Assert);
+    await ValidationAdjustmentChecks.Run(store, admin, Assert);
+    await ServiceTransitionChecks.Run(Assert);
+    await ValidationFollowUpChecks.Run(store, admin, Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);

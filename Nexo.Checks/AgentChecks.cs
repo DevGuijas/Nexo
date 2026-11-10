@@ -53,7 +53,8 @@ internal static class AgentChecks
         var cameraAnswer = await Run("Minha câmera não funciona", cameraTools,
             Call("restart_service", new { service = "Spooler" }),
             Call("finish_support", new { message = "A câmera foi identificada, mas nenhuma alteração foi concluída." }));
-        assert(cameraTools.Calls.SequenceEqual(["diagnose_device"]) && cameraAnswer.Contains("nenhuma alteração"), "Ferramenta de impressão não altera Windows em incidente de câmera");
+        assert(cameraTools.Calls.SequenceEqual(["diagnose_device"]) && cameraAnswer.EndsWith("\n\nAlterações feitas pelo Nexo neste turno: nenhuma. Não executadas: reinício do serviço “Spooler” (barrada pelo Nexo).")
+            && cameraAnswer.Contains("O Nexo não executou a etapa") && cameraAnswer.Contains("não cita a impressora"), "Ferramenta de impressão não altera Windows em incidente de câmera: a resposta diz que nada foi alterado e por quê (" + cameraAnswer + ")");
 
         var twoCameras = WindowsTools.Ok(new { count = 2, devices = new[] {
             new { Id = "USB\\CAM1", Name = "Câmera interna", Code = 22, Status = "Error" },
@@ -79,7 +80,7 @@ internal static class AgentChecks
         var noContent = await Run("Verifique serviços", noContentTools,
             Call("get_services", new { }, includeContent: false),
             Call("finish_support", new { message = "Consulta concluída." }));
-        assert(noContentTools.Calls.SequenceEqual(["get_services"]) && noContent == "Consulta concluída.", "Resposta só com tool_calls é aceita sem content");
+        assert(noContentTools.Calls.SequenceEqual(["get_services"]) && noContent == "Consulta concluída.\n\nAlterações feitas pelo Nexo neste turno: nenhuma.", "Resposta só com tool_calls é aceita sem content");
 
         const string videoRequest = "Atualize os drivers da minha placa de vídeo";
         const string videoHardwareId = "PCI\\VEN_1234&DEV_5678";
