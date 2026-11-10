@@ -5,8 +5,7 @@ param(
     [string]$ModelRoot = "$env:USERPROFILE\.ollama\models",
     [string]$SigningKeyPath = "$env:USERPROFILE\.nexo-release-signing.pem",
     [switch]$ReuseArchives,
-    [switch]$ReusePublishedDependencies,
-    [string]$PublishedOrigin = 'https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/'
+    [switch]$ReusePublishedDependencies
 )
 $ErrorActionPreference = 'Stop'
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'Use o PowerShell 7 (pwsh) para gerar a versão.' }
@@ -17,15 +16,12 @@ if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Versão do projeto inválida.
 $changelog = Get-Content -LiteralPath (Join-Path $projectRoot 'CHANGELOG.md') -Encoding utf8
 $heading = $changelog | Where-Object { $_ -match ('^## \[' + [regex]::Escape($version) + '\] — (.+)$') } | Select-Object -First 1
 if (-not $heading) { throw "O CHANGELOG.md não tem a versão $version." }
-if (($heading -replace ('^## \[' + [regex]::Escape($version) + '\] — '), '').Trim() -notmatch '^\d{4}-\d{2}-\d{2}$') { throw "A versão $version está marcada como não publicada no CHANGELOG.md. Conclua os itens de 'Antes de publicar' e registre a data de publicação." }
-$publishedApp = $PublishedOrigin + "releases/$version/nexo-app.zip"
-$alreadyPublished = $false
-try { Invoke-WebRequest -Uri $publishedApp -Method Head -UseBasicParsing | Out-Null; $alreadyPublished = $true }
-catch {
-    if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) { $alreadyPublished = $false }
-    else { throw "Não foi possível confirmar se a versão $version já foi publicada: $($_.Exception.Message)" }
-}
-if ($alreadyPublished) { throw "A versão $version já está publicada em $publishedApp. Versões publicadas são imutáveis; aumente a versão em Nexo.Support.csproj e no CHANGELOG.md." }
+$publicationDate = [datetime]::MinValue
+if (-not [datetime]::TryParseExact(($heading -replace ('^## \[' + [regex]::Escape($version) + '\] — '), '').Trim(), 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$publicationDate)) { throw "A versão $version está marcada como não publicada no CHANGELOG.md. Conclua os itens de 'Antes de publicar' e registre a data de publicação." }
+. (Join-Path $PSScriptRoot 'Release-Guard.ps1')
+$publicKey = Join-Path $projectRoot 'Nexo.Setup/release-public.pem'
+$published = Assert-NexoNewRelease -Version $version -PublicKeyPath $publicKey
+Write-Host "Versão publicada: $($published.Version); gerando a $version."
 $ollama = $null
 if ($OllamaInstallerPath) {
     $ollama = (Resolve-Path -LiteralPath $OllamaInstallerPath).Path
@@ -85,18 +81,8 @@ function Package([string]$path) {
 }
 $latest = [ordered]@{ schema = 1; version = $version; model = 'qwen3:8b'; app = (Package $appArchive) }
 if ($ReusePublishedDependencies) {
-    $origin = $PublishedOrigin
-    $previousContent = (Invoke-WebRequest -Uri ($origin + 'latest.json') -UseBasicParsing).Content
-    $previousBytes = if ($previousContent -is [byte[]]) { $previousContent } else { [System.Text.Encoding]::UTF8.GetBytes([string]$previousContent) }
-    $signatureContent = (Invoke-WebRequest -Uri ($origin + 'latest.sig') -UseBasicParsing).Content
-    $previousSignature = if ($signatureContent -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($signatureContent).Trim() } else { ([string]$signatureContent).Trim() }
-    $publicKey = Join-Path $projectRoot 'Nexo.Setup/release-public.pem'
-    $verifier = [System.Security.Cryptography.RSA]::Create()
-    try {
-        $verifier.ImportFromPem([System.IO.File]::ReadAllText($publicKey))
-        if (-not $verifier.VerifyData($previousBytes, [Convert]::FromBase64String($previousSignature), [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)) { throw 'Manifesto anterior não possui assinatura válida.' }
-    } finally { $verifier.Dispose() }
-    $previous = [System.Text.Encoding]::UTF8.GetString($previousBytes) | ConvertFrom-Json
+    # Manifesto publicado já lido e com a assinatura conferida por Assert-NexoNewRelease.
+    $previous = $published.Manifest
     if ($previous.model -ne 'qwen3:8b' -or !$previous.modelArchive -or !$previous.ollama) { throw 'Pacotes publicados não podem ser reutilizados.' }
     $latest.modelArchive = $previous.modelArchive
     $latest.ollama = $previous.ollama
