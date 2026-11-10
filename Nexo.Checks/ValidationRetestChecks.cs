@@ -31,6 +31,9 @@ internal static class ValidationRetestChecks
             StorageLine(assert);
             ClosedDisk(assert);
             await ClosedDiskFlow(store, actor, assert);
+            // Revisão do @qa no cff1b22.
+            ActiveAndClosedDisk(assert);
+            ReportReplaced(assert);
         }
         finally { store.Data.AiEnabled = previousAi; }
     }
@@ -66,6 +69,14 @@ internal static class ValidationRetestChecks
         assert(rounded.WithMemoryFigures("O NexoMemTeste (cerca de 10 GB) segura memória.") == "O NexoMemTeste (cerca de 10 GB) segura memória."
             && rounded.WithMemoryFigures("O NexoMemTeste (cerca de 9 GB) segura memória.").Contains("“NexoMemTeste” (PID 21356) segue com 10806 MB"),
             "Reteste memória (passo 2.7): até 10% da leitura conta como os MB do processo (10 GB para 10806 MB); 9 GB (15%) não");
+
+        // O "livre" de outra oração não tira o valor do processo; milhar com espaço comum ou não separável (@qa, item 6).
+        const string clauses = "O NexoMemTeste (PID 21356) usa 10.806 MB, e a memória livre é de 4,7 GB.";
+        assert(rounded.WithMemoryFigures(clauses) == clauses
+            && rounded.WithMemoryFigures("Com 4 GB livres, o NexoMemTeste usa 10.806 MB.") == "Com 4 GB livres, o NexoMemTeste usa 10.806 MB."
+            && rounded.WithMemoryFigures("O NexoMemTeste usa 10 806 MB.") == "O NexoMemTeste usa 10 806 MB."
+            && rounded.WithMemoryFigures("O NexoMemTeste usa 10\u00A0806\u00A0MB.") == "O NexoMemTeste usa 10\u00A0806\u00A0MB.",
+            "Reteste memória: o \"livre\" de outra oração não conta, e o milhar com espaço é lido");
 
         // A memória livre do sistema com o mesmo valor do processo continua sem contar.
         var same = Observed(HolderReport(4813));
@@ -112,7 +123,14 @@ internal static class ValidationRetestChecks
             "O Nexo não lista arquivos; não posso identificar os maiores arquivos.",
             "Você pode ver os maiores arquivos em Configurações > Sistema > Armazenamento.",
             "Posso ajudar com outra dúvida sobre o disco?",
-            "O disco T: está com 0,1 GB livres de 2 GB."
+            "O disco T: está com 0,1 GB livres de 2 GB.",
+            // O que o motivo pede: levar ao caminho do Armazenamento (@qa, item 1).
+            "Posso orientar você a ver o que ocupa espaço em Configurações > Sistema > Armazenamento.",
+            "Se quiser, posso explicar como ver os maiores arquivos em Configurações > Sistema > Armazenamento no Windows.",
+            "Eu ajudo: abra Configurações > Sistema > Armazenamento para ver o que está ocupando espaço.",
+            // Não é oferta (@qa, item 4).
+            "Vou verificar o relatório: os maiores arquivos não aparecem nele.",
+            "Vou ser direto: o relatório mostra só o espaço livre, e os maiores arquivos ficam no Armazenamento do Windows."
         };
         var passed = allowed.Where(text => empty.ValidateStatement(text, false) == null).Count();
         assert(passed == allowed.Length,
@@ -154,6 +172,10 @@ internal static class ValidationRetestChecks
         const string already = "O disco T: tem 0,1 GB livres; veja o uso em Configurações › Sistema › Armazenamento.";
         assert(active.WithStorageGuidance(already) == already && active.WithStorageGuidance("A memória está normal.") == "A memória está normal.",
             "Reteste disco: a resposta que já tem o caminho, ou que não fala de disco, fica como está");
+        const string audio = "Aumente o volume do alto-falante e confira a unidade de som.";
+        const string letter = "O T: tem 0,1 GB livres.";
+        assert(active.WithStorageGuidance(audio) == audio && active.WithStorageGuidance(letter) == letter + "\n\n" + InvestigationEvidence.StorageGuidance,
+            "Reteste disco: \"volume\" e \"unidade\" sozinhos não trazem a linha; a letra da unidade traz");
         var closed = Observed(ClosedDiskReport());
         assert(closed.WithStorageGuidance(plain) == plain && new InvestigationEvidence().WithStorageGuidance(plain) == plain,
             "Reteste disco: sem pouco espaço atual (ocorrência encerrada ou sem relatório), a linha não entra");
@@ -184,7 +206,13 @@ internal static class ValidationRetestChecks
             "O disco não está cheio.",
             "Está faltando espaço no disco?",
             "O disco T: estava quase cheio antes.",
-            "O disco C: tem 87% livre."
+            "O disco C: tem 87% livre.",
+            // O estado do alerta e a negação depois do trecho (@qa, item 2).
+            "O alerta de pouco espaço no T: não está mais ativo.",
+            "O alerta de pouco espaço no T: não está ativo agora.",
+            "A ocorrência de pouco espaço no T: não é atual.",
+            "O T: não existe mais; o aviso de pouco espaço dele saiu do relatório.",
+            "Liberar espaço não é necessário: o C: tem 87% livre."
         };
         var passed = allowed.Count(text => closed.ValidateStatement(text, false) == null);
         assert(passed == allowed.Length,
@@ -196,6 +224,54 @@ internal static class ValidationRetestChecks
         var low = System.Text.RegularExpressions.Regex.Replace(report, @"^Volume C:_: [\d.,]+% livre\.", "Volume C:_: 4,0% livre.", System.Text.RegularExpressions.RegexOptions.Multiline);
         assert(low != report && Observed(low).ValidateStatement("Libere espaço no disco.", false) == null,
             "Reteste disco: com um volume abaixo de 10% livre no relatório, mandar liberar espaço passa");
+    }
+
+    // T: com pouco espaço atual e outro volume com alerta encerrado; o limite configurado (20%) deixa o T: acima de 10% (@qa, item 3).
+    private static void ActiveAndClosedDisk(Action<bool, string> assert)
+    {
+        var report = MixedDiskReport();
+        var lines = report.Split('\n').Where(line => line.StartsWith("Achado disk", StringComparison.Ordinal)).ToArray();
+        assert(lines.Any(line => line.Contains("Pouco espaço no volume T:") && line.Contains("persiste")) && lines.Any(line => line.Contains("Pouco espaço no volume X:") && !line.Contains("persiste")),
+            "Reteste disco: o relatório tem o T: atual e o X: encerrado");
+        var evidence = Observed(report);
+        assert(evidence.ValidateStatement("Libere espaço no disco T:.", false) == null,
+            "Reteste disco: com o T: atual e outro volume encerrado, mandar liberar espaço no T: passa");
+    }
+
+    // Dois relatórios no mesmo turno: o segundo substitui o primeiro, inclusive o menor espaço livre (@qa, item 7).
+    private static void ReportReplaced(Action<bool, string> assert)
+    {
+        var closed = ClosedDiskReport();
+        var low = System.Text.RegularExpressions.Regex.Replace(closed, @"^Volume C:_: [\d.,]+% livre\.", "Volume C:_: 4,0% livre.", System.Text.RegularExpressions.RegexOptions.Multiline);
+        var evidence = Observed(low);
+        assert(evidence.ValidateStatement("Libere espaço no disco.", false) == null, "Reteste disco: no 1º relatório, um volume a 4% livre deixa passar");
+        evidence.Observe("get_health_report", "h2", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(closed));
+        assert(evidence.ValidateStatement("Libere espaço no disco.", false) == InvestigationEvidence.ClosedDiskReason,
+            "Reteste disco: o 2º relatório do turno, com 87% livre, substitui o 1º; o espaço baixo de antes não vaza");
+    }
+
+    private static string MixedDiskReport()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "nexo-88b-mixed-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var db = new OperationalStore(root);
+            var now = DateTimeOffset.UtcNow;
+            var thresholds = new HealthThresholds { DiskLowFreePercent = 20 };
+            HealthSnapshot Sample(DateTimeOffset at, bool old) => new() { Time = at, CpuPercent = 12, MemoryUsedPercent = 40, CollectionStatus = "complete",
+                Disks = old ? [new DiskHealth("C:\\", 435_000, 500_000), new DiskHealth("X:\\", 100, 2_000)] : [new DiskHealth("C:\\", 435_000, 500_000), new DiskHealth("T:\\", 300, 2_000)] };
+            var before = new[] { Sample(now.AddMinutes(-30), true), Sample(now.AddMinutes(-29), true) };
+            foreach (var sample in before) db.SaveSnapshot(sample);
+            var oldFound = HealthRules.Evaluate(before, thresholds);
+            foreach (var finding in oldFound) finding.Id += ":s1";
+            var current = Enumerable.Range(0, 3).Select(i => Sample(now.AddSeconds(-30 * (2 - i)), false)).ToArray();
+            foreach (var sample in current) db.SaveSnapshot(sample);
+            var newFound = HealthRules.Evaluate(current, thresholds);
+            foreach (var finding in newFound) finding.Id += ":s5";
+            db.SaveFindings([.. oldFound, .. newFound]);
+            return HealthReportPresentation.FromStore(db, thresholds);
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
 
     private static async Task ClosedDiskFlow(Store store, Account actor, Action<bool, string> assert)

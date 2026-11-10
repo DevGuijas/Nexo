@@ -259,26 +259,34 @@ public sealed class InvestigationEvidence
     // arquivos estão ocupando mais espaço no disco T:. Deseja que eu faça isso?", apesar do prompt; a cada "sim" o modelo
     // chamava outra consulta. O Nexo não tem ferramenta que liste arquivos, então a oferta é recusada em qualquer turno,
     // com ou sem relatório de saúde. Vale a frase que oferece (1ª pessoa) procurar os maiores arquivos ou pastas, ou o que
-    // ocupa espaço; "Para ver o que ocupa espaço, abra Configurações…" e "não posso listar os maiores arquivos" passam.
-    private static readonly Regex SpaceOffer = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo|(?:gostaria|quer|deseja|precisa)(?: de)? (?:uma )?ajuda)\b");
-    private static readonly Regex SpaceSearch = new(@"\b(?:identific\w*|list\w*|ach\w*|encontr\w*|localiz\w*|procur\w*|busc\w*|verific\w*|mostr\w*|analis\w*|descobr\w*|apont\w*|ver|veja)\b");
-    private static readonly Regex SpaceTarget = new(@"\b(?:maiores (?:arquivos|pastas)|(?:arquivos|pastas) (?:mais )?(?:grandes|pesad\w*|volumos\w*)|(?:arquivos|pastas) (?:que )?(?:(?:esta|estao|estejam) )?ocupa\w*|(?:arquivos|pastas) (?:com|de) mais espaco|o que (?:(?:esta|estao) )?ocupa\w* (?:mais )?(?:o )?espaco)");
+    // ocupa espaço. A oferta, a busca e o alvo vêm nessa ordem, na mesma oração (sem ":" ou ";" no meio): "Vou verificar o
+    // relatório: os maiores arquivos não aparecem nele" passa. A frase que leva ao caminho do Armazenamento também passa
+    // ("posso orientar você a ver o que ocupa espaço em Configurações > Sistema > Armazenamento"), porque é o que o motivo
+    // pede; sem isso, obedecer ao motivo levava à 4ª recusa (@qa). "Não posso listar os maiores arquivos" passa.
+    private static readonly Regex OfferedSearch = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo|(?:gostaria|quer|deseja|precisa)(?: de)? (?:uma )?ajuda)\b"
+        + @"[^:;]*?\b(?:identific\w*|list\w*|ach\w*|encontr\w*|localiz\w*|procur\w*|busc\w*|verific\w*|mostr\w*|analis\w*|descobr\w*|apont\w*|ver|veja)\b"
+        + @"[^:;]*?\b(?:maiores (?:arquivos|pastas)|(?:arquivos|pastas) (?:mais )?(?:grandes|pesad\w*|volumos\w*)|(?:arquivos|pastas) (?:que )?(?:(?:esta|estao|estejam) )?ocupa\w*|(?:arquivos|pastas) (?:com|de) mais espaco|o que (?:(?:esta|estao) )?ocupa\w* (?:mais )?(?:o )?espaco)");
+    private static readonly Regex StoragePath = new(@"configurac\w*\W+sistema\W+armazenamento");
     private static bool OffersFileSearch(string normalized) => Sentences(normalized).Any(sentence =>
-        SpaceTarget.IsMatch(sentence) && SpaceSearch.IsMatch(sentence)
-        && SpaceOffer.Matches(sentence).Any(offer => !Negated(sentence, offer)));
+        !StoragePath.IsMatch(sentence) && OfferedSearch.Matches(sentence).Any(offer => !Negated(sentence, offer)));
 
     // Na validação da 11fa078 (conversa 2f762bbb), com o C: 87% livre e o alerta do T: encerrado depois de o VHDX sair, a
     // resposta mandou "Libere espaço no disco". Com alguma ocorrência de disco encerrada, nenhuma atual e nenhum volume do
     // relatório abaixo de 10% livre, a frase que diz que falta espaço ou manda liberar espaço é recusada. A frase com "?",
     // com condição ("se o disco encher"), no passado ou que diz que foi resolvido ou está encerrado passa, e a negação vale como no processo.
+    // Passam também a frase sobre o estado do alerta ("o alerta de pouco espaço no T: não está mais ativo", "saiu do
+    // relatório") e a negação logo depois do trecho ("liberar espaço não é necessário") (@qa).
     private static readonly Regex LowSpace = new(@"\b(?:liber\w*|abr\w*|desocup\w*) (?:\w+ ){0,2}espaco\b|\b(?:disco|unidade|volume|armazenamento|hd|ssd)\b(?: \S+){0,3} (?:cheio|cheia|lotad[oa]|sem espaco)\b|\bpouco espaco\b|\bfalta de espaco\b|\bespaco (?:\w+ ){0,2}(?:insuficiente|baixo|acabando)\b");
     private bool PresentsClosedDisk(string normalized)
     {
         if (!diskClosed || diskActive || lowestFreePercent < LowFreePercent) return false;
         return Sentences(normalized).Any(sentence =>
             !sentence.Contains('?') && !Regex.IsMatch(sentence, @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve)\b|resolvid|encerrad|\bnormal|\bja foi\b|\bantes\b")
-            && LowSpace.Matches(sentence).Any(match => !Negated(sentence, match)));
+            && !AlertState.IsMatch(sentence)
+            && LowSpace.Matches(sentence).Any(match => !Negated(sentence, match) && !NotNeeded.IsMatch(sentence[(match.Index + match.Length)..])));
     }
+    private static readonly Regex AlertState = new(@"\b(?:alerta|ocorrencia|aviso)s?\b.*(?:\bnao (?:esta|estao|e|sao|fica|ficou)(?: mais)? (?:ativ\w*|atua(?:l|is))\b|\bsaiu do relatorio\b|\bnao aparece(?:m)? mais\b)");
+    private static readonly Regex NotNeeded = new(@"^\W*(?:\w+\W+)?nao (?:(?:e|sera|seria|esta) (?:necessari\w*|precis\w*)|precis\w*)\b");
 
     internal const string StaleProcessReason = "A resposta apresenta como atual o consumo de memória de um processo que o relatório de saúde só mostra em ocorrência encerrada (resolvida ou com estado atual desconhecido). Cite apenas o que continua nas leituras atuais, ou diga que essa ocorrência não está ativa.";
 
@@ -306,13 +314,19 @@ public sealed class InvestigationEvidence
     // para o processo cuja frase (a que cita o nome ou o PID) já traz os MB dele: um valor até 10% longe da leitura atual ou
     // do fim da subida. "Cerca de 10 GB" com 10806 MB (5% longe) conta como citado; "cerca de 9 GB" (15%) não. Um valor
     // ligado a memória livre, total, disponível ou instalada nunca conta.
-    private static readonly Regex Amount = new(@"(?<![\d.,])(?<value>\d{1,3}(?:\.\d{3})+(?![,.]\d)|\d+(?:[.,]\d+)?)\s*(?<unit>mb|gb|megabytes?|gigabytes?)\b");
+    // Milhar com ponto, espaço ou espaço não separável ("12.055", "10 806"); decimal com vírgula ou ponto ("4,7", "10.5").
+    private static readonly Regex Amount = new(@"(?<![\d.,])(?<value>\d{1,3}(?:[. \u00A0\u202F]\d{3})+(?![,.]\d)|\d+(?:[.,]\d+)?)[ \u00A0\u202F]*(?<unit>mb|gb|megabytes?|gigabytes?)\b");
+    // "Livre", "total"... só contam ligados ao número: na mesma oração (sem "," ";" ":" ou parênteses no meio), até seis
+    // palavras antes ou duas depois. "Usa 10.806 MB, e a memória livre é de 4,7 GB": o 10.806 é do processo (@qa).
+    private static readonly Regex SystemMemory = new(@"\b(livres?|disponive(l|is)|total|instalad[oa]s?)\b");
     private static bool CitesFigure(string sentence, (string Name, int Pid, long From, long To, long? Now) holder) => Amount.Matches(sentence).Any(match =>
     {
-        var around = sentence[Math.Max(0, match.Index - 40)..Math.Min(sentence.Length, match.Index + match.Length + 25)];
-        if (Regex.IsMatch(around, @"\b(livres?|disponive(l|is)|total|instalad[oa]s?)\b")) return false;
+        var before = Regex.Split(sentence[..match.Index], @"[,;:()]")[^1];
+        var after = Regex.Split(sentence[(match.Index + match.Length)..], @"[,;:()]")[0];
+        var near = Regex.Matches(before, @"[\p{L}\p{N}]+").TakeLast(6).Concat(Regex.Matches(after, @"[\p{L}\p{N}]+").Take(2));
+        if (near.Any(word => SystemMemory.IsMatch(word.Value))) return false;
         var raw = match.Groups["value"].Value;
-        var value = Regex.IsMatch(raw, @"^\d{1,3}(\.\d{3})+$") ? double.Parse(raw.Replace(".", ""), CultureInfo.InvariantCulture)
+        var value = Regex.IsMatch(raw, @"^\d{1,3}([. \u00A0\u202F]\d{3})+$") ? double.Parse(Regex.Replace(raw, @"[. \u00A0\u202F]", ""), CultureInfo.InvariantCulture)
             : double.Parse(raw.Replace(',', '.'), CultureInfo.InvariantCulture);
         var megabytes = match.Groups["unit"].Value.StartsWith('g') ? value * 1024 : value;
         return new[] { holder.Now, holder.To }.Any(reading => reading is > 0 && Math.Abs(megabytes - reading.Value) <= 0.10 * reading.Value);
@@ -343,8 +357,9 @@ public sealed class InvestigationEvidence
     {
         if (!diskActive || string.IsNullOrWhiteSpace(answer)) return answer;
         var text = AgentProtocol.Normalize(answer);
-        if (!Regex.IsMatch(text, @"\b(disco|espaco|armazenamento|volume|unidade)\b")) return answer;
-        if (Regex.IsMatch(text, @"configurac\w*\W+sistema\W+armazenamento")) return answer;
+        // "Volume" e "unidade" sozinhos não bastam ("aumente o volume"): vale disco, espaço, armazenamento ou letra de unidade (@qa).
+        if (!Regex.IsMatch(text, @"\b(disco|discos|espaco|armazenamento)\b|(?<![\w:])[a-z]:(?=[\\_\s.,;)]|$)")) return answer;
+        if (StoragePath.IsMatch(text)) return answer;
         return BeforeQuestions(answer, StorageGuidance);
     }
 
