@@ -20,6 +20,7 @@ function Get-Content { param([string]$LiteralPath,[switch]$Raw) if($LiteralPath 
 function New-ProtectedDirectory($path) { if(Test-Path -LiteralPath $path){throw ('Created over an existing folder: '+$path)}; New-Item -ItemType Directory -Path $path | Out-Null; $script:created+=@($path) }
 function Assert-Trusted($path) { if(-not (Test-Path -LiteralPath $path)){throw ('Protected item missing: '+$path)}; if($script:untrusted -or $script:untrustedPaths -contains $path){throw ('Simulated untrusted protected copy at '+$path+'; it is not used.')} }
 function Set-Acl { $script:aclWrites++ }
+function Write-ProtectedFile($path, $text) { Set-Content -LiteralPath $path -Value $text; $script:protectedWrites+=@(Split-Path -Leaf $path) }
 function Invoke-TestNetsh {
     Assert-Backed
     if (($args -join ' ') -ne 'interface ipv4 set address name=10 source=dhcp store=persistent') { throw 'Unexpected native arguments' }
@@ -63,11 +64,18 @@ $productionRoot="([Environment]::GetFolderPath('CommonApplicationData'))"
 # executor never rewrites an ACL.
 foreach($forbidden in '$env:ProgramData','Set-Acl'){ if($source.Contains($forbidden)){throw ('NetworkTransaction.ps1 must not use '+$forbidden)} }
 Write-Output 'PASS: executor uses the Windows API for the protected root and never calls Set-Acl'
+# Protected files are born with the explicit descriptor: only Save-Result (the %LOCALAPPDATA% folder) uses Set-Content.
+$parsed=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)
+function FunctionText($name) { $parsed.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true).Extent.Text }
+$saveProtected=FunctionText 'Save-Protected'; $writeProtected=FunctionText 'Write-ProtectedFile'; $saveResult=FunctionText 'Save-Result'
+$setContent=[regex]::Matches($source,'Set-Content|Out-File|WriteAllText|WriteAllBytes').Count
+if(-not $saveProtected.Contains('Write-ProtectedFile') -or $saveProtected -match 'Set-Content|Out-File|WriteAll' -or -not $writeProtected.Contains('FileSecurity') -or -not $writeProtected.Contains('FileStream($temporary, [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)') -or -not $writeProtected.Contains('Create((New-Object System.IO.FileInfo($temporary)), [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)') -or $writeProtected -match 'Set-Content|Out-File|WriteAll' -or $setContent -ne [regex]::Matches($saveResult,'Set-Content').Count){throw 'Protected files must be created only by Write-ProtectedFile with an explicit FileSecurity'}
+Write-Output 'PASS: protected files are created with an explicit descriptor, never with Set-Content'
 # Each scenario gets its own simulated %ProgramData%.
-function UseProgramData($name) { $script:programData=Join-Path $testRoot ('pd-'+$name); $script:protectedTestRoot=Join-Path $script:programData 'NexoSupport\operations'; $script:created=@(); $script:untrustedPaths=@(); $script:aclWrites=0; $script:phases=@() }
+function UseProgramData($name) { $script:programData=Join-Path $testRoot ('pd-'+$name); $script:protectedTestRoot=Join-Path $script:programData 'NexoSupport\operations'; $script:created=@(); $script:untrustedPaths=@(); $script:aclWrites=0; $script:phases=@(); $script:protectedWrites=@() }
 function Isolated($text) {
-    foreach($piece in @($productionRoot,'function New-ProtectedDirectory(','function Assert-Trusted(')){ if(-not $text.Contains($piece)){throw ('Protected-store hook not found: '+$piece)} }
-    $text.Replace($productionRoot,"'"+$script:programData.Replace("'","''")+"'").Replace('function New-ProtectedDirectory(','function New-ProtectedDirectory-Windows(').Replace('function Assert-Trusted(','function Assert-Trusted-Windows(')
+    foreach($piece in @($productionRoot,'function New-ProtectedDirectory(','function Assert-Trusted(','function Write-ProtectedFile(')){ if(-not $text.Contains($piece)){throw ('Protected-store hook not found: '+$piece)} }
+    $text.Replace($productionRoot,"'"+$script:programData.Replace("'","''")+"'").Replace('function New-ProtectedDirectory(','function New-ProtectedDirectory-Windows(').Replace('function Assert-Trusted(','function Assert-Trusted-Windows(').Replace('function Write-ProtectedFile(','function Write-ProtectedFile-Windows(')
 }
 function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') {
     $script:state=@{Dhcp='Disabled';StaticDns='10.0.0.2';Dns=@('10.0.0.2');Addresses=@([pscustomobject]@{IPAddress='10.0.0.10';PrefixLength=24;PrefixOrigin=1;AddressState=4});Routes=@([pscustomobject]@{DestinationPrefix='0.0.0.0/0';NextHop='10.0.0.1';RouteMetric=256})}
@@ -115,6 +123,7 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
         if(Test-Path -LiteralPath $script:currentProtected){throw ($name+': protected copy was left behind after the result')}
         $expected=$(if($variant -eq 'existing-trusted-root'){@($script:currentProtected)}else{@($nexoRoot,$script:protectedTestRoot,$script:currentProtected)})
         if((@($script:created) -join '|') -ne ($expected -join '|')){throw ($name+': protected folders created: '+(@($script:created) -join ', '))}
+        if(@($script:protectedWrites) -notcontains 'transaction.json' -or @($script:protectedWrites) -notcontains 'before.json'){throw ($name+': protected files not written by Write-ProtectedFile: '+(@($script:protectedWrites) -join ', '))}
     }
     Write-Output ('PASS: simulated network transaction '+$name)
     if($variant -eq 'error-84' -and -not $script:transitionCalled){throw 'Static-to-DHCP transition was not requested'}
@@ -152,7 +161,10 @@ function Recover($name,$action,$current,$expect,$variant='normal') {
     if($variant -in 'untrusted','missing-protected') {
         if(Test-Path -LiteralPath $resultPath){throw ($name+': result written without a trusted protected copy')}
         $result=$null; $expect='silent'
-    } else { $result=Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json }
+    } else {
+        $result=Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+        if(@($script:protectedWrites) -notcontains 'recovery-result.json'){throw ($name+': recovery result not written by Write-ProtectedFile')}
+    }
     switch($expect) {
         'restored' { if(-not $result.success -or -not $result.restored -or -not $result.found -or -not $result.after){throw ($name+': restore not reported: '+($result | ConvertTo-Json -Depth 5))} }
         'already' { if(-not $result.success -or $result.restored -or -not $result.alreadyRestored){throw ($name+': matching state was not detected')} }
@@ -202,7 +214,7 @@ try {
     if($onWindows -and ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         $ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)
         $definitions=@(($source -split "`r?`n") | Where-Object {$_ -match '^\$trustedSids = '})
-        foreach($function in 'New-ProtectedSecurity','New-ProtectedDirectory','Assert-Trusted','Use-ProtectedDirectory'){ $definitions+=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $function},$true).Extent.Text }
+        foreach($function in 'New-ProtectedSecurity','New-ProtectedDirectory','Assert-Trusted','Use-ProtectedDirectory','New-ProtectedFileSecurity','Write-ProtectedFile'){ $definitions+=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $function},$true).Extent.Text }
         $real=[scriptblock]::Create(($definitions -join "`n")+"`n"+@'
 $dir=Join-Path $args[0] 'acl-real'
 Use-ProtectedDirectory $dir
@@ -211,7 +223,10 @@ if(-not $acl.AreAccessRulesProtected){throw 'Real ACL: the new folder inherits p
 if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544'){throw 'Real ACL: owner is not Administrators'}
 foreach($rule in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])){ if($rule.IdentityReference.Value -eq 'S-1-5-32-545' -and ([int64]$rule.FileSystemRights -band 0x500D0156)){throw 'Real ACL: Users can write to the protected folder'} }
 Use-ProtectedDirectory $dir
-$file=Join-Path $dir 'before.json'; Set-Content -LiteralPath $file -Value '{}'
+$file=Join-Path $dir 'before.json'; Write-ProtectedFile $file '{}'; Write-ProtectedFile $file '{"again":true}'
+$fileAcl=Get-Acl -LiteralPath $file
+if($fileAcl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544' -or -not $fileAcl.AreAccessRulesProtected){throw ('Real ACL: protected file owner/inheritance is wrong: '+$fileAcl.Sddl)}
+if((Get-Content -LiteralPath $file -Raw) -notmatch 'again'){throw 'Real ACL: protected file was not replaced'}
 Assert-Trusted $dir; Assert-Trusted $file
 $open=Get-Acl -LiteralPath $file
 $open.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.SecurityIdentifier]'S-1-5-32-545','Modify','Allow')))

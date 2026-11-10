@@ -295,7 +295,11 @@ public static class NetworkRecovery
     /// permissão ou de dono. A pasta "operations" e a "NexoSupport" acima dela também são conferidas.
     /// </summary>
     [SupportedOSPlatform("windows")]
-    internal static bool TrustedOnWindows(string directory)
+    internal static bool TrustedOnWindows(string directory) => UntrustedReasonOnWindows(directory) == null;
+
+    /// <summary>Motivo da recusa da cópia protegida (caminho, regra, dono e ACE), ou null quando ela é confiável.</summary>
+    [SupportedOSPlatform("windows")]
+    internal static string? UntrustedReasonOnWindows(string directory)
     {
         try
         {
@@ -303,18 +307,29 @@ public static class NetworkRecovery
             var items = new FileSystemInfo[] { new DirectoryInfo(Path.GetDirectoryName(operations)!), new DirectoryInfo(operations), new DirectoryInfo(directory), new FileInfo(Path.Combine(directory, "before.json")), new FileInfo(Path.Combine(directory, RecordFile)) };
             foreach (var item in items)
             {
-                if (!item.Exists || item.Attributes.HasFlag(FileAttributes.ReparsePoint)) return false;
+                if (!item.Exists) return item.FullName + ": não existe";
+                if (item.Attributes.HasFlag(FileAttributes.ReparsePoint)) return item.FullName + ": é link (reparse point)";
                 FileSystemSecurity security = item is DirectoryInfo folder ? folder.GetAccessControl() : ((FileInfo)item).GetAccessControl();
-                if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner || !TrustedSid(owner)) return false;
-                // As pastas precisam estar com a herança desligada; os arquivos herdam da pasta protegida.
-                if (item is DirectoryInfo && !security.AreAccessRulesProtected) return false;
+                var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+                if (owner == null || !TrustedSid(owner)) return item.FullName + ": dono não confiável (" + Account(owner) + ")";
+                // As pastas precisam estar com a herança desligada; os arquivos são criados já com o descritor explícito.
+                if (item is DirectoryInfo && !security.AreAccessRulesProtected) return item.FullName + ": pasta herda permissões (dono " + Account(owner) + ")";
                 foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
                     if (rule.AccessControlType == AccessControlType.Allow && !rule.PropagationFlags.HasFlag(PropagationFlags.InheritOnly)
-                        && ((long)rule.FileSystemRights & WriteRights) != 0 && !(rule.IdentityReference is SecurityIdentifier sid && TrustedSid(sid))) return false;
+                        && ((long)rule.FileSystemRights & WriteRights) != 0 && !(rule.IdentityReference is SecurityIdentifier sid && TrustedSid(sid)))
+                        return item.FullName + ": ACE de escrita para " + Account(rule.IdentityReference as SecurityIdentifier) + " (" + rule.FileSystemRights + (rule.IsInherited ? ", herdada" : "") + "; dono " + Account(owner) + ")";
             }
-            return true;
+            return null;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or SystemException) { return false; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or SystemException) { return directory + ": não foi possível ler a ACL (" + ex.GetType().Name + ": " + ex.Message + ")"; }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static string Account(SecurityIdentifier? sid)
+    {
+        if (sid == null) return "desconhecido";
+        try { return sid.Translate(typeof(NTAccount)).Value + " " + sid.Value; }
+        catch (Exception ex) when (ex is IdentityNotMappedException or SystemException) { return sid.Value; }
     }
 
     // WriteData/CreateFiles, AppendData/CreateDirectories, WriteExtendedAttributes, DeleteSubdirectoriesAndFiles,
