@@ -75,9 +75,11 @@ public partial class MainWindow : Window
         try { using var local = new OperationalStore(store.Root); return HealthReportPresentation.FromStore(local, healthSettings.Thresholds()); }
         catch (Exception ex) { return "O relatório de saúde local também está indisponível: " + ex.Message + ". O histórico de conversas permanece separado."; }
     }
+    private string? interruptedFacts;
+    private string InterruptedFacts() { var line = interruptedFacts; interruptedFacts = null; return line == null ? "" : "\n\n" + line; }
     private static string AnswerPresentation(string answer)
     {
-        var normalized = AgentProtocol.Normalize(answer);
+        var normalized = AgentProtocol.Normalize(TurnFacts.Body(answer));
         return normalized.Contains("nao consegui") || normalized.Contains("nao conseguiu selecionar") || normalized.Contains("resposta invalida")
             || normalized.Contains("limite de etapas") || normalized.Contains("interrompi as acoes")
             || normalized.Contains("nao foi concluida") || normalized.Contains("nao foi confirmada")
@@ -296,17 +298,22 @@ public partial class MainWindow : Window
                 }
                 PageContent.Children.Add(Card(overview));
             }
-            var alerts = healthStore.RecentFindings(20);
+            // Parada normal sem prova de execução vai para o aviso informativo, não para as ocorrências (#57).
+            var alerts = healthStore.RecentFindings(20).Where(finding => !HealthOccurrences.SupersededServiceStop(finding, latest)).ToList();
             var occurrenceNow = DateTimeOffset.UtcNow;
             var occurrenceHistory = healthStore.RecentSnapshots(occurrenceNow.AddHours(-6), 20);
             var occurrenceLimits = healthSettings.Thresholds();
             PageContent.Children.Add(SectionHeading("health", "Ocorrências preventivas"));
             PageContent.Children.Add(Card(Text(HealthOccurrences.CollectionNotice(latest, occurrenceLimits, occurrenceNow), 12, "Secondary")));
             if (alerts.Count == 0) PageContent.Children.Add(Card(Text("Nenhuma ocorrência registrada.", 13, "Secondary")));
-            foreach (var (finding, status) in HealthOccurrences.Classify(alerts, occurrenceHistory, occurrenceLimits, occurrenceNow))
+            var occurrences = HealthOccurrences.Classify(alerts, occurrenceHistory, occurrenceLimits, occurrenceNow);
+            // Parada normal sem execução estável observada antes: visível, mas não conta como alerta (#57).
+            if (HealthReportPresentation.CleanStopNotice(latest, occurrences) is { } cleanStops)
+                PageContent.Children.Add(Card(Text(cleanStops, 12, "Secondary")));
+            foreach (var (finding, status) in occurrences)
             {
                 var detail = new StackPanel();
-                detail.Children.Add(Text($"{finding.Time.ToLocalTime():g}  ·  {finding.Severity}", 11, status.State != OccurrenceState.Persistent ? "Secondary" : finding.Severity == "critical" ? "Danger" : "Warning"));
+                detail.Children.Add(Text($"{finding.Time.ToLocalTime():g}  ·  {HealthOccurrences.ShownSeverity(finding, status)}", 11, status.State != OccurrenceState.Persistent ? "Secondary" : finding.Severity == "critical" ? "Danger" : "Warning"));
                 var occurrenceState = Text(status.Label, 12, status.State switch { OccurrenceState.Persistent => "Warning", OccurrenceState.Resolved => "Success", _ => "Secondary" });
                 occurrenceState.FontWeight = FontWeights.SemiBold; occurrenceState.Margin = new Thickness(0, 5, 0, 0); detail.Children.Add(occurrenceState);
                 var problem = Text(finding.Problem, 15); problem.FontWeight = FontWeights.SemiBold; problem.Margin = new Thickness(0, 7, 0, 7); detail.Children.Add(problem);
@@ -515,7 +522,7 @@ public partial class MainWindow : Window
             if (store.Data.AiEnabled)
             {
                 UpdateProgress("Conectando o agente ao executor do Windows…");
-                if (!DriverWorkflow.Matches(prompt) && (!user.Repair || AgentProtocol.RequestsReadOnly(prompt) || !NetworkWorkflow.Matches(prompt)))
+                if (!DriverWorkflow.Matches(prompt) && DriverWorkflow.ResumedRequest(conversation!, DateTime.UtcNow) == null && (!user.Repair || AgentProtocol.RequestsReadOnly(prompt) || !NetworkWorkflow.Matches(prompt)))
                 {
                     try { await LocalModel.EnsureRunning(token); }
                     catch (Exception ex) when (ex is IOException or HttpRequestException or InvalidOperationException or TimeoutException)
@@ -531,9 +538,11 @@ public partial class MainWindow : Window
                 try { answer = await agent.Run(user, conversation!, events, (label, result) => AddEntry("tool", label + "\n" + result), token); }
                 catch (Exception ex) when (ex is HttpRequestException or TimeoutException)
                 {
-                    AddEntry("assistant", "O agente Ollama ficou indisponível: " + ex.Message + "\n\n" + OfflineHealthReport(), "result", turnClock.ElapsedMilliseconds);
+                    AddEntry("assistant", "O agente Ollama ficou indisponível: " + ex.Message + "\n\n" + OfflineHealthReport() + "\n\n" + agent.TurnFactsLine, "result", turnClock.ElapsedMilliseconds);
                     return;
                 }
+                // Interrompido (cancelamento, erro): a mensagem de interrupção também diz o que o Nexo alterou no turno (#73).
+                catch { interruptedFacts = agent.TurnFactsLine; throw; }
                 AddEntry("assistant", answer, AnswerPresentation(answer), turnClock.ElapsedMilliseconds);
                 return;
             }
@@ -566,10 +575,10 @@ public partial class MainWindow : Window
         ProgressPanel.Visibility = Visibility.Visible;
         ProgressText.Text = "ACOMPANHAMENTO";
         try { await action(operation.Token); UpdateProgress("Resultado disponível no chat."); }
-        catch (OperationCanceledException) when (operation.IsCancellationRequested) { AddEntry("assistant", "Atendimento interrompido. As ações já concluídas permanecem registradas acima; cancelar não desfaz uma correção concluída.", "error"); UpdateProgress("Atendimento interrompido."); }
-        catch (OperationCanceledException) { AddEntry("assistant", "A etapa expirou ou foi interrompida antes de confirmar o resultado. Confira os resultados registrados acima antes de tentar novamente ou encaminhar à TI.", "error"); UpdateProgress("Etapa não concluída: resultado não confirmado."); store.Log(user, "Operação interrompida sem cancelamento do usuário"); }
-        catch (Exception ex) { AddEntry("assistant", "Não consegui concluir esta etapa. " + ex.Message + "\n\nVocê pode tentar novamente ou gerar um encaminhamento para a TI.", "error"); UpdateProgress("Etapa não concluída."); store.Log(user, "Operação não concluída: " + ex.GetType().Name); }
-        finally { busy = false; operation.Dispose(); operation = null; BusyBar.Visibility = Visibility.Collapsed; CancelButton.Visibility = Visibility.Collapsed; ProgressPanel.Visibility = Visibility.Collapsed; CancelButton.IsEnabled = true; SendButton.IsEnabled = Navigation.IsEnabled = NewChatButton.IsEnabled = Composer.IsEnabled = true; RefreshChatActions(); if (quickReplyPanel != null) quickReplyPanel.IsEnabled = true; ChatScroll.ScrollToEnd(); }
+        catch (OperationCanceledException) when (operation.IsCancellationRequested) { AddEntry("assistant", "Atendimento interrompido. As ações já concluídas permanecem registradas acima; cancelar não desfaz uma correção concluída." + InterruptedFacts(), "error"); UpdateProgress("Atendimento interrompido."); }
+        catch (OperationCanceledException) { AddEntry("assistant", "A etapa expirou ou foi interrompida antes de confirmar o resultado. Confira os resultados registrados acima antes de tentar novamente ou encaminhar à TI." + InterruptedFacts(), "error"); UpdateProgress("Etapa não concluída: resultado não confirmado."); store.Log(user, "Operação interrompida sem cancelamento do usuário"); }
+        catch (Exception ex) { AddEntry("assistant", "Não consegui concluir esta etapa. " + ex.Message + "\n\nVocê pode tentar novamente ou gerar um encaminhamento para a TI." + InterruptedFacts(), "error"); UpdateProgress("Etapa não concluída."); store.Log(user, "Operação não concluída: " + ex.GetType().Name); }
+        finally { interruptedFacts = null; busy = false; operation.Dispose(); operation = null; BusyBar.Visibility = Visibility.Collapsed; CancelButton.Visibility = Visibility.Collapsed; ProgressPanel.Visibility = Visibility.Collapsed; CancelButton.IsEnabled = true; SendButton.IsEnabled = Navigation.IsEnabled = NewChatButton.IsEnabled = Composer.IsEnabled = true; RefreshChatActions(); if (quickReplyPanel != null) quickReplyPanel.IsEnabled = true; ChatScroll.ScrollToEnd(); }
     }
     private void CancelClick(object sender, RoutedEventArgs e)
     {
