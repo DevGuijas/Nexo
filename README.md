@@ -4,7 +4,7 @@ Aplicativo C# / WPF com IA local que escolhe ferramentas do Windows, executa aç
 
 O desenvolvimento acontece na branch `development`. Convenções de commits, testes, issues e arquivos que não devem ser enviados estão em [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Saúde do computador (ramo de desenvolvimento)
+## Novidade 1.7.0 — saúde do computador (não publicada)
 
 A página **Saúde do PC** mostra leituras locais, ocorrências persistentes, eventos do Windows e intervenções registradas enquanto o aplicativo está aberto. **Configurações** permite ajustar intervalo, limiares de CPU, disco e crescimento de memória por processo, e retenção. O crescimento sustentado aponta o processo por PID e horário de início, como hipótese a confirmar. O banco operacional SQLite fica separado das conversas. O agente local pode consultar `get_health_report`; sem Ollama, o aplicativo apresenta o relatório determinístico disponível. Um processo elevado sem resultado no prazo fica em estado **desconhecido**, nunca como correção concluída. O INF instalado pode ser consultado após identificar o dispositivo, sem busca online quando o pedido se limita ao INF. Antes de instalar um driver, o Nexo exige um ponto de restauração confirmado; se o Windows não puder criá-lo, a instalação é interrompida. Consulte o [protocolo de avaliação](docs/AVALIACAO-MONITORAMENTO-E-RECUPERACAO.md) para os sete cenários e os limites da validação.
 
@@ -12,7 +12,7 @@ O monitor mostra separadamente a interface local, o gateway, a resolução DNS e
 
 ## Abrir
 
-Para executar a compilação local, rode `dotnet run --project Nexo.Support -c Release`. Para instalar o aplicativo com o modelo local, baixe [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe). Ele consulta a versão publicada na Oracle ao ser executado; veja [o procedimento de instalação e publicação](docs/INSTALADOR-NUVEM.md).
+Para executar a compilação local, rode `dotnet run --project Nexo.Support -c Release`. Para instalar o aplicativo com o modelo local, baixe [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe). Ele consulta a versão publicada na Oracle ao ser executado; veja [o procedimento de instalação e publicação](docs/INSTALADOR-NUVEM.md). A versão publicada atual é a 1.6.3; a 1.7.0 desta branch ainda não foi publicada. Histórico, pré-requisitos de publicação e hashes dos arquivos publicados estão em [CHANGELOG.md](CHANGELOG.md).
 
 ### Novidade 1.6.3 — driver NVIDIA e instalador gráfico
 
@@ -184,7 +184,7 @@ dotnet run --project Nexo.Checks -- --network-evals
 dotnet run --project Nexo.Checks -- --interaction-evals
 dotnet run --project Nexo.Checks -- --interface-probe-live
 dotnet run --project Nexo.Checks -- --hardware-live
-dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.6.3
+dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.7.0
 dotnet run --project Nexo.Setup.Checks -c Release
 ```
 

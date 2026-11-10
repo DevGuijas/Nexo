@@ -15,7 +15,7 @@
 <ItemGroup><Compile Include="../Nexo.Support/HealthReportPresentation.cs" Link="HealthReportPresentation.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/OperationSupervisor.cs" Link="OperationSupervisor.cs"/><Compile Include="../Nexo.Support/DriverStoreInventory.cs" Link="DriverStoreInventory.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/PendingOperations.cs" Link="PendingOperations.cs"/><PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="8.10.0" /></ItemGroup>
-<ItemGroup><Compile Include="../Nexo.Support/HealthSettings.cs" Link="HealthSettings.cs"/></ItemGroup>
+<ItemGroup><Compile Include="../Nexo.Support/HealthSettings.cs" Link="HealthSettings.cs"/><Compile Include="../Nexo.Support/AppVersion.cs" Link="AppVersion.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/RestorePointProtection.cs" Link="RestorePointProtection.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/ServiceEvents.cs" Link="ServiceEvents.cs"/><Compile Include="../Nexo.Support/TurnFacts.cs" Link="TurnFacts.cs"/><Compile Include="../Nexo.Support/QuickReplies.cs" Link="QuickReplies.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/NetworkRecovery.cs" Link="NetworkRecovery.cs"/></ItemGroup>

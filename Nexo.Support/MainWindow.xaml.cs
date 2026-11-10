@@ -32,7 +32,7 @@ public partial class MainWindow : Window
     private int eventScanRunning;
     public MainWindow(Store store)
     {
-        InitializeComponent(); Title = "Nexo 1.6.3 • Suporte inteligente"; this.store = store; support = new SupportService(store);
+        InitializeComponent(); Title = "Nexo " + AppVersion.Current + " • Suporte inteligente"; this.store = store; support = new SupportService(store);
         ApplyNavigationIcons();
         user = store.GetLocalSession();
         RefreshIdentity();

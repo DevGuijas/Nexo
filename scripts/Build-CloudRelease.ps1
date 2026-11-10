@@ -8,10 +8,20 @@ param(
     [switch]$ReusePublishedDependencies
 )
 $ErrorActionPreference = 'Stop'
+if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'Use o PowerShell 7 (pwsh) para gerar a versão.' }
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $project = Join-Path $projectRoot 'Nexo.Support/Nexo.Support.csproj'
 $version = ([xml](Get-Content -LiteralPath $project -Raw)).Project.PropertyGroup.Version
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Versão do projeto inválida.' }
+$changelog = Get-Content -LiteralPath (Join-Path $projectRoot 'CHANGELOG.md') -Encoding utf8
+$heading = $changelog | Where-Object { $_ -match ('^## \[' + [regex]::Escape($version) + '\] — (.+)$') } | Select-Object -First 1
+if (-not $heading) { throw "O CHANGELOG.md não tem a versão $version." }
+$publicationDate = [datetime]::MinValue
+if (-not [datetime]::TryParseExact(($heading -replace ('^## \[' + [regex]::Escape($version) + '\] — '), '').Trim(), 'yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$publicationDate)) { throw "A versão $version está marcada como não publicada no CHANGELOG.md. Conclua os itens de 'Antes de publicar' e registre a data de publicação." }
+. (Join-Path $PSScriptRoot 'Release-Guard.ps1')
+$publicKey = Join-Path $projectRoot 'Nexo.Setup/release-public.pem'
+$published = Assert-NexoNewRelease -Version $version -PublicKeyPath $publicKey
+Write-Host "Versão publicada: $($published.Version); gerando a $version."
 $ollama = $null
 if ($OllamaInstallerPath) {
     $ollama = (Resolve-Path -LiteralPath $OllamaInstallerPath).Path
@@ -71,18 +81,8 @@ function Package([string]$path) {
 }
 $latest = [ordered]@{ schema = 1; version = $version; model = 'qwen3:8b'; app = (Package $appArchive) }
 if ($ReusePublishedDependencies) {
-    $origin = 'https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/'
-    $previousContent = (Invoke-WebRequest -Uri ($origin + 'latest.json') -UseBasicParsing).Content
-    $previousBytes = if ($previousContent -is [byte[]]) { $previousContent } else { [System.Text.Encoding]::UTF8.GetBytes([string]$previousContent) }
-    $signatureContent = (Invoke-WebRequest -Uri ($origin + 'latest.sig') -UseBasicParsing).Content
-    $previousSignature = if ($signatureContent -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($signatureContent).Trim() } else { ([string]$signatureContent).Trim() }
-    $publicKey = Join-Path $projectRoot 'Nexo.Setup/release-public.pem'
-    $verifier = [System.Security.Cryptography.RSA]::Create()
-    try {
-        $verifier.ImportFromPem([System.IO.File]::ReadAllText($publicKey))
-        if (-not $verifier.VerifyData($previousBytes, [Convert]::FromBase64String($previousSignature), [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)) { throw 'Manifesto anterior não possui assinatura válida.' }
-    } finally { $verifier.Dispose() }
-    $previous = [System.Text.Encoding]::UTF8.GetString($previousBytes) | ConvertFrom-Json
+    # Manifesto publicado já lido e com a assinatura conferida por Assert-NexoNewRelease.
+    $previous = $published.Manifest
     if ($previous.model -ne 'qwen3:8b' -or !$previous.modelArchive -or !$previous.ollama) { throw 'Pacotes publicados não podem ser reutilizados.' }
     $latest.modelArchive = $previous.modelArchive
     $latest.ollama = $previous.ollama
@@ -98,5 +98,17 @@ try {
     $signature = $rsa.SignData([System.IO.File]::ReadAllBytes($latestPath), [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
     [System.IO.File]::WriteAllText((Join-Path $releaseRoot 'latest.sig'), [Convert]::ToBase64String($signature))
 } finally { $rsa.Dispose() }
+$archive = [System.IO.Compression.ZipFile]::OpenRead($appArchive)
+try {
+    $executable = $archive.GetEntry('Nexo.exe')
+    if (-not $executable) { throw 'O pacote do aplicativo não contém Nexo.exe.' }
+    $stream = $executable.Open()
+    try { $executableHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($stream)) } finally { $stream.Dispose() }
+    $executableBytes = $executable.Length
+} finally { $archive.Dispose() }
+$appHash = (Get-FileHash -LiteralPath $appArchive -Algorithm SHA256).Hash
+$appBytes = (Get-Item -LiteralPath $appArchive).Length
+Set-Content -LiteralPath (Join-Path $releaseDirectory 'SHA256SUMS.txt') -Value @("$executableHash  Nexo.exe", "$appHash  nexo-app.zip") -Encoding ascii
 Write-Host "Versão pronta: $latestPath"
+Write-Host "Registre no CHANGELOG.md: Nexo.exe $executableBytes bytes, SHA-256 $executableHash; releases/$version/nexo-app.zip $appBytes bytes, SHA-256 $appHash; commit $(git -C $projectRoot rev-parse --short HEAD)."
 Write-Host 'Envie a pasta releases, latest.sig e depois latest.json ao armazenamento HTTPS da Oracle; publicar latest.json por último ativa a nova versão.'
