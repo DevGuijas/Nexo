@@ -283,7 +283,7 @@ internal static class NetworkRecoveryChecks
             File.WriteAllText(wrapperPath, "$source=Get-Content -LiteralPath '" + executorPath.Replace("'", "''") + "' -Raw -Encoding UTF8\n"
                 + "$ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)\n"
                 + "$definitions=@(($source -split \"`r?`n\") | Where-Object {$_ -match '^\\$trustedSids = '})\n"
-                + "foreach($function in 'New-ProtectedSecurity','New-ProtectedDirectory','Assert-Trusted','Use-ProtectedDirectory','New-ProtectedFileSecurity','Write-ProtectedFile'){ $definitions+=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $function},$true).Extent.Text }\n"
+                + "foreach($function in 'Get-UntrustedReason','New-ProtectedSecurity','New-ProtectedDirectory','Assert-Trusted','Use-ProtectedDirectory','New-ProtectedFileSecurity','Write-ProtectedFile'){ $definitions+=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $function},$true).Extent.Text }\n"
                 + ". ([scriptblock]::Create($definitions -join \"`n\"))\n"
                 + "foreach($path in @('" + nexo.Replace("'", "''") + "','" + Path.Combine(nexo, "operations").Replace("'", "''") + "','" + operation.Replace("'", "''") + "')){ Use-ProtectedDirectory $path }\n"
                 + "foreach($name in 'before.json','transaction.json'){ Write-ProtectedFile (Join-Path '" + operation.Replace("'", "''") + "' $name) '{}' }\n", new UTF8Encoding(true));

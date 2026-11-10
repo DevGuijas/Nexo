@@ -34,18 +34,28 @@ function New-ProtectedDirectory($path) {
     if ([IO.Directory].GetMethod('CreateDirectory', [type[]]@([string], [System.Security.AccessControl.DirectorySecurity]))) { [void][IO.Directory]::CreateDirectory($path, $security) }
     else { [void][System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path) }
 }
+# Decisão pura (#10), a mesma do NetworkRecovery.UntrustedReasonOnWindows no aplicativo: dado o dono, a herança e as
+# ACEs já em SID, devolve o motivo da recusa (caminho, SID, direitos) ou $null. Testável fora do Windows.
+function Get-UntrustedReason($path, $isContainer, $owner, $inheritanceProtected, $rules) {
+    if ([string]$owner -notin $trustedSids) { return ('"' + $path + '": dono não confiável (' + $owner + ')') }
+    if ($isContainer -and -not $inheritanceProtected) { return ('"' + $path + '": pasta herda permissões (dono ' + $owner + ')') }
+    # Escrita, criação, exclusão, troca de permissão ou de dono, e os direitos genéricos de escrita.
+    $write = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+    foreach ($rule in @($rules)) {
+        # InheritOnly (2) não vale para o próprio objeto; Deny não concede nada.
+        if ([string]$rule.Type -ne 'Allow' -or ([int64]$rule.Propagation -band 2)) { continue }
+        if (([int64]$rule.Rights -band $write) -and [string]$rule.Sid -notin $trustedSids) { return ('"' + $path + '": ACE de escrita para ' + $rule.Sid + ' (direitos 0x' + ('{0:X}' -f [int64]$rule.Rights) + ')') }
+    }
+    $null
+}
 function Assert-Trusted($path) {
     $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
     if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw ('A cópia protegida do Nexo em "' + $path + '" é um link e não é usada. Nenhuma alteração foi feita.') }
     $acl = Get-Acl -LiteralPath $path
-    if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $trustedSids) { throw ('A cópia protegida do Nexo em "' + $path + '" não pertence ao sistema nem aos administradores e não é usada. Nenhuma alteração foi feita.') }
-    if ($item.PSIsContainer -and -not $acl.AreAccessRulesProtected) { throw ('A pasta protegida do Nexo em "' + $path + '" herda permissões e não é usada. Nenhuma alteração foi feita.') }
-    # Escrita, criação, exclusão, troca de permissão ou de dono, e os direitos genéricos de escrita.
-    $write = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
-    foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
-        if ($rule.AccessControlType -ne 'Allow' -or ($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
-        if (([int64]$rule.FileSystemRights -band $write) -and $rule.IdentityReference.Value -notin $trustedSids) { throw ('A cópia protegida do Nexo em "' + $path + '" pode ser alterada por outros usuários e não é usada. Nenhuma alteração foi feita.') }
-    }
+    $sid = [System.Security.Principal.SecurityIdentifier]
+    $rules = @(foreach ($rule in $acl.GetAccessRules($true, $true, $sid)) { [pscustomobject]@{Sid=$rule.IdentityReference.Translate($sid).Value; Rights=[int64]$rule.FileSystemRights; Type=[string]$rule.AccessControlType; Propagation=[int64]$rule.PropagationFlags} })
+    $reason = Get-UntrustedReason $path $item.PSIsContainer $acl.GetOwner($sid).Value $acl.AreAccessRulesProtected $rules
+    if ($reason) { throw ('A cópia protegida do Nexo não é usada: ' + $reason + '. Nenhuma alteração foi feita.') }
 }
 # Uma pasta que já existe nunca é reparada nem adotada: só é usada se já estiver protegida. Sem isso, nada é gravado
 # (nem ACL) e a mudança de rede não acontece.
