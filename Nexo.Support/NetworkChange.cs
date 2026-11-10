@@ -90,8 +90,9 @@ public static class NetworkChange
                     if (!token.IsCancellationRequested)
                     {
                         var answer = confirm(new ChangeRequest("Manter a configuração de rede?", request.Description + "\n\nEstado obtido após a mudança:\n" + state + "\n\nTeste a conexão. Se não confirmar em até 45 segundos, a configuração anterior será restaurada.", true));
-                        if (await Task.WhenAny(answer, Task.Delay(deadlines.Confirming, CancellationToken.None)) == answer) keep = await answer;
-                        else progress.Report("A confirmação não respondeu no prazo; restaurando a configuração anterior.");
+                        // O cancelamento do atendimento também encerra a espera pela janela: a decisão vira "rollback".
+                        if (await Task.WhenAny(answer, Task.Delay(deadlines.Confirming, token)) == answer) keep = await answer;
+                        else progress.Report(token.IsCancellationRequested ? "Cancelamento solicitado; restaurando a configuração anterior." : "A confirmação não respondeu no prazo; restaurando a configuração anterior.");
                     }
                 }
                 catch (Exception ex) { progress.Report("Confirmação indisponível; restaurando a configuração anterior. " + ex.Message); }

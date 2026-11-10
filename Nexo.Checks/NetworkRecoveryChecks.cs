@@ -140,6 +140,40 @@ internal static class NetworkRecoveryChecks
                     "Rede: cancelamento atendido pelo executor devolve a restauração registrada por ele");
             }
 
+            // Cancelado antes do applied.json, o prazo ganha a fase de conclusão (#9): o executor que só chega à
+            // confirmação depois do prazo simples de aplicação ainda devolve a restauração registrada por ele.
+            prompts.Clear();
+            using (var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
+            {
+                var slow = new NetworkDeadlines(TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2));
+                var late = await Apply(store, trust, async (dir, stop) =>
+                {
+                    await Backup(dir, protectedRoot, Before);
+                    await Task.Delay(TimeSpan.FromSeconds(3), stop);
+                    await Write(dir, "applied.json", "{}");
+                    if (Decision(dir) == "rollback") await Write(dir, "result.json", "{\"success\":false,\"reverted\":true,\"message\":\"Configuração anterior restaurada por cancelamento ou ausência de confirmação.\"}");
+                }, prompts, true, deadlines: slow, token: cancel.Token);
+                check(Flag(late.Result, "reverted") && !late.Result.TryGetProperty("state", out _) && prompts.Count == 0 && Decision(late.Directory) == "rollback",
+                    "Rede: cancelamento antes da aplicação estende o prazo e aceita a restauração que o executor registra depois do prazo simples");
+            }
+
+            // Cancelar com a janela de confirmação aberta encerra a espera na hora, sem aguardar o prazo da janela.
+            prompts.Clear();
+            using (var cancel = new CancellationTokenSource())
+            {
+                var patient = new NetworkDeadlines(TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(2));
+                clock.Restart();
+                var open = await Apply(store, trust, async (dir, stop) =>
+                {
+                    await Backup(dir, protectedRoot, Before); await Write(dir, "applied.json", "{}");
+                    cancel.CancelAfter(TimeSpan.FromMilliseconds(500));
+                    await WaitFor(Path.Combine(dir, "decision.txt"), stop);
+                    await Write(dir, "result.json", Decision(dir) == "keep" ? "{\"success\":true}" : "{\"success\":false,\"reverted\":true}");
+                }, prompts, true, deadlines: patient, token: cancel.Token, unanswered: true);
+                check(clock.Elapsed < TimeSpan.FromSeconds(10) && Decision(open.Directory) == "rollback" && Flag(open.Result, "reverted") && prompts.SequenceEqual(["Manter a configuração de rede?"]),
+                    "Rede: cancelamento com a janela de confirmação aberta grava a restauração sem esperar o prazo da janela");
+            }
+
             prompts.Clear();
             var keptHung = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(dir, "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, keep: true, deadlines: quick);
             check(Text(keptHung.Result, "phase") == "keeping" && Decision(keptHung.Directory) == "keep" && Text(keptHung.Result, "error").Contains("não foi conferida") && !Flag(keptHung.Result, "reverted"),
