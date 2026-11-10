@@ -5,7 +5,16 @@ function Get-NetIPInterface { param($InterfaceIndex,$AddressFamily) [pscustomobj
 function Get-CimInstance { param($ClassName,$Filter,$ErrorAction) if($ClassName -ne 'Win32_NetworkAdapterConfiguration' -or $Filter -ne 'InterfaceIndex=10'){throw 'Wrong DHCP target'}; [pscustomobject]@{SettingID='{00000000-0000-0000-0000-000000000001}'} }
 function Invoke-CimMethod { throw 'Legacy renewal must not run after removing the last IP (Windows error 84)' }
 # Every simulated mutation requires the protected copy to exist first (#10): no network change before it.
-function Assert-Backed { if($script:currentProtected -and -not (Test-Path -LiteralPath (Join-Path $script:currentProtected 'before.json'))){throw 'Network changed before the protected backup was written'} }
+function Assert-Backed { if($script:currentProtected -and -not (Test-Path -LiteralPath (Join-Path $script:currentProtected 'before.json'))){throw 'Network changed before the protected backup was written'}; Note-Phase }
+# Phase in the protected record (#10), noted at every network mutation and every read of decision.txt.
+function Note-Phase {
+    if(-not $script:currentProtected){return}
+    $record=Join-Path $script:currentProtected 'transaction.json'
+    if(-not (Test-Path -LiteralPath $record)){return}
+    $phase=[string](Microsoft.PowerShell.Management\Get-Content -LiteralPath $record -Raw | ConvertFrom-Json).Phase
+    if($phase -and ($script:phases.Count -eq 0 -or $script:phases[-1] -ne $phase)){$script:phases+=@($phase)}
+}
+function Get-Content { param([string]$LiteralPath,[switch]$Raw) if($LiteralPath -like '*decision.txt'){Note-Phase}; Microsoft.PowerShell.Management\Get-Content -LiteralPath $LiteralPath -Raw:$Raw }
 # Simulated protected store: the real ACL primitives are renamed in the code under test; Use-ProtectedDirectory and
 # Open-ProtectedDir keep their real logic. Set-Acl must never be called by the executor.
 function New-ProtectedDirectory($path) { if(Test-Path -LiteralPath $path){throw ('Created over an existing folder: '+$path)}; New-Item -ItemType Directory -Path $path | Out-Null; $script:created+=@($path) }
@@ -55,7 +64,7 @@ $productionRoot="([Environment]::GetFolderPath('CommonApplicationData'))"
 foreach($forbidden in '$env:ProgramData','Set-Acl'){ if($source.Contains($forbidden)){throw ('NetworkTransaction.ps1 must not use '+$forbidden)} }
 Write-Output 'PASS: executor uses the Windows API for the protected root and never calls Set-Acl'
 # Each scenario gets its own simulated %ProgramData%.
-function UseProgramData($name) { $script:programData=Join-Path $testRoot ('pd-'+$name); $script:protectedTestRoot=Join-Path $script:programData 'NexoSupport\operations'; $script:created=@(); $script:untrustedPaths=@(); $script:aclWrites=0 }
+function UseProgramData($name) { $script:programData=Join-Path $testRoot ('pd-'+$name); $script:protectedTestRoot=Join-Path $script:programData 'NexoSupport\operations'; $script:created=@(); $script:untrustedPaths=@(); $script:aclWrites=0; $script:phases=@() }
 function Isolated($text) {
     foreach($piece in @($productionRoot,'function New-ProtectedDirectory(','function Assert-Trusted(')){ if(-not $text.Contains($piece)){throw ('Protected-store hook not found: '+$piece)} }
     $text.Replace($productionRoot,"'"+$script:programData.Replace("'","''")+"'").Replace('function New-ProtectedDirectory(','function New-ProtectedDirectory-Windows(').Replace('function Assert-Trusted(','function Assert-Trusted-Windows(')
@@ -85,6 +94,9 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
     & ([scriptblock]::Create($testSource))
     $result=Get-Content -LiteralPath (Join-Path $operationDir 'result.json') -Raw | ConvertFrom-Json
     if($script:aclWrites -ne 0){throw ($name+': the executor rewrote an ACL')}
+    # Confirmation, cancellation and failure with restore: the protected phase follows each step.
+    $expectedPhases=@{'dns-keep'='applying,confirming';'static-keep'='applying,confirming';'dns-rollback'='applying,confirming,restoring';'static-rollback'='applying,confirming,restoring';'dns-error-rollback'='applying,restoring'}
+    if($expectedPhases.ContainsKey($name) -and (@($script:phases) -join ',') -ne $expectedPhases[$name]){throw ($name+': protected phases were '+(@($script:phases) -join ','))}
     if($variant -in 'default-switch','vpn','identity-changed','protected-exists','bad-id','existing-untrusted-root') {
         if($result.success -or (Test-Path (Join-Path $operationDir 'before.json')) -or $script:state.Addresses[0].IPAddress -ne '10.0.0.10' -or $script:state.Dns[0] -ne '10.0.0.2'){throw ($name+': disallowed target was changed')}
         if($variant -eq 'protected-exists' -and ((Get-Content -LiteralPath (Join-Path $script:currentProtected 'before.json') -Raw) -notmatch 'forjado' -or $result.error -notmatch 'not used')){throw ($name+': untrusted pre-existing protected folder was used or removed')}
