@@ -25,6 +25,11 @@ public sealed class InvestigationEvidence
     private readonly List<(string Name, int Pid, long From, long To, long? Now)> memoryHolders = [];
     private readonly HashSet<string> staleProcesses = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> currentProcesses = new(StringComparer.OrdinalIgnoreCase);
+    // Ocorrências de disco do último relatório de saúde do turno (validação da 11fa078): alguma atual, alguma encerrada,
+    // e o menor espaço livre por volume lido nele (null quando o relatório não traz volume).
+    private bool diskActive;
+    private bool diskClosed;
+    private double? lowestFreePercent;
     private readonly List<(string Name, ControlBlock Kind, string? Topic)> blocks = [];
     private readonly Dictionary<string, (string Host, bool Dns, bool Tcp)> connections = [];
     private readonly List<string> changes = [];
@@ -231,7 +236,48 @@ public sealed class InvestigationEvidence
                 return "A resposta descreve uma verificação de componente sem resultado bem sucedido dessa categoria.";
         }
         if (PresentsStaleProcess(text)) return StaleProcessReason;
+        if (OffersFileSearch(text)) return FileSearchReason;
+        if (PresentsClosedDisk(text)) return ClosedDiskReason;
         return null;
+    }
+
+    internal const string FileSearchReason = "O Nexo não lista nem procura arquivos ou pastas: não ofereça identificar os maiores arquivos nem o que ocupa espaço. No lugar, diga o espaço livre medido e indique que o usuário vê o que ocupa espaço em Configurações > Sistema > Armazenamento no Windows.";
+    internal const string ClosedDiskReason = "A resposta apresenta como atual a falta de espaço em disco, mas o relatório de saúde só mostra essa ocorrência encerrada (resolvida ou com estado atual desconhecido) e nenhuma leitura atual tem pouco espaço. Cite o espaço livre atual por volume, ou diga que essa ocorrência não está ativa.";
+    // Caminho real para ver o uso do disco (#88): o Nexo não lista arquivos nem pastas.
+    internal const string StorageGuidance = "Para ver o que ocupa espaço, abra Configurações > Sistema > Armazenamento no Windows.";
+    // Abaixo deste espaço livre, uma leitura atual ainda pode virar alerta de disco (padrão de HealthThresholds.DiskLowFreePercent).
+    private const double LowFreePercent = 10;
+
+    // Frases da resposta, em texto normalizado: o ponto só fecha a frase antes de espaço ou no fim ("llama-server.exe" fica inteiro).
+    private static string[] Sentences(string normalized) => Regex.Split(normalized, @"(?<=[!?;\n])|(?<=\.)(?=\s|$)");
+    // Uma das três palavras antes do trecho, ou o próprio trecho, nega a frase ("não posso listar", "o disco não está cheio").
+    private static bool Negated(string sentence, Match match) =>
+        Regex.Matches(sentence[..match.Index], @"[\p{L}\p{N}]+").TakeLast(3).Concat(Regex.Matches(match.Value, @"[\p{L}\p{N}]+"))
+            .Any(word => word.Value is "nao" or "nem" or "nunca");
+
+    // Na validação da 11fa078 (conversa ce60e9e9), os 3 turnos terminaram com "Se precisar, posso ajudar a identificar quais
+    // arquivos estão ocupando mais espaço no disco T:. Deseja que eu faça isso?", apesar do prompt; a cada "sim" o modelo
+    // chamava outra consulta. O Nexo não tem ferramenta que liste arquivos, então a oferta é recusada em qualquer turno,
+    // com ou sem relatório de saúde. Vale a frase que oferece (1ª pessoa) procurar os maiores arquivos ou pastas, ou o que
+    // ocupa espaço; "Para ver o que ocupa espaço, abra Configurações…" e "não posso listar os maiores arquivos" passam.
+    private static readonly Regex SpaceOffer = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo|(?:gostaria|quer|deseja|precisa)(?: de)? (?:uma )?ajuda)\b");
+    private static readonly Regex SpaceSearch = new(@"\b(?:identific\w*|list\w*|ach\w*|encontr\w*|localiz\w*|procur\w*|busc\w*|verific\w*|mostr\w*|analis\w*|descobr\w*|apont\w*|ver|veja)\b");
+    private static readonly Regex SpaceTarget = new(@"\b(?:maiores (?:arquivos|pastas)|(?:arquivos|pastas) (?:mais )?(?:grandes|pesad\w*|volumos\w*)|(?:arquivos|pastas) (?:que )?(?:(?:esta|estao|estejam) )?ocupa\w*|(?:arquivos|pastas) (?:com|de) mais espaco|o que (?:(?:esta|estao) )?ocupa\w* (?:mais )?(?:o )?espaco)");
+    private static bool OffersFileSearch(string normalized) => Sentences(normalized).Any(sentence =>
+        SpaceTarget.IsMatch(sentence) && SpaceSearch.IsMatch(sentence)
+        && SpaceOffer.Matches(sentence).Any(offer => !Negated(sentence, offer)));
+
+    // Na validação da 11fa078 (conversa 2f762bbb), com o C: 87% livre e o alerta do T: encerrado depois de o VHDX sair, a
+    // resposta mandou "Libere espaço no disco". Com alguma ocorrência de disco encerrada, nenhuma atual e nenhum volume do
+    // relatório abaixo de 10% livre, a frase que diz que falta espaço ou manda liberar espaço é recusada. A frase com "?",
+    // com condição ("se o disco encher"), no passado ou que diz que foi resolvido ou está encerrado passa, e a negação vale como no processo.
+    private static readonly Regex LowSpace = new(@"\b(?:liber\w*|abr\w*|desocup\w*) (?:\w+ ){0,2}espaco\b|\b(?:disco|unidade|volume|armazenamento|hd|ssd)\b(?: \S+){0,3} (?:cheio|cheia|lotad[oa]|sem espaco)\b|\bpouco espaco\b|\bfalta de espaco\b|\bespaco (?:\w+ ){0,2}(?:insuficiente|baixo|acabando)\b");
+    private bool PresentsClosedDisk(string normalized)
+    {
+        if (!diskClosed || diskActive || lowestFreePercent < LowFreePercent) return false;
+        return Sentences(normalized).Any(sentence =>
+            !sentence.Contains('?') && !Regex.IsMatch(sentence, @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve)\b|resolvid|encerrad|\bnormal|\bja foi\b|\bantes\b")
+            && LowSpace.Matches(sentence).Any(match => !Negated(sentence, match)));
     }
 
     internal const string StaleProcessReason = "A resposta apresenta como atual o consumo de memória de um processo que o relatório de saúde só mostra em ocorrência encerrada (resolvida ou com estado atual desconhecido). Cite apenas o que continua nas leituras atuais, ou diga que essa ocorrência não está ativa.";
@@ -247,8 +293,7 @@ public sealed class InvestigationEvidence
         var current = topProcesses.Select(p => p.Name).Concat(currentProcesses).Select(AgentProtocol.Normalize).ToHashSet();
         var stale = staleProcesses.Select(AgentProtocol.Normalize).Where(name => !current.Contains(name)).ToArray();
         if (stale.Length == 0) return false;
-        // Ponto só fecha a frase antes de espaço ou no fim: "llama-server.exe" fica inteiro.
-        return Regex.Split(normalized, @"(?<=[!?;\n])|(?<=\.)(?=\s|$)").Any(sentence =>
+        return Sentences(normalized).Any(sentence =>
             !sentence.Contains('?') && !Regex.IsMatch(sentence, @"\b(se|quando|enquanto)\b|resolvid|\bnormal|\bja foi\b")
             && stale.Any(name => Regex.IsMatch(sentence, @"(?<![\w.-])" + Regex.Escape(name) + @"(?:\.exe)?(?![\w-]|\.\w)"))
             && PresentUse.Matches(sentence).Any(use => !Regex.Matches(sentence[..use.Index], @"[\p{L}\p{N}]+").TakeLast(3).Any(word => word.Value is "nao" or "nem" or "nunca")));
@@ -256,20 +301,56 @@ public sealed class InvestigationEvidence
 
     // Os MB do processo que segura memória entram na resposta (#88): no PC, a resposta citou "NexoMemTeste PID 23132" e só
     // disse "memória em crescimento persistente", com "de 4375 MB para 13591 MB" no relatório. Quando a resposta cita o processo
-    // (pelo nome ou pelo PID) ou fala de memória sem nenhum valor em MB ou GB, o Nexo acrescenta a leitura do monitor.
+    // (pelo nome ou pelo PID) ou fala de memória, o Nexo acrescenta a leitura do monitor. Na validação da 11fa078, a linha
+    // sumia diante de qualquer "<n> MB/GB": "a memória livre está em torno de 4,7 GB" bastava. Agora ela só fica de fora
+    // para o processo cuja frase (a que cita o nome ou o PID) já traz os MB dele: um valor até 10% longe da leitura atual ou
+    // do fim da subida. "Cerca de 10 GB" com 10806 MB (5% longe) conta como citado; "cerca de 9 GB" (15%) não. Um valor
+    // ligado a memória livre, total, disponível ou instalada nunca conta.
+    private static readonly Regex Amount = new(@"(?<![\d.,])(?<value>\d{1,3}(?:\.\d{3})+(?![,.]\d)|\d+(?:[.,]\d+)?)\s*(?<unit>mb|gb|megabytes?|gigabytes?)\b");
+    private static bool CitesFigure(string sentence, (string Name, int Pid, long From, long To, long? Now) holder) => Amount.Matches(sentence).Any(match =>
+    {
+        var around = sentence[Math.Max(0, match.Index - 40)..Math.Min(sentence.Length, match.Index + match.Length + 25)];
+        if (Regex.IsMatch(around, @"\b(livres?|disponive(l|is)|total|instalad[oa]s?)\b")) return false;
+        var raw = match.Groups["value"].Value;
+        var value = Regex.IsMatch(raw, @"^\d{1,3}(\.\d{3})+$") ? double.Parse(raw.Replace(".", ""), CultureInfo.InvariantCulture)
+            : double.Parse(raw.Replace(',', '.'), CultureInfo.InvariantCulture);
+        var megabytes = match.Groups["unit"].Value.StartsWith('g') ? value * 1024 : value;
+        return new[] { holder.Now, holder.To }.Any(reading => reading is > 0 && Math.Abs(megabytes - reading.Value) <= 0.10 * reading.Value);
+    });
     public string WithMemoryFigures(string answer)
     {
         if (memoryHolders.Count == 0 || string.IsNullOrWhiteSpace(answer)) return answer;
         var text = AgentProtocol.Normalize(answer);
-        if (Regex.IsMatch(text, @"\d\s*(mb|gb|megabytes?|gigabytes?)\b")) return answer;
-        var cited = memoryHolders.Where(holder => Regex.IsMatch(text, @"(?<![\w.-])" + Regex.Escape(AgentProtocol.Normalize(holder.Name)) + @"(?![\w-])")
-            || Regex.IsMatch(text, @"(?<!\d)" + holder.Pid.ToString(CultureInfo.InvariantCulture) + @"(?!\d)")).ToArray();
+        var name = (string holderName) => @"(?<![\w.-])" + Regex.Escape(AgentProtocol.Normalize(holderName)) + @"(?![\w-])";
+        var pid = (int holderPid) => @"(?<!\d)" + holderPid.ToString(CultureInfo.InvariantCulture) + @"(?!\d)";
+        var sentences = Sentences(text);
+        var cited = memoryHolders.Where(holder => Regex.IsMatch(text, name(holder.Name)) || Regex.IsMatch(text, pid(holder.Pid))).ToArray();
         if (cited.Length == 0 && !text.Contains("memoria", StringComparison.Ordinal)) return answer;
-        var figures = (cited.Length > 0 ? cited : memoryHolders.ToArray()).Take(2).Select(holder =>
+        // Sem processo citado, a resposta fala de memória em geral: nenhum valor dela é dos processos, e a linha entra.
+        var missing = (cited.Length > 0 ? cited : memoryHolders.ToArray()).Where(holder => cited.Length == 0
+            || !sentences.Any(sentence => (Regex.IsMatch(sentence, name(holder.Name)) || Regex.IsMatch(sentence, pid(holder.Pid))) && CitesFigure(sentence, holder))).ToArray();
+        if (missing.Length == 0) return answer;
+        var figures = missing.Take(2).Select(holder =>
             Quoted(holder.Name) + " (PID " + holder.Pid.ToString(CultureInfo.InvariantCulture) + ")"
             + (holder.Now is { } now ? " segue com " + now.ToString(CultureInfo.InvariantCulture) + " MB; no alerta, subiu" : " subiu")
             + " de " + holder.From.ToString(CultureInfo.InvariantCulture) + " MB para " + holder.To.ToString(CultureInfo.InvariantCulture) + " MB");
-        var line = "Pelo monitor de saúde: " + string.Join("; ", figures) + ".";
+        return BeforeQuestions(answer, "Pelo monitor de saúde: " + string.Join("; ", figures) + ".");
+    }
+
+    // Com alerta de pouco espaço ATUAL no relatório do turno, a resposta aceita que fala de disco ou espaço ganha o caminho
+    // real para ver o uso do disco, se ainda não o tem (validação da 11fa078: o prompt sozinho não bastou com o qwen3:8b).
+    public string WithStorageGuidance(string answer)
+    {
+        if (!diskActive || string.IsNullOrWhiteSpace(answer)) return answer;
+        var text = AgentProtocol.Normalize(answer);
+        if (!Regex.IsMatch(text, @"\b(disco|espaco|armazenamento|volume|unidade)\b")) return answer;
+        if (Regex.IsMatch(text, @"configurac\w*\W+sistema\W+armazenamento")) return answer;
+        return BeforeQuestions(answer, StorageGuidance);
+    }
+
+    // A linha do Nexo entra no fim; uma pergunta ao usuário continua sendo a última coisa da resposta.
+    private static string BeforeQuestions(string answer, string line)
+    {
         var trimmed = answer.TrimEnd();
         if (!trimmed.EndsWith('?')) return trimmed + "\n\n" + line;
         // Uma pergunta ao usuário continua sendo a última coisa da resposta: a leitura entra antes das frases finais com "?".
@@ -546,7 +627,7 @@ public sealed class InvestigationEvidence
     // Assunto do pedido do usuário ("space" ou "slowness"): a recomendação ligada a ele vem primeiro no limite de duas.
     public string? Focus { get; set; }
 
-    private void ForgetFindings() { findings.Clear(); topProcesses.Clear(); memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear(); }
+    private void ForgetFindings() { findings.Clear(); topProcesses.Clear(); memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear(); diskActive = diskClosed = false; lowestFreePercent = null; }
 
     // Só a evidência é encurtada; a orientação de segurança que acompanha a linha nunca é cortada.
     private void Finding(string key, string text, string guidance = "")
@@ -650,6 +731,7 @@ public sealed class InvestigationEvidence
         // Cada relatório substitui as três linhas do anterior; uma parte ausente agora não pode sobrar da leitura velha.
         findings.RemoveAll(f => f.Key is "health" or "health:unknown" or "health:informative" or "health:volumes");
         memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear();
+        diskActive = diskClosed = false; lowestFreePercent = null;
         if (report.StartsWith("Nenhuma amostra", StringComparison.Ordinal)) { Finding("health", "O relatório de saúde não tem leituras das últimas 24 horas."); return; }
         // O relatório marca a amostra velha na linha de coleta, pelo mesmo critério de HealthOccurrences.CollectionNotice.
         var stale = Regex.IsMatch(report, @"^Última coleta: [^\n]*Sem leitura recente: o estado atual das ocorrências é desconhecido\.", RegexOptions.Multiline);
@@ -670,6 +752,8 @@ public sealed class InvestigationEvidence
             .Select(match => (Status: match.Groups["status"].Value, Category: match.Groups["category"].Value, Problem: match.Groups["problem"].Value, Evidence: match.Groups["evidence"].Value,
                 Active: !Closed(match.Groups["status"].Value)))
             .ToArray();
+        diskActive = lines.Any(line => line.Category == "disk" && line.Active);
+        diskClosed = lines.Any(line => line.Category == "disk" && !line.Active);
         foreach (var line in lines.Where(line => line.Category == "memory"))
         {
             if (Regex.Match(line.Evidence, @"^(?<name>[\p{L}\p{N}._-]+) PID (?<pid>\d{1,9})\b") is not { Success: true } who) continue;
@@ -699,7 +783,11 @@ public sealed class InvestigationEvidence
         // Atual, mas sem falha (o patamar estável da #71): o processo pode ser citado e ganha os MB, mas o resumo não diz que é
         // problema ativo nem que foi resolvido.
         var informative = occurrences.Where(o => o.Informative).Select(o => o.Text).ToArray();
-        var volumes = Regex.Matches(report, @"^Volume (?<name>[^\n]+?): (?<free>[\d.,]+% livre)\.", RegexOptions.Multiline)
+        var volumeLines = Regex.Matches(report, @"^Volume (?<name>[^\n]+?): (?<free>[\d.,]+% livre)\.", RegexOptions.Multiline);
+        foreach (Match volume in volumeLines)
+            if (double.TryParse(volume.Groups["free"].Value.Split('%')[0].Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var free))
+                lowestFreePercent = Math.Min(lowestFreePercent ?? free, free);
+        var volumes = volumeLines
             // Letra de unidade sai como está; outro nome de volume é dado da ferramenta e vai entre aspas (@qa: nome que imita o relatório).
             .Select(match => (Regex.IsMatch(match.Groups["name"].Value, @"^[A-Za-z]:_?$") ? match.Groups["name"].Value.TrimEnd('_') : Quoted(match.Groups["name"].Value)) + " " + match.Groups["free"].Value).ToArray();
         var when = sample == null ? "" : " (amostra de " + sample + ")";
@@ -710,7 +798,7 @@ public sealed class InvestigationEvidence
             : "Ocorrência ativa no monitor de saúde" + when + ": " + Within(active.Take(3), active.Length) + ".",
             advice.Length == 0 ? "" : " Recomendação do monitor: " + string.Join("; ", advice) + ". O Nexo não apaga arquivos nem encerra programas."
                 // Caminho real para ver o uso do disco (#88): o Nexo não lista arquivos nem pastas.
-                + (advice.Contains(Advice("disk", "Pouco espaço no volume ").Text) ? " Para ver o que ocupa espaço, abra Configurações > Sistema > Armazenamento no Windows." : ""));
+                + (advice.Contains(Advice("disk", "Pouco espaço no volume ").Text) ? " " + StorageGuidance : ""));
         if (informative.Length > 0) Finding("health:informative", "Informação do monitor de saúde, sem falha ativa: " + Within(informative.Take(3), informative.Length) + ".");
         if (unknown.Length > 0) Finding("health:unknown", "Ocorrências do monitor com estado atual desconhecido: " + Within(unknown.Take(3), unknown.Length) + ".");
         if (volumes.Length > 0) Finding("health:volumes", (stale ? "Espaço livre por volume naquela amostra: " : "Espaço livre por volume: ") + Within(volumes.Take(4), volumes.Length) + ".");
