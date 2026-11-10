@@ -508,8 +508,9 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     {
                         var restored = root.TryGetProperty("reverted", out var rv) && rv.ValueKind == JsonValueKind.True;
                         var changed = !root.TryGetProperty("changed", out var ch) || ch.ValueKind != JsonValueKind.False;
+                        var unknown = root.TryGetProperty("state", out var st) && st.ValueKind == JsonValueKind.String && st.GetString() == "unknown";
                         networkFailure = "A alteração de rede não foi concluída. " + (root.TryGetProperty("error", out var err) ? err.GetString() : "Confira o resultado acima.") + "\n\n" +
-                            (restored ? "A configuração anterior foi restaurada e conferida." : changed ? "A restauração automática não foi confirmada. O erro e o caminho do backup estão no cartão acima; é necessário conferir a configuração antes de tentar outra mudança." : "A operação foi interrompida antes de alterar a configuração.");
+                            (restored ? "A configuração anterior foi restaurada e conferida." : unknown ? "O estado da rede não pôde ser confirmado e nenhuma restauração foi confirmada. O caminho do backup está no cartão acima; consulte a rede antes de tentar outra mudança." : changed ? "A restauração automática não foi confirmada. O erro e o caminho do backup estão no cartão acima; é necessário conferir a configuração antes de tentar outra mudança." : "A operação foi interrompida antes de alterar a configuração.");
                     }
                     if (ToolCatalog.IsMutation(name))
                     {

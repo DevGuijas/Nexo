@@ -149,6 +149,8 @@ Se o executor terminar sem resultado, a abertura seguinte do Nexo oferece restau
 
 Limite conhecido: na transação normal, o processo elevado ainda grava `before.json`, `applied.json` e `result.json` na pasta de `%LOCALAPPDATA%`, que o usuário controla. Esses arquivos só informam o aplicativo e não definem o que é restaurado; mover essa escrita para fora do processo elevado depende de validação no Windows.
 
+A espera do aplicativo pelo processo elevado tem prazo total de 5 minutos: até 150 segundos para aplicar e chegar à confirmação (incluindo a espera por concessão DHCP), até 60 segundos pela resposta da janela e até 90 segundos para o executor registrar o resultado depois da decisão. O cancelamento grava a restauração para o executor e continua contando o prazo; se for antes da aplicação, o prazo inclui também a fase de conclusão, e com a janela de confirmação aberta ele encerra a espera por ela. Se o prazo acabar com o processo elevado ainda ativo, o Nexo não o encerra nem inicia uma restauração concorrente: grava `unconfirmed.json`, informa que o estado da rede não pôde ser confirmado e não anuncia restauração. Quando o executor terminar sem resultado, a restauração é oferecida na próxima abertura do Nexo.
+
 A restauração pode falhar por indisponibilidade do dispositivo ou políticas do Windows; o erro é registrado junto ao backup. Consultar a configuração ou receber DHCP não comprova conectividade com todos os serviços. Teste a conexão antes de manter a mudança. A reconfiguração de IP/DNS permite interfaces físicas e vEthernet do host identificadas; VPN e Default Switch permanecem bloqueados. A ativação de uma interface virtual desativada é permitida com confirmação, sem recriar switches.
 
 ## Acesso local e dados
