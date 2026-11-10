@@ -425,7 +425,7 @@ internal static class NetworkRecoveryChecks
             await Write(Secured(protectedRoot, dir), "result.json", "{\"success\":true,\"message\":\"PLANTADO\"}");
         }, prompts, true);
         check(!Flag(distrusted.Result, "success") && Text(distrusted.Result, "state") == "unknown" && Text(distrusted.Result, "error").Contains("permissões inesperados")
-            && !File.Exists(Path.Combine(distrusted.Directory, "result.json")),
+            && Text(distrusted.Result, "backup").EndsWith("before.json") && !File.Exists(Path.Combine(distrusted.Directory, "result.json")),
             "Rede: resultado em pasta protegida com dono ou permissões inesperados é ignorado e fica como estado desconhecido");
 
         var finished = Transaction(startup, protectedRoot, 1);

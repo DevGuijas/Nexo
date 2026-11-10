@@ -119,7 +119,7 @@ public static class NetworkChange
     private static async Task<string> ReadResult(string dir, string secured, NetworkRecoveryTrust trust)
     {
         if (!trust.TrustsFile(secured, "result.json"))
-            return JsonSerializer.Serialize(new { success = false, reverted = false, state = "unknown", error = "O resultado do executor de rede está numa pasta com dono ou permissões inesperados e foi ignorado. O estado da rede não pôde ser confirmado; consulte a rede antes de outra alteração.", recoveryFolder = dir });
+            return JsonSerializer.Serialize(new { success = false, reverted = false, state = "unknown", error = "O resultado do executor de rede está numa pasta com dono ou permissões inesperados e foi ignorado. O estado da rede não pôde ser confirmado; consulte a rede antes de outra alteração.", backup = Path.Combine(secured, "before.json"), recoveryFolder = dir });
         var text = await File.ReadAllTextAsync(Path.Combine(secured, "result.json"), CancellationToken.None);
         try { await NetworkRecovery.WriteTextAtomic(Path.Combine(dir, "result.json"), text); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
