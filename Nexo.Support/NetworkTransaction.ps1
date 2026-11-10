@@ -101,7 +101,8 @@ function Save-ProtectedRecord($phase) {
 # Remove só os arquivos conhecidos e a pasta vazia: nunca apaga recursivamente com elevação (um link poderia apontar
 # para outro lugar).
 function Remove-ProtectedFolder($path) {
-    foreach ($name in 'before.json', 'transaction.json', 'recovery-result.json') { $file = Join-Path $path $name; if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } }
+    # Lista fechada, sem curinga: os três arquivos e os temporários que uma gravação interrompida pode deixar.
+    foreach ($name in 'before.json', 'transaction.json', 'recovery-result.json', 'before.json.tmp', 'transaction.json.tmp', 'recovery-result.json.tmp') { $file = Join-Path $path $name; if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } }
     [IO.Directory]::Delete($path, $false)
 }
 function Remove-Protected { if ($protectedState.Opened) { try { Remove-ProtectedFolder $protectedDir } catch { } } }

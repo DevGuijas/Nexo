@@ -20,7 +20,7 @@ function Get-Content { param([string]$LiteralPath,[switch]$Raw) if($LiteralPath 
 function New-ProtectedDirectory($path) { if(Test-Path -LiteralPath $path){throw ('Created over an existing folder: '+$path)}; New-Item -ItemType Directory -Path $path | Out-Null; $script:created+=@($path) }
 function Assert-Trusted($path) { if(-not (Test-Path -LiteralPath $path)){throw ('Protected item missing: '+$path)}; if($script:untrusted -or $script:untrustedPaths -contains $path){throw ('Simulated untrusted protected copy at '+$path+'; it is not used.')} }
 function Set-Acl { $script:aclWrites++ }
-function Write-ProtectedFile($path, $text) { Set-Content -LiteralPath $path -Value $text; $script:protectedWrites+=@(Split-Path -Leaf $path) }
+function Write-ProtectedFile($path, $text) { Set-Content -LiteralPath $path -Value $text; $script:protectedWrites+=@(Split-Path -Leaf $path); if($script:leaveTmp){Set-Content -LiteralPath ($path+'.tmp') -Value 'interrupted'} }
 function Invoke-TestNetsh {
     Assert-Backed
     if (($args -join ' ') -ne 'interface ipv4 set address name=10 source=dhcp store=persistent') { throw 'Unexpected native arguments' }
@@ -90,6 +90,8 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
     $operationDir=Join-Path $testRoot $(if($variant -eq 'bad-id'){'NAO-E-GUID'}else{$operationId}); New-Item -ItemType Directory -Path $operationDir | Out-Null
     UseProgramData $name
     $script:currentProtected=Join-Path $script:protectedTestRoot $operationId; $script:untrusted=$false
+    # A write interrupted before the rename leaves a .tmp: the closed removal list still empties the folder.
+    $script:leaveTmp=$variant -eq 'leftover-tmp'
     $nexoRoot=Split-Path -Parent $script:protectedTestRoot
     # A folder that already exists is used only if it is already protected; it is never repaired or adopted.
     if($variant -eq 'protected-exists'){New-Item -ItemType Directory -Path $script:currentProtected -Force | Out-Null; Set-Content -LiteralPath (Join-Path $script:currentProtected 'before.json') -Value '{"forjado":true}'; $script:untrustedPaths=@($script:currentProtected)}
@@ -208,6 +210,7 @@ try {
     Check 'protected-folder-already-exists' 'set_dns' 'manual' 'keep' $false 'protected-exists'
     Check 'existing-untrusted-nexo-folder' 'set_dns' 'manual' 'keep' $false 'existing-untrusted-root'
     Check 'existing-trusted-operations-folder' 'set_dns' 'manual' 'keep' $false 'existing-trusted-root'
+    Check 'leftover-temporary-files' 'set_dns' 'manual' 'keep' $false 'leftover-tmp'
     Check 'invalid-operation-id' 'set_dns' 'manual' 'keep' $false 'bad-id'
     # Real ACL of the protected folder: Windows as administrator only. In GitHub Actions a skip is a failure.
     $onWindows=$PSVersionTable.PSEdition -eq 'Desktop' -or $IsWindows
