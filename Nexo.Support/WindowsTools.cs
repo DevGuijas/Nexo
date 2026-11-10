@@ -20,6 +20,8 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private readonly Dictionary<int, ObservedAdapter> observedAdapters = [];
     private readonly Dictionary<int, JsonElement> observedNetworkDetails = [];
     private readonly Dictionary<string, JsonElement> observedServiceDetails = new(StringComparer.OrdinalIgnoreCase);
+    // Quando cada estado de serviço foi lido (#88): o pedido de aprovação só mostra uma leitura recente.
+    private readonly Dictionary<string, DateTimeOffset> observedServiceAt = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, JsonElement> observedPrinterDetails = new(StringComparer.OrdinalIgnoreCase);
     // Última leitura dos eventos de cada serviço (#58), já na frase que vai para o pedido de aprovação do reinício.
     private readonly Dictionary<string, (DateTimeOffset At, string Note)> observedServiceEvents = new(StringComparer.OrdinalIgnoreCase);
@@ -35,11 +37,21 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private OfficialDriverSource.DriverOffer? observedNvidiaDriver;
     private DateTimeOffset? observedNvidiaDriverAt;
     private bool? lastApproval;
+    // Se alguma aprovação já foi concedida nesta execução (#73). Não volta a false: no set_dns/set_ipv4 a 2ª pergunta ("Manter a
+    // configuração?") vem DEPOIS de a mudança ser aplicada, e recusá-la não desfaz o que já foi feito.
+    private bool changeAuthorized;
     private InterventionRecord? currentIntervention;
     // Executa o script de eventos do serviço; os testes trocam o PowerShell por uma saída conhecida.
     internal Func<string, CancellationToken, Task<string>> ServiceEventsReader { get; init; } = (script, token) => SupportService.Powershell(script, token);
     // Relógio da validade da leitura de eventos (5 minutos); os testes avançam o tempo.
     internal Func<DateTimeOffset> ServiceEventsClock { get; init; } = () => DateTimeOffset.UtcNow;
+    // Consulta da rede, aplicação da mudança de rede e início do processo elevado; os testes trocam por versões sem Windows.
+    internal Func<string, CancellationToken, Task<string>> NetworkReader { get; init; } = (script, token) => SupportService.Powershell(script, token);
+    internal Func<NetworkRequest, Func<ChangeRequest, Task<bool>>, CancellationToken, Task<string>>? NetworkApplier { get; init; }
+    internal Func<string, Process> ElevatedStarter { get; init; } = StartElevated;
+    // Leitura das impressoras e do diagnóstico de dispositivos; os testes trocam pelo resultado do PowerShell (#84).
+    internal Func<string, CancellationToken, Task<string>> PrinterReader { get; init; } = (script, token) => SupportService.Powershell(script, token);
+    internal Func<string, CancellationToken, Task<string>> DeviceReader { get; init; } = (script, token) => SupportService.Powershell(script, token, 75);
     private static readonly IReadOnlyDictionary<string, JsonElement> toolSchemas = ToolCatalog.ForScope(false)
         .Select(tool => JsonSerializer.SerializeToElement(tool))
         .ToDictionary(tool => tool.GetProperty("function").GetProperty("name").GetString()!, tool => tool.GetProperty("function").GetProperty("parameters").Clone(), StringComparer.Ordinal);
@@ -75,7 +87,12 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         $searcher.ServerSelection=0
         $search=$searcher.Search("IsInstalled=0 and IsHidden=0 and Type='Driver'")
         """;
-    private static string HardwareFilter(string category) => category switch
+    internal static string DeviceClasses(string topic) => topic switch
+    {
+        "camera" => "'Camera','Image'", "audio" => "'AudioEndpoint','MEDIA'", "bluetooth" => "'Bluetooth'", "printer" => "'Printer','PrintQueue'",
+        _ => throw new InvalidOperationException("Categoria de dispositivo não permitida.")
+    };
+    internal static string HardwareFilter(string category) => category switch
     {
         "problem" => "[int]$_.ConfigManagerErrorCode -ne 0",
         "display" => "$_.PNPClass -eq 'Display'",
@@ -90,41 +107,161 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     };
     private static string HardwareTopic(string category) => category is "camera" or "audio" or "bluetooth" or "printer" or "network" ? category : "hardware";
 
+    // A consulta de impressoras confere antes o estado do Spooler (#84). Parado ou em outro estado que não Running, o script
+    // devolve só esse estado, num objeto; em execução, a lista de sempre, num array.
+    internal const string PrintersScript = "$spooler=Get-Service -Name Spooler -ErrorAction Stop; if([string]$spooler.Status -ne 'Running'){ ConvertTo-Json -Compress -InputObject ([pscustomobject]@{Spooler=[string]$spooler.Status;StartType=[string]$spooler.StartType}) } else { ConvertTo-Json -Depth 5 -Compress -InputObject @(Get-Printer | ForEach-Object { $p=$_; [pscustomobject]@{Name=$p.Name;Status=[string]$p.PrinterStatus;Driver=$p.DriverName;Port=$p.PortName;Jobs=@(Get-PrintJob -PrinterName $p.Name -ErrorAction SilentlyContinue | Select-Object ID,JobStatus)} }) }";
+
+    // O estado do Spooler quando o script confirmou que ele não está em execução; null para a lista de impressoras.
+    // Um objeto sem o estado, ou dizendo Running, é formato inesperado: a consulta falha como antes, sem diagnóstico inventado.
+    internal static (string Status, string StartType)? SpoolerNotRunning(string output)
+    {
+        using var document = JsonDocument.Parse(output);
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        if (!root.TryGetProperty("Spooler", out var status) || status.ValueKind != JsonValueKind.String || status.GetString() is not { Length: > 0 } state
+            || string.Equals(state, "Running", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("A consulta de impressoras retornou um formato inesperado.");
+        var start = root.TryGetProperty("StartType", out var type) && type.ValueKind == JsonValueKind.String ? type.GetString() ?? "" : "";
+        return (state, start);
+    }
+
+    internal static string SpoolerStoppedResult(string status, string startType) => Ok(new
+    {
+        SpoolerRunning = false, SpoolerStatus = status, SpoolerStartType = startType, Printers = Array.Empty<object>(),
+        note = (string.Equals(status, "Stopped", StringComparison.OrdinalIgnoreCase)
+            ? "O serviço de impressão (Spooler) está parado."
+            : "O serviço de impressão (Spooler) não está em execução (estado " + status + ").")
+            + " Sem ele o Windows não lista impressoras nem filas e nada imprime; este é o achado da consulta, não uma falha dela."
+            + (string.Equals(startType, "Disabled", StringComparison.OrdinalIgnoreCase)
+                ? " O serviço está desabilitado: verifique a política da organização antes de mudar o modo de inicialização."
+                : " Reiniciar o Spooler (restart_service) depende da aprovação do usuário.")
+    });
+
+    // Corte por caractere visível (text element), não por unidade UTF-16: não parte par substituto, emoji nem acento combinado.
+    internal static string Limited(string text, int limit)
+    {
+        var info = new System.Globalization.StringInfo(text);
+        return info.LengthInTextElements > limit ? info.SubstringByTextElements(0, limit) : text;
+    }
+
+    // Estado do serviço antes do reinício, para a janela de aprovação (#88): só a leitura recente do executor (get_printers com o
+    // Spooler parado ou get_services), nunca os argumentos do modelo. Sem leitura, a janela fica como antes.
+    internal string? ObservedServiceState(string service)
+    {
+        if (!observedServiceAt.TryGetValue(service, out var at) || ServiceEventsClock() - at > TimeSpan.FromMinutes(5) || !observedServiceDetails.TryGetValue(service, out var detail)
+            || detail.ValueKind != JsonValueKind.Object || !detail.TryGetProperty("Status", out var status) || status.ValueKind != JsonValueKind.String) return null;
+        var start = detail.TryGetProperty("StartType", out var type) && type.ValueKind == JsonValueKind.String ? type.GetString() ?? "" : "";
+        return ServiceStateText(status.GetString() ?? "", start);
+    }
+
+    private void RememberRestarted(string service, string result)
+    {
+        observedServiceDetails.Remove(service); observedServiceAt.Remove(service);
+        try
+        {
+            using var document = JsonDocument.Parse(result);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("success", out var success) && success.ValueKind == JsonValueKind.True
+                && root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Object && data.TryGetProperty("Status", out var status) && status.ValueKind == JsonValueKind.String)
+            {
+                observedServiceDetails[service] = JsonSerializer.SerializeToElement(new { Name = service, Status = status.GetString() });
+                observedServiceAt[service] = ServiceEventsClock();
+            }
+        }
+        catch (JsonException) { /* Sem resultado legível, a leitura anterior já saiu. */ }
+    }
+
+    internal static string? ServiceStateText(string status, string startType)
+    {
+        static string Part(string value) => Limited(InvestigationEvidence.Clean(value).Trim(), 30);
+        var state = status.ToLowerInvariant() switch
+        {
+            "stopped" => "parado", "running" => "em execução", "paused" => "pausado", "startpending" => "iniciando",
+            "stoppending" => "parando", "pausepending" => "pausando", "continuepending" => "retomando", _ => Part(status)
+        };
+        if (state.Length == 0) return null;
+        var start = startType.ToLowerInvariant() switch
+        {
+            "automatic" => "automático", "manual" => "manual", "disabled" => "desabilitado", "" => "", _ => Part(startType)
+        };
+        return "Estado atual: " + state + (start.Length > 0 ? " (início " + start + ")" : "") + ".";
+    }
+
+    // Texto da janela de aprovação de enable_device/restart_device (#84): o driver aparece quando a consulta do turno trouxe
+    // o INF, a versão ou o fornecedor desse ID. Tudo vem da observação do executor, nada dos argumentos do modelo.
+    internal static string DeviceChangeDetails(string action, Device device)
+    {
+        // O nome do dispositivo também vem do Windows (do descritor USB, por exemplo): sem quebra de linha, não imita a linha do driver.
+        static string Part(string value, int limit = 80) => Limited(InvestigationEvidence.Clean(value).Trim(), limit);
+        var parts = new[] { Part(device.InfName), Part(device.DriverVersion) is { Length: > 0 } version ? "versão " + version : "", Part(device.DriverProvider) }
+            .Where(part => part.Length > 0).ToArray();
+        return (action == "restart_device" ? "Reiniciar " : "Habilitar ") + Part(device.Name, 160) + "."
+            + (parts.Length > 0 ? "\nDriver: " + string.Join(" · ", parts) + "." : "")
+            + "\nO dispositivo poderá ficar temporariamente indisponível.";
+    }
+
     // The schema sent to Ollama is advisory. Enforce it again at the executor boundary.
+    // A recusa volta ao modelo como resultado da ferramenta: ela diz o que é aceito, para que a próxima chamada seja corrigida
+    // em vez de repetida (#83). As regras são as mesmas do esquema anunciado; nada passa a ser aceito por isso.
     internal static void ValidateArguments(string name, JsonElement args)
     {
-        if (!toolSchemas.TryGetValue(name, out var schema) || name is "finish_support" or "ask_user") throw new InvalidOperationException("Ferramenta não permitida: " + name);
-        if (args.ValueKind != JsonValueKind.Object) throw new InvalidOperationException("Os argumentos da ferramenta devem ser um objeto JSON.");
+        if (!toolSchemas.TryGetValue(name, out var schema) || name is "finish_support" or "ask_user") throw new InvalidOperationException("Ferramenta não permitida: " + InvestigationEvidence.Quoted(name, 40));
+        if (args.ValueKind != JsonValueKind.Object) throw new InvalidOperationException("Os argumentos de " + name + " devem ser um objeto JSON. " + Accepted(name, schema));
         var properties = schema.GetProperty("properties");
+        var required = schema.GetProperty("required").EnumerateArray().Select(r => r.GetString()!).ToHashSet(StringComparer.Ordinal);
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var argument in args.EnumerateObject())
         {
-            if (!seen.Add(argument.Name) || !properties.TryGetProperty(argument.Name, out var rule)) throw new InvalidOperationException("Argumento inesperado ou repetido: " + argument.Name);
-            ValidateArgument(argument.Name, argument.Value, rule);
+            if (!seen.Add(argument.Name)) throw new InvalidOperationException("Argumento repetido em " + name + ": " + InvestigationEvidence.Quoted(argument.Name, 40) + ". Envie cada argumento uma vez.");
+            if (!properties.TryGetProperty(argument.Name, out var rule)) throw new InvalidOperationException("Argumento inesperado em " + name + ": " + InvestigationEvidence.Quoted(argument.Name, 40) + ". " + Accepted(name, schema));
+            ValidateArgument(name, argument.Name, argument.Value, rule, !required.Contains(argument.Name));
         }
-        foreach (var required in schema.GetProperty("required").EnumerateArray())
-            if (!seen.Contains(required.GetString()!) && !(name == "set_dns" && required.GetString() == "servers" && args.TryGetProperty("mode", out var mode) && mode.ValueKind == JsonValueKind.String && mode.GetString() == "automatic"))
-                throw new InvalidOperationException("Argumento obrigatório ausente: " + required.GetString());
+        foreach (var missing in required.Where(r => !seen.Contains(r)))
+            throw new InvalidOperationException("Argumento obrigatório ausente em " + name + ": " + missing + ". " + Accepted(name, schema));
     }
 
-    private static void ValidateArgument(string name, JsonElement value, JsonElement rule)
+    // Serviços que get_services consulta. A mesma lista vai no script e na recusa de argumento (#83).
+    internal static readonly string[] ObservedServices = ["Audiosrv", "AudioEndpointBuilder", "Spooler", "bthserv", "WlanSvc"];
+
+    // O que a ferramenta aceita, no texto que volta ao modelo depois de uma recusa.
+    private static string Accepted(string tool, JsonElement schema)
     {
+        var properties = schema.GetProperty("properties").EnumerateObject().ToArray();
+        if (properties.Length == 0) return tool + " não recebe argumentos; chame com {}" + (tool == "get_services" ? ". Ela já traz " + string.Join(", ", ObservedServices[..^1]) + " e " + ObservedServices[^1] + "." : ".");
+        var required = schema.GetProperty("required").EnumerateArray().Select(r => r.GetString()!).ToHashSet(StringComparer.Ordinal);
+        return tool + " aceita: " + string.Join("; ", properties.Select(p => p.Name + " (" + (required.Contains(p.Name) ? "obrigatório" : "opcional") + ", " + Kind(p.Value) + ")")) + ".";
+    }
+
+    private static string Kind(JsonElement rule) => rule.GetProperty("type").GetString() switch
+    {
+        "string" when rule.TryGetProperty("enum", out var choices) => "um de: " + string.Join(", ", choices.EnumerateArray().Select(c => c.GetString())),
+        "string" => "texto",
+        "integer" => "número inteiro",
+        "array" => "lista" + (rule.TryGetProperty("maxItems", out var max) ? " de até " + max.GetInt32() + " itens" : "") + " de " + Kind(rule.GetProperty("items")),
+        var other => other ?? "?"
+    };
+
+    private static void ValidateArgument(string tool, string name, JsonElement value, JsonElement rule, bool optional)
+    {
+        var where = " em " + tool + ": " + name + ". ";
         switch (rule.GetProperty("type").GetString())
         {
             case "string":
-                if (value.ValueKind != JsonValueKind.String) throw new InvalidOperationException("Argumento de texto inválido: " + name);
+                if (value.ValueKind != JsonValueKind.String) throw new InvalidOperationException("Argumento de texto inválido" + where + "Envie " + Kind(rule) + ", entre aspas.");
                 var text = value.GetString()!;
-                if (text.Length > 1024 || text.Any(char.IsControl)) throw new InvalidOperationException("Argumento de texto inválido: " + name);
-                if (rule.TryGetProperty("enum", out var choices) && !choices.EnumerateArray().Any(choice => choice.GetString() == text)) throw new InvalidOperationException("Valor não permitido: " + name);
+                if (text.Length > 1024 || text.Any(char.IsControl)) throw new InvalidOperationException("Argumento de texto inválido" + where + "Use até 1024 caracteres, sem caracteres de controle.");
+                if (rule.TryGetProperty("enum", out var choices) && !choices.EnumerateArray().Any(choice => choice.GetString() == text))
+                    throw new InvalidOperationException("Valor não permitido para " + name + " em " + tool + ": " + InvestigationEvidence.Quoted(text, 40) + ". Valores aceitos: "
+                        + string.Join(", ", choices.EnumerateArray().Select(c => c.GetString())) + (optional ? "; ou omita " + name + "." : "."));
                 break;
             case "integer":
-                if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out _)) throw new InvalidOperationException("Número inteiro inválido: " + name);
+                if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out _)) throw new InvalidOperationException("Número inteiro inválido" + where + "Envie um número inteiro, sem aspas.");
                 break;
             case "array":
-                if (value.ValueKind != JsonValueKind.Array || rule.TryGetProperty("maxItems", out var max) && value.GetArrayLength() > max.GetInt32()) throw new InvalidOperationException("Lista inválida: " + name);
-                foreach (var item in value.EnumerateArray()) ValidateArgument(name, item, rule.GetProperty("items"));
+                if (value.ValueKind != JsonValueKind.Array || rule.TryGetProperty("maxItems", out var max) && value.GetArrayLength() > max.GetInt32()) throw new InvalidOperationException("Lista inválida" + where + "Envie " + Kind(rule) + ".");
+                foreach (var item in value.EnumerateArray()) ValidateArgument(tool, name, item, rule.GetProperty("items"), false);
                 break;
-            default: throw new InvalidOperationException("Esquema de argumento não permitido: " + name);
+            default: throw new InvalidOperationException("Esquema de argumento não permitido" + where);
         }
     }
 
@@ -132,6 +269,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     {
         if (!ToolCatalog.IsMutation(name)) return await ExecuteCore(name, args, token);
         lastApproval = null;
+        changeAuthorized = false;
         currentIntervention = new InterventionRecord
         {
             Action = name, Target = args.ValueKind == JsonValueKind.Object ? args.GetRawText() : "{}",
@@ -141,6 +279,8 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         MoveIntervention("proposed", "Ação proposta; ainda não autorizada nem executada.");
         string? output = null;
         try { return output = await ExecuteCore(name, args, token); }
+        // Antes da aprovação nada foi alterado: validação, consulta prévia ou o próprio pedido de aprovação falharam (#73).
+        catch (Exception ex) when (!changeAuthorized) { ex.Data[TurnFacts.NotStartedKey] = true; throw; }
         finally
         {
             var state = ResultState(output);
@@ -229,7 +369,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             case "get_network":
                 observedInterfaces.Clear(); observedAdapters.Clear(); observedNetworkDetails.Clear(); configurableInterfaces.Clear(); physicalInterfaces.Clear();
                 observedNetworkAt = null;
-                var network = await SupportService.Powershell(NetworkQuery, token);
+                var network = await NetworkReader(NetworkQuery, token);
                 using (var document = JsonDocument.Parse(network))
                 {
                     foreach (var adapter in document.RootElement.GetProperty("Adapters").EnumerateArray())
@@ -300,8 +440,8 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 observedDevices.Clear();
                 observedDevicesAt = null;
                 if (topic == "system") return Ok((await support.Diagnose(actor, topic, progress, token)).Summary);
-                var classes = topic switch { "camera" => "'Camera','Image'", "audio" => "'AudioEndpoint','MEDIA'", "bluetooth" => "'Bluetooth'", "printer" => "'Printer','PrintQueue'", _ => throw new InvalidOperationException("Categoria de dispositivo não permitida.") };
-                var diagnosis = DriverStoreInventory.ParseDeviceDiagnosis(await SupportService.Powershell(DriverStoreInventory.DeviceDiagnosisScript(classes), token, 75));
+                var classes = DeviceClasses(topic);
+                var diagnosis = DriverStoreInventory.ParseDeviceDiagnosis(await DeviceReader(DriverStoreInventory.DeviceDiagnosisScript(classes), token));
                 var devices = diagnosis.Devices;
                 foreach (var device in devices.Where(d => !string.IsNullOrWhiteSpace(d.Id))) observedDevices[device.Id] = (topic, device);
                 var extra = topic == "camera" ? await SupportService.Powershell("Get-ItemProperty -LiteralPath 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\webcam' -ErrorAction SilentlyContinue | Select-Object Value | ConvertTo-Json -Compress", token) : "";
@@ -328,17 +468,27 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             case "get_printers":
                 observedPrinters.Clear(); observedPrinterDetails.Clear();
                 observedPrintersAt = null;
-                var printers = await SupportService.Powershell("ConvertTo-Json -Depth 5 -Compress -InputObject @(Get-Printer | ForEach-Object { $p=$_; [pscustomobject]@{Name=$p.Name;Status=[string]$p.PrinterStatus;Driver=$p.DriverName;Port=$p.PortName;Jobs=@(Get-PrintJob -PrinterName $p.Name -ErrorAction SilentlyContinue | Select-Object ID,JobStatus)} })", token);
+                var printers = await PrinterReader(PrintersScript, token);
+                if (SpoolerNotRunning(printers) is { } spooler)
+                {
+                    // Sem o Spooler o Windows não lista impressoras: o estado do serviço é o resultado da consulta (#84).
+                    observedServiceDetails["Spooler"] = JsonSerializer.SerializeToElement(new { Name = "Spooler", spooler.Status, spooler.StartType });
+                    observedServiceAt["Spooler"] = ServiceEventsClock();
+                    return SpoolerStoppedResult(spooler.Status, spooler.StartType);
+                }
+                // A lista só vem com o Spooler em execução: uma leitura anterior dele parado deixou de valer.
+                observedServiceDetails.Remove("Spooler"); observedServiceAt.Remove("Spooler");
                 using (var printerDoc = JsonDocument.Parse(printers)) foreach (var entry in printerDoc.RootElement.EnumerateArray())
                     if (entry.TryGetProperty("Name", out var printerName) && printerName.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(printerName.GetString()))
                     { observedPrinters.Add(printerName.GetString()!); observedPrinterDetails[printerName.GetString()!] = entry.Clone(); }
                 observedPrintersAt = DateTimeOffset.UtcNow;
                 return Ok(printers);
             case "get_services":
-                var serviceRaw = await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Service -Name Audiosrv,AudioEndpointBuilder,Spooler,bthserv,WlanSvc | Select-Object Name,@{N='Status';E={[string]$_.Status}},@{N='StartType';E={[string]$_.StartType}})", token);
-                observedServiceDetails.Clear();
+                var serviceRaw = await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Service -Name " + string.Join(",", ObservedServices) + " | Select-Object Name,@{N='Status';E={[string]$_.Status}},@{N='StartType';E={[string]$_.StartType}})", token);
+                observedServiceDetails.Clear(); observedServiceAt.Clear();
                 using (var serviceDoc = JsonDocument.Parse(serviceRaw)) foreach (var entry in serviceDoc.RootElement.EnumerateArray())
-                    if (entry.TryGetProperty("Name", out var serviceName) && serviceName.ValueKind == JsonValueKind.String) observedServiceDetails[serviceName.GetString() ?? ""] = entry.Clone();
+                    if (entry.TryGetProperty("Name", out var serviceName) && serviceName.ValueKind == JsonValueKind.String)
+                    { observedServiceDetails[serviceName.GetString() ?? ""] = entry.Clone(); observedServiceAt[serviceName.GetString() ?? ""] = ServiceEventsClock(); }
                 return Ok(serviceRaw);
             case "get_recent_errors":
                 if (args.TryGetProperty("service", out _)) return await ReadServiceEvents(Value(args, "service"), token);
@@ -364,7 +514,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 if (!configurableInterfaces.GetValueOrDefault(index)) throw new InvalidOperationException("Esta interface é gerenciada pelo Windows ou por VPN; reconfiguração de IP/DNS não permitida.");
                 var request = NetworkChange.Parse(name, args) with { ExpectedGuid = observedAdapters[index].Guid };
                 if (!await Approve(new ChangeRequest("Alterar configuração de rede", observedInterfaces[index] + "\n" + request.Description + "\nA conexão pode ser interrompida. O estado anterior será salvo e restaurado se você não confirmar a nova configuração."), token)) return Denied();
-                var change = await NetworkChange.Apply(request, store, next => Approve(next, token), progress, token);
+                var change = NetworkApplier is { } apply ? await apply(request, next => Approve(next, token), token) : await NetworkChange.Apply(request, store, next => Approve(next, token), progress, token);
                 using (var changeResult = JsonDocument.Parse(change))
                 {
                     if (!changeResult.RootElement.GetProperty("success").GetBoolean()) return change;
@@ -385,7 +535,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 var id = Value(args, "device_id");
                 if (!Fresh(observedDevicesAt) || !observedDevices.TryGetValue(id, out var known)) throw new InvalidOperationException("Consulte o dispositivo nesta etapa antes de alterá-lo.");
                 ValidateDeviceTarget(name, known.Topic, known.Device);
-                if (!await Approve(new ChangeRequest("Ajustar dispositivo", (name == "restart_device" ? "Reiniciar " : "Habilitar ") + known.Device.Name + ".\nO dispositivo poderá ficar temporariamente indisponível."), token)) return Denied();
+                if (!await Approve(new ChangeRequest("Ajustar dispositivo", DeviceChangeDetails(name, known.Device)), token)) return Denied();
                 var allowedClasses = name == "enable_camera" ? "'Camera','Image'" : "'Camera','Image','AudioEndpoint','MEDIA','Bluetooth','Printer','PrintQueue'";
                 var codeCheck = name == "restart_device" ? "" : "if([int]$d[0].ConfigManagerErrorCode -ne 22){throw 'Dispositivo não está mais desabilitado; faça novo diagnóstico'}; ";
                 var deviceScript = "$d=@(Get-CimInstance Win32_PnPEntity | Where-Object {$_.PNPDeviceID -eq " + Quote(id) + " -and $_.PNPClass -in " + allowedClasses + "}); if($d.Count -ne 1){throw 'Dispositivo permitido não encontrado ou ambíguo'}; " + codeCheck + "& \"$env:WINDIR\\System32\\pnputil.exe\" " + (name == "restart_device" ? "/restart-device " : "/enable-device ") + Quote(id) + " | Out-Null; if($LASTEXITCODE -notin 0,3010){throw 'Falha do PnPUtil'}; Start-Sleep -Seconds 2; $after=@(Get-CimInstance Win32_PnPEntity | Where-Object {$_.PNPDeviceID -eq " + Quote(id) + "}); if($after.Count -ne 1 -or [int]$after[0].ConfigManagerErrorCode -ne 0){throw 'Windows ainda reporta erro no dispositivo; confirme se precisa reiniciar'}; $after[0] | Select-Object Name,ConfigManagerErrorCode,Status";
@@ -405,8 +555,14 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                     catch (Exception ex) when (ex is not OperationCanceledException) { /* A falha fica registrada como consulta indisponível. */ }
                     serviceEvents = observedServiceEvents[service];
                 }
-                if (!await Approve(new ChangeRequest("Reiniciar serviço", ServiceEvents.RestartDetails(service, serviceEvents.Note)), token)) return Denied();
-                return await Elevated("$s=Get-Service -Name " + Quote(service) + "; if($s.StartType -eq 'Disabled'){throw 'Serviço desabilitado. Verifique a política da organização antes de mudar o modo de inicialização'}; Restart-Service -Name " + Quote(service) + " -ErrorAction Stop; $s=Get-Service -Name " + Quote(service) + "; $s.WaitForStatus('Running',[timespan]::FromSeconds(20)); [pscustomobject]@{Service=$s.Name;Status=[string]$s.Status}", token);
+                if (!await Approve(new ChangeRequest("Reiniciar serviço", ServiceEvents.RestartDetails(service, serviceEvents.Note, ObservedServiceState(service))), token)) return Denied();
+                string restarted;
+                // Depois do reinício, a leitura de antes deixa de valer (#88): um 2º pedido não pode mostrar "parado" velho. Com o
+                // resultado do Windows, ela vira o estado informado; sem ele, sai. Se o processo elevado nem iniciou, nada mudou.
+                try { restarted = await Elevated("$s=Get-Service -Name " + Quote(service) + "; if($s.StartType -eq 'Disabled'){throw 'Serviço desabilitado. Verifique a política da organização antes de mudar o modo de inicialização'}; Restart-Service -Name " + Quote(service) + " -ErrorAction Stop; $s=Get-Service -Name " + Quote(service) + "; $s.WaitForStatus('Running',[timespan]::FromSeconds(20)); [pscustomobject]@{Service=$s.Name;Status=[string]$s.Status}", token); }
+                catch (Exception ex) when (!ex.Data.Contains(TurnFacts.NotStartedKey)) { observedServiceDetails.Remove(service); observedServiceAt.Remove(service); throw; }
+                RememberRestarted(service, restarted);
+                return restarted;
             case "clear_print_queue":
                 var printer = Value(args, "printer_name");
                 if (!Fresh(observedPrintersAt) || !observedPrinters.Contains(printer)) throw new InvalidOperationException("Consulte get_printers e escolha uma impressora encontrada nesta etapa.");
@@ -793,6 +949,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         {
             var result = await confirm(request);
             lastApproval = result;
+            changeAuthorized |= result;
             token.ThrowIfCancellationRequested();
             store.Require(actor, a => a.Repair);
             store.Log(actor, (result ? "Autorizado: " : "Recusado: ") + request.Title);
@@ -824,7 +981,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         if (!ServiceEvents.IsAllowed(service)) throw new InvalidOperationException("Serviço não permitido.");
         try
         {
-            var result = ServiceEvents.Result(ServiceEvents.Parse(await ServiceEventsReader(ServiceEvents.Script(service), token), service), DateTimeOffset.Now);
+            var result = ServiceEvents.Result(ServiceEvents.Parse(await ServiceEventsReader(ServiceEvents.Script(service), token), service), ServiceEventsClock());
             observedServiceEvents[service] = (ServiceEventsClock(), ServiceEvents.Note(result, service));
             return result;
         }
@@ -891,7 +1048,11 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 PendingOperations.Register(operational, currentIntervention, operationId, DateTimeOffset.UtcNow);
                 registered = true;
             }
-            using var process = StartElevated(wrapped);
+            Process process;
+            // O processo elevado não iniciou (UAC cancelado, Windows recusou): o script não rodou e nada foi alterado (#73).
+            try { process = ElevatedStarter(wrapped); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { ex.Data[TurnFacts.NotStartedKey] = true; throw; }
+            using var elevated = process;
             started = true;
             var state = await OperationSupervisor.Wait(async () => { await process.WaitForExitAsync(); return process.ExitCode; }, timeout, token);
             finished = process.HasExited;

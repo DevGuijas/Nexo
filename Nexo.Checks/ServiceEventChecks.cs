@@ -193,7 +193,7 @@ internal static class ServiceEventChecks
         var requests = new List<ChangeRequest>();
         var reads = 0;
         var tools = new WindowsTools(store, actor, request => { requests.Add(request); return Task.FromResult(false); }, new Progress<string>())
-        { ServiceEventsReader = (script, _) => { reads++; return Task.FromResult(script.StartsWith("$name='Spooler'", StringComparison.Ordinal) ? Scenario4() : throw new Exception("script inesperado")); } };
+        { ServiceEventsReader = (script, _) => { reads++; return Task.FromResult(script.StartsWith("$name='Spooler'", StringComparison.Ordinal) ? Scenario4() : throw new Exception("script inesperado")); }, ServiceEventsClock = () => Now };
         var consulted = await tools.Execute("get_recent_errors", JsonSerializer.SerializeToElement(new { service = "Spooler" }), CancellationToken.None);
         var denied = await tools.Execute("restart_service", JsonSerializer.SerializeToElement(new { service = "Spooler" }), CancellationToken.None);
         assert(ServiceEvents.Note(consulted, "Spooler").StartsWith("Nenhum evento de falha do serviço Spooler", StringComparison.Ordinal) && reads == 1 && requests.Count == 1
@@ -203,7 +203,7 @@ internal static class ServiceEventChecks
 
         requests.Clear(); reads = 0;
         var direct = new WindowsTools(store, actor, request => { requests.Add(request); return Task.FromResult(false); }, new Progress<string>())
-        { ServiceEventsReader = (_, _) => { reads++; return Task.FromResult(Scenario4()); } };
+        { ServiceEventsReader = (_, _) => { reads++; return Task.FromResult(Scenario4()); }, ServiceEventsClock = () => Now };
         await direct.Execute("restart_service", JsonSerializer.SerializeToElement(new { service = "Spooler" }), CancellationToken.None);
         assert(reads == 1 && requests.Single().Details.Contains("Último registro: entrou no estado parado às 00:28 (evento 7036)."),
             "Executor: sem leitura recente, o reinício consulta os eventos antes do pedido de aprovação");
@@ -227,7 +227,7 @@ internal static class ServiceEventChecks
 
         requests.Clear();
         var hostile = new WindowsTools(store, actor, request => { requests.Add(request); return Task.FromResult(false); }, new Progress<string>())
-        { ServiceEventsReader = (_, _) => Task.FromResult(Json("Spooler", "Spooler de Impressão", Event(7034, DateTimeOffset.Now.ToString("yyyy-MM-ddTHH:mm:sszzz"), "scm", "Spooler", "Spooler de Impressão", null, Hostile))) };
+        { ServiceEventsReader = (_, _) => Task.FromResult(Json("Spooler", "Spooler de Impressão", Event(7034, "2026-11-08T00:29:05-03:00", "scm", "Spooler", "Spooler de Impressão", null, Hostile))), ServiceEventsClock = () => Now };
         using var hostileResult = JsonDocument.Parse(await hostile.Execute("get_recent_errors", JsonSerializer.SerializeToElement(new { service = "Spooler" }), CancellationToken.None));
         await hostile.Execute("restart_service", JsonSerializer.SerializeToElement(new { service = "Spooler" }), CancellationToken.None);
         var hostileMessage = hostileResult.RootElement.GetProperty("data").GetProperty("Events")[0].GetProperty("Message").GetString()!;
@@ -282,7 +282,7 @@ internal static class ServiceEventChecks
         var requests = new List<ChangeRequest>();
         var reads = 0;
         var real = new WindowsTools(store, actor, request => { requests.Add(request); return Task.FromResult(false); }, new Progress<string>())
-        { ServiceEventsReader = (_, _) => { reads++; return Task.FromResult(Scenario4()); } };
+        { ServiceEventsReader = (_, _) => { reads++; return Task.FromResult(Scenario4()); }, ServiceEventsClock = () => Now };
         var mixed = new FlowTools((name, args) => name == "get_printers" ? SpoolerUnreachable : real.Execute(name, args, CancellationToken.None).GetAwaiter().GetResult());
         var (refused, _) = await Run(store, actor, mixed, Call("restart_service", new { service = "Spooler" }));
         assert(mixed.Calls.SequenceEqual(["get_printers", "get_recent_errors", "restart_service"]) && reads == 1
@@ -321,7 +321,9 @@ internal static class ServiceEventChecks
             _ => throw new Exception("Ferramenta inesperada: " + name)
         });
         var (notDone, _) = await Run(store, actor, broken, Call("restart_service", new { service = "Spooler" }));
-        assert(notDone.StartsWith("A alteração restart_service não foi concluída.", StringComparison.Ordinal)
+        // O serviço pode ter parado sem voltar: o resultado fica sem confirmação (#73), e a resposta não diz que nada mudou.
+        assert(notDone.StartsWith("A conclusão da etapa “Reiniciando e verificando o serviço” não foi confirmada: o Windows pode ter sido alterado.", StringComparison.Ordinal)
+            && notDone.EndsWith("\n\n" + TurnFacts.Prefix + " nenhuma confirmada. Sem confirmação do resultado: reinício do serviço “Spooler” — confira antes de continuar.", StringComparison.Ordinal)
             && notDone.Contains("O problema ainda não foi resolvido. Nenhum evento de falha do serviço Spooler nas últimas 24 h. Último registro: entrou no estado parado às 00:28 (evento 7036). Se persistir"),
             "Reinício com falha: a resposta diz que não foi concluído e cita os eventos do serviço");
 

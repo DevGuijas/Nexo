@@ -98,7 +98,7 @@ public static class SupportIntake
         if (Regex.IsMatch(text, @"\b(camera|webcam|imagem da camera)\b")) topics.Add("camera");
         if (Regex.IsMatch(text, @"\b(audio|media|sound|som|microfone|fone|alto.falante|audiosrv)\b")) topics.Add("audio");
         if (Regex.IsMatch(text, @"\b(bluetooth|bthserv)\b")) topics.Add("bluetooth");
-        if (Regex.IsMatch(text, @"\b(impressoras?|imprimir|impressao|printer|print queue|fila de impressao|spooler)\b")) topics.Add("printer");
+        if (Regex.IsMatch(text, @"\b(impressoras?|imprimir|impressao|printer|print queue|fila de impressao|spooler)\b") || Regex.IsMatch(text, NegatedPrinting)) topics.Add("printer");
         if (Regex.IsMatch(text, @"\b(lentidao|desempenho|memoria|disco|processos)\b")) topics.Add("system");
         if (Regex.IsMatch(text, @"\b(hardware|drivers?|controladores?|placa de video|gpu|dispositivo desconhecido|gerenciador de dispositivos)\b")) topics.Add("hardware");
         return topics;
@@ -182,17 +182,21 @@ public static class SupportIntake
         return topics;
     }
 
+    // Falha de impressão dita só pelo verbo (#70, validação no PC): conta apenas negada. "Estou imprimindo um relatório e o
+    // Wi-Fi caiu" ou "o pc travou imprimindo" não são da impressora, e o tema dela liberaria limpar a fila num incidente de rede.
+    private const string NegatedPrinting = @"\bnao\s+(ta|esta)\s+imprimindo\b|\bnao\s+sai\s+(a\s+)?impressao\b";
+
     public static string? InitialTopic(string request)
     {
         var text = AgentProtocol.Normalize(request);
-        var hasSymptom = Regex.IsMatch(text, @"\b(nao\s+(funciona|aparece|conecta|imprime|consigo|liga)|sem\s+(som|audio|imagem|camera|microfone|bluetooth)|sumiu|desapareceu|preso|presos|presa|travou|travada|problema|falha|parou|para quando|desconectar e conectar)\b");
+        var hasSymptom = Regex.IsMatch(text, NegatedPrinting) || Regex.IsMatch(text, @"\b(nao\s+(funciona|aparece|conecta|imprime|consigo|liga)|sem\s+(som|audio|imagem|camera|microfone|bluetooth)|sumiu|desapareceu|preso|presos|presa|travou|travada|problema|falha|parou|para quando|desconectar e conectar)\b");
         var hardwareRequest = Regex.IsMatch(text, @"\b(hardware|drivers?|controladores?|placa de video|gpu|dispositivo desconhecido|gerenciador de dispositivos)\b")
             && Regex.IsMatch(text, @"\b(atualiz\w*|instal\w*|verific\w*|detect\w*|diagnostic\w*)\b")
             && !AsksRestartResume(request);
         var systemSymptom = Regex.IsMatch(text, Space) || Regex.IsMatch(text, Slowness);
         if (!hasSymptom && !hardwareRequest && !systemSymptom) return null;
         if (Regex.IsMatch(text, @"\b(camera|webcam)\b")) return "camera";
-        if (Regex.IsMatch(text, @"\b(impressoras?|imprimir|impressao)\b")) return "printer";
+        if (Regex.IsMatch(text, @"\b(impressoras?|imprimir|impressao)\b") || Regex.IsMatch(text, NegatedPrinting)) return "printer";
         if (Regex.IsMatch(text, @"\b(som|audio|microfone|fone)\b")) return "audio";
         if (text.Contains("bluetooth")) return "bluetooth";
         if (Regex.IsMatch(text, @"\b(hardware|drivers?|controladores?|placa de video|gpu|dispositivo desconhecido|gerenciador de dispositivos)\b")) return "hardware";

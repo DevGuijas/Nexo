@@ -19,6 +19,9 @@ public sealed class MonitoringEngine : IDisposable
     private Task? loop;
     public event Action<HealthSnapshot, IReadOnlyList<HealthFinding>>? Updated;
     public string? LastError { get; private set; }
+    // Gravação do patamar de memória (#71); trocada nos testes para simular falha do banco.
+    internal Action<OperationalStore, HealthSnapshot, HealthThresholds> PlateauRecorder { get; init; } = HealthOccurrences.RecordPlateaus;
+    internal const string PlateauFailure = "Falha ao gravar o patamar de memória dos processos; a leitura e os alertas continuam, e as ocorrências de memória seguem como persistentes até a próxima gravação.";
 
     public MonitoringEngine(IHealthSampler sampler, OperationalStore store, TimeSpan interval, HealthThresholds? thresholds = null)
     {
@@ -34,8 +37,8 @@ public sealed class MonitoringEngine : IDisposable
             token.ThrowIfCancellationRequested();
             var snapshot = await sampler.Sample(token);
             store.SaveSnapshot(snapshot);
-            var window = TimeSpan.FromSeconds(Math.Max(600, interval.TotalSeconds * Math.Max(5, thresholds.ProcessMemorySamples + 1)));
-            var history = store.RecentSnapshots(snapshot.Time - window, 20).OrderBy(s => s.Time).ToArray();
+            var (window, limit) = HistoryWindow(interval, thresholds);
+            var history = store.RecentSnapshots(snapshot.Time - window, limit).OrderBy(s => s.Time).ToArray();
             var current = HealthRules.Evaluate(history, thresholds);
             var keys = current.Select(f => f.Id).ToHashSet();
             active.IntersectWith(keys);
@@ -48,10 +51,26 @@ public sealed class MonitoringEngine : IDisposable
             // A memória de um processo oscila: uma janela abaixo do limiar não encerra a ocorrência.
             foreach (var expired in processAlerts.Where(alert => snapshot.Time - alert.Value >= thresholds.ProcessMemoryAlertCooldown).Select(alert => alert.Key).ToArray()) processAlerts.Remove(expired);
             foreach (var key in keys.Where(key => key.StartsWith("process-memory-", StringComparison.Ordinal))) processAlerts[key] = snapshot.Time;
-            LastError = null;
+            // Referência do 1º patamar de memória de cada processo apontado, gravada na ocorrência (#71). Uma falha aqui não
+            // interrompe a leitura: fica no aviso do monitor, com texto fixo, e a gravação é tentada de novo na próxima leitura.
+            string? plateauError = null;
+            try { PlateauRecorder(store, snapshot, thresholds); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { plateauError = PlateauFailure; }
+            LastError = plateauError;
             Updated?.Invoke(snapshot, fresh);
         }
         finally { gate.Release(); }
+    }
+
+    /// <summary>
+    /// Histórico consultado a cada leitura. Além das regras de memória, precisa alcançar uma leitura feita
+    /// ServiceStableRunning antes da 1ª leitura de um serviço parado, quando ele completa as leituras do alerta (#57).
+    /// </summary>
+    internal static (TimeSpan Window, int Limit) HistoryWindow(TimeSpan interval, HealthThresholds thresholds)
+    {
+        var seconds = Math.Max(Math.Max(600, interval.TotalSeconds * Math.Max(5, thresholds.ProcessMemorySamples + 1)),
+            thresholds.ServiceStableRunning.TotalSeconds + interval.TotalSeconds * (thresholds.OtherSamples + 2));
+        return (TimeSpan.FromSeconds(seconds), Math.Clamp((int)Math.Ceiling(seconds / interval.TotalSeconds) + 2, 20, 1000));
     }
 
     public void Start()
