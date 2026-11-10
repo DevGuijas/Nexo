@@ -54,9 +54,15 @@ public static class NetworkRecovery
     public const string NotStartedMessage = "O executor de rede não foi iniciado ({0}). Nenhuma alteração de rede foi feita.";
 
     /// <summary>Limite da linha de comando do Windows (CreateProcess), que inclui o caminho do powershell.exe.</summary>
-    public const int CommandLineLimit = 32767;
+    public const int CommandLineLimit = WindowsTools.CommandLineLimit;
 
-    public static IElevatedProcess StartElevated(string script) => new ElevatedProcess(WindowsTools.StartElevated(Compact(script)));
+    public static IElevatedProcess StartElevated(string script) => new ElevatedProcess(WindowsTools.StartElevated(ElevatedArguments(script)));
+
+    /// <summary>Argumentos que o executor de rede usa na elevação: sempre o carregador compactado.</summary>
+    public static string[] ElevatedArguments(string script) => WindowsTools.ElevatedArguments(Compact(script));
+
+    /// <summary>Tamanho da linha de comando elevada do executor de rede, como o Windows a recebe.</summary>
+    public static int CommandLength(string script) => WindowsTools.CommandLength(ElevatedArguments(script));
 
     /// <summary>
     /// O executor de rede inteiro em -EncodedCommand (UTF-16 em Base64) passa do limite de 32 767 caracteres da linha de
@@ -68,11 +74,14 @@ public static class NetworkRecovery
         using var buffer = new MemoryStream();
         using (var gzip = new GZipStream(buffer, CompressionLevel.SmallestSize, true)) gzip.Write(Encoding.UTF8.GetBytes(script));
         return "$nexoScript=(New-Object System.IO.StreamReader((New-Object System.IO.Compression.GZipStream((New-Object System.IO.MemoryStream(,[Convert]::FromBase64String('"
-            + Convert.ToBase64String(buffer.ToArray()) + "'))),[System.IO.Compression.CompressionMode]::Decompress)),[System.Text.Encoding]::UTF8)).ReadToEnd(); . ([scriptblock]::Create($nexoScript))";
+            + Convert.ToBase64String(buffer.ToArray()) + "'))),[System.IO.Compression.CompressionMode]::Decompress)),[System.Text.Encoding]::UTF8)).ReadToEnd(); " + LoaderRun;
     }
 
-    /// <summary>Tamanho do argumento -EncodedCommand que o Windows recebe para o script.</summary>
-    public static int EncodedLength(string script) => Convert.ToBase64String(Encoding.Unicode.GetBytes(script)).Length;
+    /// <summary>Tamanho da linha de comando se o script fosse sem compactar.</summary>
+    public static int UncompactedLength(string script) => WindowsTools.CommandLength(WindowsTools.ElevatedArguments(script));
+
+    /// <summary>Final do carregador, trocado no teste de ida e volta para conferir o script sem executá-lo.</summary>
+    public const string LoaderRun = ". ([scriptblock]::Create($nexoScript))";
 
     public static void WriteRecord(string directory, NetworkTransactionRecord record) => WriteJson(Path.Combine(directory, RecordFile), record);
 
@@ -103,7 +112,8 @@ public static class NetworkRecovery
         var protectedDirectory = Path.Combine(trust.ProtectedRoot, id);
         // O resultado da restauração elevada fica na pasta protegida (#10); se o aplicativo fechou antes de copiá-lo, a
         // cópia é feita aqui, sem elevação, e a transação não é oferecida de novo.
-        if (!File.Exists(Path.Combine(directory, ResultFile)) && File.Exists(Path.Combine(protectedDirectory, ResultFile)))
+        // Só de pasta protegida confiável: um resultado plantado numa pasta qualquer não encerra a transação.
+        if (!File.Exists(Path.Combine(directory, ResultFile)) && File.Exists(Path.Combine(protectedDirectory, ResultFile)) && trust.Trusted(protectedDirectory))
         {
             try { WriteTextAtomic(Path.Combine(directory, ResultFile), File.ReadAllText(Path.Combine(protectedDirectory, ResultFile))).GetAwaiter().GetResult(); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }

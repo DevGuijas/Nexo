@@ -1050,7 +1050,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             }
             Process process;
             // O processo elevado não iniciou (UAC cancelado, Windows recusou): o script não rodou e nada foi alterado (#73).
-            try { process = ElevatedStarter(wrapped); }
+            try { EnsureElevatedFits(wrapped); process = ElevatedStarter(wrapped); }
             catch (Exception ex) when (ex is not OperationCanceledException) { ex.Data[TurnFacts.NotStartedKey] = true; throw; }
             using var elevated = process;
             started = true;
@@ -1072,10 +1072,31 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             catch (UnauthorizedAccessException) { }
         }
     }
-    internal static Process StartElevated(string script)
+    internal static Process StartElevated(string script) => StartElevated(ElevatedArguments(script));
+
+    /// <summary>Limite da linha de comando do Windows (CreateProcess), contando o caminho do powershell.exe.</summary>
+    internal const int CommandLineLimit = 32767;
+    internal static string ElevatedShell => Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
+
+    /// <summary>Argumentos do powershell.exe elevado: o script vai inteiro, em UTF-16 e Base64, em -EncodedCommand.</summary>
+    internal static string[] ElevatedArguments(string script) => ["-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(script))];
+
+    /// <summary>Tamanho da linha de comando que o Windows recebe: caminho entre aspas e argumentos separados por espaço.</summary>
+    internal static int CommandLength(IReadOnlyList<string> arguments) => ElevatedShell.Length + 2 + arguments.Sum(argument => argument.Length + 1);
+
+    // Um script maior que a linha de comando do Windows não chega a iniciar: falha clara, antes do UAC, sem alterar nada.
+    internal static void EnsureElevatedFits(string script) => EnsureFits(ElevatedArguments(script));
+    private static void EnsureFits(IReadOnlyList<string> arguments)
     {
-        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe")) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
-        foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(script)) }) start.ArgumentList.Add(argument);
+        var length = CommandLength(arguments);
+        if (length > CommandLineLimit) throw new InvalidOperationException($"O comando elevado tem {length} caracteres e passa do limite de {CommandLineLimit} da linha de comando do Windows. A operação não foi iniciada e nada foi alterado.");
+    }
+
+    internal static Process StartElevated(IReadOnlyList<string> arguments)
+    {
+        EnsureFits(arguments);
+        var start = new ProcessStartInfo(ElevatedShell) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
         return Process.Start(start) ?? throw new IOException("O Windows não iniciou a operação elevada.");
     }
 }

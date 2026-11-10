@@ -43,11 +43,14 @@ internal static class NetworkRecoveryChecks
                 && !applying.RecoveryScript.Contains("$recoveryBeforeJson") && Decoded(applying.RecoveryScript).All(s => !s.Contains("10.0.0.10") && !s.Contains("10.0.0.2\"")),
                 "Rede: restauração não recebe o estado anterior do aplicativo; o processo elevado lê a cópia protegida pelo id da operação");
             check(applying.ForwardScript.Contains("$operationId='" + id + "'"), "Rede: executor recebe o id da operação para gravar a cópia protegida");
-            // O executor inteiro em -EncodedCommand passa do limite da linha de comando do Windows; compactado, cabe com folga.
-            var commandRoom = NetworkRecovery.CommandLineLimit - Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe").Length - 200;
-            check(NetworkRecovery.EncodedLength(applying.ForwardScript) > NetworkRecovery.CommandLineLimit
-                && NetworkRecovery.EncodedLength(NetworkRecovery.Compact(applying.ForwardScript)) < commandRoom && NetworkRecovery.EncodedLength(NetworkRecovery.Compact(applying.RecoveryScript)) < commandRoom,
-                "Rede: executor compactado cabe na linha de comando do Windows (" + NetworkRecovery.EncodedLength(NetworkRecovery.Compact(applying.ForwardScript)) + " de " + commandRoom + " caracteres)");
+            // O executor inteiro em -EncodedCommand passa do limite da linha de comando do Windows; os argumentos que a
+            // produção usa (NetworkRecovery.ElevatedArguments) levam o carregador compactado, com folga.
+            var forwardLength = NetworkRecovery.CommandLength(applying.ForwardScript);
+            var recoveryLength = NetworkRecovery.CommandLength(applying.RecoveryScript);
+            check(NetworkRecovery.UncompactedLength(applying.ForwardScript) > NetworkRecovery.CommandLineLimit && forwardLength < NetworkRecovery.CommandLineLimit && recoveryLength < NetworkRecovery.CommandLineLimit
+                && NetworkRecovery.ElevatedArguments(applying.ForwardScript)[^1] == WindowsTools.ElevatedArguments(NetworkRecovery.Compact(applying.ForwardScript))[^1],
+                "Rede: comando elevado real de aplicação (" + forwardLength + ") e de restauração (" + recoveryLength + ") cabe no limite de " + NetworkRecovery.CommandLineLimit + " caracteres");
+            await RoundTrip(check, root, [("aplicação", applying.ForwardScript), ("restauração", applying.RecoveryScript)]);
             await CompactRuns(check, root);
 
             prompts.Clear();
@@ -160,6 +163,21 @@ internal static class NetworkRecoveryChecks
             var oddItem = NetworkRecovery.Inspect(odd, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
             check(NetworkRecovery.Describe(oddItem).Contains("#7 Eth_ernet _x_ _b_:"), "Rede: nome do adaptador na janela de restauração passa pelo filtro de caracteres");
 
+            // Resultado plantado numa pasta protegida não confiável não é copiado nem encerra a transação.
+            var planted = Transaction(startup, protectedRoot, 1);
+            File.WriteAllText(Path.Combine(protectedRoot, Path.GetFileName(planted), NetworkRecovery.ResultFile), "{\"success\":true,\"restored\":true,\"message\":\"PLANTADO\"}");
+            untrusted.Add(Path.GetFileName(planted));
+            var plantedItem = NetworkRecovery.Inspect(planted, DateTimeOffset.UtcNow, _ => false, trust: trust);
+            check(plantedItem?.Resolution != null && !File.ReadAllText(Path.Combine(planted, NetworkRecovery.ResultFile)).Contains("PLANTADO"),
+                "Rede: resultado plantado em pasta protegida não confiável não é copiado");
+
+            // Caminho elevado genérico: o maior script real (NVIDIA) cabe, e um comando maior que o limite falha antes do UAC.
+            var nvidia = WindowsTools.CommandLength(WindowsTools.ElevatedArguments(WindowsTools.ElevatedWrapper(NvidiaAudioScriptChecks.Script(), @"C:\Users\x\AppData\Local\NexoSupport\pending\00000000000000000000000000000000\result.json")));
+            var oversized = "";
+            try { WindowsTools.EnsureElevatedFits(new string('x', 20000)); } catch (InvalidOperationException ex) { oversized = ex.Message; }
+            check(nvidia < NetworkRecovery.CommandLineLimit && oversized.Contains("não foi iniciada") && oversized.Contains("32767"),
+                "Elevação: o maior script real (NVIDIA, " + nvidia + " caracteres) cabe, e um comando acima do limite falha com mensagem clara");
+
             // A fase da janela vem do registro protegido, não de applied.json/decision.txt em %LOCALAPPDATA%.
             var phased = Transaction(startup, protectedRoot, 1, secureRecord: new NetworkTransactionRecord("set_ipv4", 7, Guid, DateTimeOffset.UtcNow, Phase: "applying"));
             File.WriteAllText(Path.Combine(phased, "applied.json"), "{}");
@@ -196,6 +214,31 @@ internal static class NetworkRecoveryChecks
         finally
         {
             try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    // Ida e volta no Windows PowerShell 5.1 (#10): o carregador real descompacta os scripts reais com o mesmo SHA-256 e
+    // eles passam pelo parser sem erros, sem executar. No GitHub Actions, pular é falha.
+    private static async Task RoundTrip(Action<bool, string> check, string root, (string Label, string Script)[] scripts)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true") check(false, "Rede: ida e volta do carregador no Windows PowerShell 5.1 precisa de Windows no CI");
+            return;
+        }
+        foreach (var (label, script) in scripts)
+        {
+            var loader = NetworkRecovery.Compact(script);
+            var inspect = loader[..^NetworkRecovery.LoaderRun.Length]
+                + "$hash=[BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($nexoScript))).Replace('-',''); $errors=$null; "
+                + "[void][System.Management.Automation.Language.Parser]::ParseInput($nexoScript,[ref]$null,[ref]$errors); Write-Output ($hash + ' ' + @($errors).Count + ' ' + $PSVersionTable.PSVersion.Major)";
+            using var process = Process.Start(new ProcessStartInfo(WindowsTools.ElevatedShell, string.Join(' ', WindowsTools.ElevatedArguments(inspect))) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true })!;
+            var output = (await process.StandardOutput.ReadToEndAsync()).Trim();
+            var error = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            var expected = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(script))) + " 0 5";
+            check(loader.EndsWith(NetworkRecovery.LoaderRun, StringComparison.Ordinal) && output == expected,
+                "Rede: carregador do script de " + label + " no Windows PowerShell 5.1 devolve o mesmo SHA-256 e passa pelo parser sem erros (" + (output.Length > 0 ? output : error.Trim()) + ")");
         }
     }
 
