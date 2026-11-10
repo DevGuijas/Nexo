@@ -44,6 +44,7 @@ public static class NetworkChange
     public static async Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token, Func<string, IElevatedProcess> start, NetworkDeadlines? deadlines = null, NetworkRecoveryTrust? trust = null)
     {
         deadlines ??= NetworkDeadlines.Default;
+        trust ??= NetworkRecoveryTrust.Default;
         token.ThrowIfCancellationRequested();
         var id = Guid.NewGuid().ToString("N");
         var dir = Path.Combine(store.Root, "operations", id); Directory.CreateDirectory(dir);
@@ -65,8 +66,9 @@ public static class NetworkChange
         }
         using var started = process;
         NetworkRecovery.WriteRecord(dir, record with { ProcessId = process.Id });
-        var ready = Path.Combine(dir, "applied.json"); var final = Path.Combine(dir, "result.json"); var decision = Path.Combine(dir, "decision.txt");
-        var backup = Path.Combine(dir, "before.json");
+        var secured = Path.Combine(trust.ProtectedRoot, id);
+        var ready = Path.Combine(secured, "applied.json"); var final = Path.Combine(secured, "result.json"); var decision = Path.Combine(dir, "decision.txt");
+        var backup = Path.Combine(secured, "before.json");
         var clock = Stopwatch.StartNew();
         var deadline = deadlines.Applying;
         var cancelled = false;
@@ -78,7 +80,7 @@ public static class NetworkChange
                 if (!File.Exists(decision)) await File.WriteAllTextAsync(decision, "rollback", CancellationToken.None);
                 if (!File.Exists(ready)) deadline = deadlines.Applying + deadlines.Finishing;
             }
-            if (File.Exists(ready) && !File.Exists(decision))
+            if (File.Exists(ready) && !File.Exists(decision) && trust.TrustsFile(secured, "applied.json"))
             {
                 progress.Report("Configuração aplicada temporariamente. Conferindo o estado e aguardando sua confirmação…");
                 var state = await File.ReadAllTextAsync(ready, CancellationToken.None);
@@ -102,9 +104,9 @@ public static class NetworkChange
             if (clock.Elapsed >= deadline && !process.HasExited && !File.Exists(final)) return await Unconfirmed(dir, backup, decision, ready, cancelled || token.IsCancellationRequested, clock.Elapsed);
             await Task.Delay(250, CancellationToken.None);
         }
-        if (File.Exists(final)) return await File.ReadAllTextAsync(final, CancellationToken.None);
+        if (File.Exists(final)) return await ReadResult(dir, secured, trust);
         await process.WaitForExitAsync(CancellationToken.None);
-        if (File.Exists(final)) return await File.ReadAllTextAsync(final, CancellationToken.None);
+        if (File.Exists(final)) return await ReadResult(dir, secured, trust);
         var interrupted = NetworkRecovery.Inspect(dir, DateTimeOffset.UtcNow, _ => false, exited: true, trust: trust);
         if (interrupted == null) return JsonSerializer.Serialize(new { success = false, reverted = false, error = "Executor encerrado sem resultado. Verifique a rede; estado não confirmado.", backup, recoveryFolder = dir });
         if (interrupted.Resolution == null) progress.Report("O executor de rede terminou sem resultado. Oferecendo a restauração da configuração anterior…");
@@ -112,6 +114,16 @@ public static class NetworkChange
         using var recoveryResult = JsonDocument.Parse(recovery);
         var unchanged = recoveryResult.RootElement.TryGetProperty("unchanged", out var flag) && flag.ValueKind == JsonValueKind.True;
         return JsonSerializer.Serialize(new { success = false, changed = !unchanged, reverted = NetworkRecovery.Restored(recovery), error = "Executor encerrado sem resultado. " + NetworkRecovery.Explain(recovery), backup, recoveryFolder = dir, recovery = recoveryResult.RootElement.Clone() });
+    }
+
+    private static async Task<string> ReadResult(string dir, string secured, NetworkRecoveryTrust trust)
+    {
+        if (!trust.TrustsFile(secured, "result.json"))
+            return JsonSerializer.Serialize(new { success = false, reverted = false, state = "unknown", error = "O resultado do executor de rede está numa pasta com dono ou permissões inesperados e foi ignorado. O estado da rede não pôde ser confirmado; consulte a rede antes de outra alteração.", recoveryFolder = dir });
+        var text = await File.ReadAllTextAsync(Path.Combine(secured, "result.json"), CancellationToken.None);
+        try { await NetworkRecovery.WriteTextAtomic(Path.Combine(dir, "result.json"), text); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        return text;
     }
 
     private static async Task<string> Unconfirmed(string dir, string backup, string decision, string ready, bool cancelled, TimeSpan elapsed)

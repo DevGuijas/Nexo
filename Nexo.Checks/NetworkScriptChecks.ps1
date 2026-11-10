@@ -99,13 +99,24 @@ foreach($case in $cases){
 Write-Output 'PASS: executor ACE decision refuses write rights for non-admin SIDs on files and folders, with SID and rights in the reason'
 foreach($forbidden in '$env:ProgramData','Set-Acl'){ if($source.Contains($forbidden)){throw ('NetworkTransaction.ps1 must not use '+$forbidden)} }
 Write-Output 'PASS: executor uses the Windows API for the protected root and never calls Set-Acl'
-# Protected files are born with the explicit descriptor: only Save-Result (the %LOCALAPPDATA% folder) uses Set-Content.
 $parsed=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)
 function FunctionText($name) { $parsed.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true).Extent.Text }
-$saveProtected=FunctionText 'Save-Protected'; $writeProtected=FunctionText 'Write-ProtectedFile'; $saveResult=FunctionText 'Save-Result'
-$setContent=[regex]::Matches($source,'Set-Content|Out-File|WriteAllText|WriteAllBytes').Count
-if(-not $saveProtected.Contains('Write-ProtectedFile') -or $saveProtected -match 'Set-Content|Out-File|WriteAll' -or -not $writeProtected.Contains('FileSecurity') -or -not $writeProtected.Contains('FileStream($temporary, [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)') -or -not $writeProtected.Contains('Create((New-Object System.IO.FileInfo($temporary)), [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)') -or $writeProtected -match 'Set-Content|Out-File|WriteAll' -or $setContent -ne [regex]::Matches($saveResult,'Set-Content').Count){throw 'Protected files must be created only by Write-ProtectedFile with an explicit FileSecurity'}
+$saveProtected=FunctionText 'Save-Protected'; $writeProtected=FunctionText 'Write-ProtectedFile'
+$plainWrites=[regex]::Matches($source,'Set-Content|Out-File|WriteAllText|WriteAllBytes|Add-Content').Count
+if(-not $saveProtected.Contains('Write-ProtectedFile') -or $saveProtected -match 'Set-Content|Out-File|WriteAll' -or -not $writeProtected.Contains('FileSecurity') -or -not $writeProtected.Contains('FileStream($temporary, [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)') -or -not $writeProtected.Contains('Create((New-Object System.IO.FileInfo($temporary)), [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)') -or $writeProtected -match 'Set-Content|Out-File|WriteAll' -or $plainWrites -ne 0){throw 'Protected files must be created only by Write-ProtectedFile with an explicit FileSecurity'}
 Write-Output 'PASS: protected files are created with an explicit descriptor, never with Set-Content'
+if(FunctionText 'Save-Result'){throw 'The elevated executor must not have a function that writes to the user folder'}
+Write-Output 'PASS: elevated executor has no plain file write and no function that writes to the user folder'
+$removalRoot=Join-Path $testRoot 'removal'
+. ([scriptblock]::Create((FunctionText 'Remove-ProtectedFolder')))
+$known=Join-Path $removalRoot 'known'; New-Item -ItemType Directory -Path $known -Force | Out-Null
+foreach($file in 'before.json','transaction.json','applied.json','result.json','recovery-result.json','before.json.tmp','transaction.json.tmp','applied.json.tmp','result.json.tmp','recovery-result.json.tmp'){ Set-Content -LiteralPath (Join-Path $known $file) -Value '{}' }
+Remove-ProtectedFolder $known
+$unknown=Join-Path $removalRoot 'unknown'; New-Item -ItemType Directory -Path $unknown -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $unknown 'result.json') -Value '{}'; Set-Content -LiteralPath (Join-Path $unknown 'outro.txt') -Value 'x'
+$refused=$false; try { Remove-ProtectedFolder $unknown } catch { $refused=$true }
+if((Test-Path -LiteralPath $known) -or -not $refused -or -not (Test-Path -LiteralPath (Join-Path $unknown 'outro.txt'))){throw 'Protected folder removal must empty the known files, including applied.json and result.json, and never delete an unknown file'}
+Write-Output 'PASS: stale protected folder removal knows applied.json and result.json and keeps unknown files'
 # Each scenario gets its own simulated %ProgramData%.
 function UseProgramData($name) { $script:programData=Join-Path $testRoot ('pd-'+$name); $script:protectedTestRoot=Join-Path $script:programData 'NexoSupport\operations'; $script:created=@(); $script:untrustedPaths=@(); $script:aclWrites=0; $script:phases=@(); $script:protectedWrites=@(); $script:fakeAcl=@{} }
 function Isolated($text) {
@@ -122,10 +133,13 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
     $script:adapterName=$(if($variant -eq 'default-switch'){'vEthernet (Default Switch)'}else{'Adapter-Test'})
     $script:adapterDescription=$(if($variant -in 'hyperv','default-switch'){'Hyper-V Virtual Ethernet Adapter #2'}elseif($variant -eq 'vpn'){'VPN Adapter'}else{'Realtek Ethernet'})
     $operationId=$(if($variant -eq 'bad-id'){'NAO-E-GUID'}else{[guid]::NewGuid().ToString('N')})
-    $operationDir=Join-Path $testRoot $(if($variant -eq 'bad-id'){'NAO-E-GUID'}else{$operationId}); New-Item -ItemType Directory -Path $operationDir | Out-Null
+    $operationDir=Join-Path $testRoot $(if($variant -eq 'bad-id'){'NAO-E-GUID'}else{$operationId})
+    $linkTarget=Join-Path $testRoot ('link-target-'+$name); $sensitive=Join-Path $testRoot ('sensitive-'+$name+'.txt')
+    if($variant -eq 'user-junction'){New-Item -ItemType Directory -Path $linkTarget | Out-Null; New-Item -ItemType Junction -Path $operationDir -Target $linkTarget | Out-Null}
+    else{New-Item -ItemType Directory -Path $operationDir | Out-Null}
+    if($variant -eq 'user-hardlinks'){Set-Content -LiteralPath $sensitive -Value 'ORIGINAL'; foreach($file in 'before.json','applied.json','result.json'){New-Item -ItemType HardLink -Path (Join-Path $operationDir $file) -Value $sensitive | Out-Null}}
     UseProgramData $name
     $script:currentProtected=Join-Path $script:protectedTestRoot $operationId; $script:untrusted=$false
-    # A write interrupted before the rename leaves a .tmp: the closed removal list still empties the folder.
     $script:leaveTmp=$variant -eq 'leftover-tmp'
     $nexoRoot=Split-Path -Parent $script:protectedTestRoot
     # A folder that already exists is used only if it is already protected; it is never repaired or adopted.
@@ -137,16 +151,23 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
     $testSource=(Isolated $source).Replace('"$env:WINDIR\System32\netsh.exe"','Invoke-TestNetsh').Replace('.AddSeconds(60)', '.AddMilliseconds(500)').Replace('Start-Sleep -Milliseconds 500','Start-Sleep -Milliseconds 10').Replace('Start-Sleep -Seconds 3','Start-Sleep -Milliseconds 1')
     if($testSource.Contains('netsh.exe')){throw 'Native command was not isolated by the simulator'}
     & ([scriptblock]::Create($testSource))
-    $result=Get-Content -LiteralPath (Join-Path $operationDir 'result.json') -Raw | ConvertFrom-Json
+    $protectedResult=Join-Path $script:currentProtected 'result.json'
+    $result=$(if(Test-Path -LiteralPath $protectedResult){Get-Content -LiteralPath $protectedResult -Raw | ConvertFrom-Json}else{$null})
+    $planted=$(if($variant -eq 'user-hardlinks'){@('before.json','applied.json','result.json')}else{@()})
+    $userWrites=@(Get-ChildItem -LiteralPath $operationDir -Force | Where-Object {$_.Name -ne 'decision.txt' -and $_.Name -notin $planted} | ForEach-Object {$_.Name})
+    if($userWrites.Count){throw ($name+': elevated executor wrote to the user folder: '+($userWrites -join ', '))}
+    if($variant -eq 'user-junction' -and @(Get-ChildItem -LiteralPath $linkTarget -Force | Where-Object {$_.Name -ne 'decision.txt'}).Count){throw ($name+': elevated executor wrote through the junction in the user folder')}
+    if($variant -eq 'user-hardlinks' -and (Microsoft.PowerShell.Management\Get-Content -LiteralPath $sensitive -Raw).Trim() -ne 'ORIGINAL'){throw ($name+': elevated executor wrote through a hard link in the user folder')}
     if($script:aclWrites -ne 0){throw ($name+': the executor rewrote an ACL')}
     # Confirmation, cancellation and failure with restore: the protected phase follows each step.
     $expectedPhases=@{'dns-keep'='applying,confirming';'static-keep'='applying,confirming';'dns-rollback'='applying,confirming,restoring';'static-rollback'='applying,confirming,restoring';'dns-error-rollback'='applying,restoring'}
     if($expectedPhases.ContainsKey($name) -and (@($script:phases) -join ',') -ne $expectedPhases[$name]){throw ($name+': protected phases were '+(@($script:phases) -join ','))}
     if($variant -in 'default-switch','vpn','identity-changed','protected-exists','bad-id','existing-untrusted-root') {
         if($result.success -or (Test-Path (Join-Path $operationDir 'before.json')) -or $script:state.Addresses[0].IPAddress -ne '10.0.0.10' -or $script:state.Dns[0] -ne '10.0.0.2'){throw ($name+': disallowed target was changed')}
-        if($variant -eq 'protected-exists' -and ((Get-Content -LiteralPath (Join-Path $script:currentProtected 'before.json') -Raw) -notmatch 'forjado' -or $result.error -notmatch 'not used')){throw ($name+': untrusted pre-existing protected folder was used or removed')}
-        if($variant -eq 'existing-untrusted-root' -and ($result.error -notmatch 'not used' -or $script:created.Count -ne 0 -or (Test-Path -LiteralPath $script:protectedTestRoot))){throw ($name+': untrusted pre-existing NexoSupport folder was adopted')}
-        if($variant -eq 'bad-id' -and $result.error -notmatch 'Identificador'){throw ($name+': invalid operation id was accepted')}
+        if($variant -eq 'protected-exists' -and ((Get-Content -LiteralPath (Join-Path $script:currentProtected 'before.json') -Raw) -notmatch 'forjado' -or $null -ne $result)){throw ($name+': untrusted pre-existing protected folder was used or removed')}
+        if($variant -eq 'existing-untrusted-root' -and ($null -ne $result -or $script:created.Count -ne 0 -or (Test-Path -LiteralPath $script:protectedTestRoot))){throw ($name+': untrusted pre-existing NexoSupport folder was adopted')}
+        if($variant -eq 'bad-id' -and ($null -ne $result -or $script:created.Count -ne 0)){throw ($name+': invalid operation id was accepted')}
+        if($variant -in 'default-switch','vpn','identity-changed' -and (-not $result -or -not $result.error -or $result.changed)){throw ($name+': refusal was not recorded in the protected folder')}
     } elseif($decision -eq 'keep' -and -not $failure -and -not $script:noLease -and -not $script:nativeError -and -not $script:modeUnchanged) {
         if(-not $result.success){throw ($name+': '+($result | ConvertTo-Json -Depth 5))}
         if($action -eq 'set_dns' -and $script:state.Dns[0] -ne '1.1.1.1'){throw 'DNS was not applied'}
@@ -157,11 +178,12 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
         if($script:state.Dns[0] -ne '10.0.0.2' -or $script:state.Addresses[0].IPAddress -ne '10.0.0.10'){throw ($name+': prior state not restored')}
     }
     if($variant -notin 'default-switch','vpn','identity-changed','protected-exists','bad-id','existing-untrusted-root') {
-        if(Test-Path -LiteralPath $script:currentProtected){throw ($name+': protected copy was left behind after the result')}
+        if(-not (Test-Path -LiteralPath $protectedResult) -or @($script:protectedWrites) -notcontains 'result.json'){throw ($name+': result was not written to the protected folder by Write-ProtectedFile')}
         $expected=$(if($variant -eq 'existing-trusted-root'){@($script:currentProtected)}else{@($nexoRoot,$script:protectedTestRoot,$script:currentProtected)})
         if((@($script:created) -join '|') -ne ($expected -join '|')){throw ($name+': protected folders created: '+(@($script:created) -join ', '))}
         if(@($script:protectedWrites) -notcontains 'transaction.json' -or @($script:protectedWrites) -notcontains 'before.json'){throw ($name+': protected files not written by Write-ProtectedFile: '+(@($script:protectedWrites) -join ', '))}
     }
+    if($variant -eq 'user-junction'){[IO.Directory]::Delete($operationDir)}
     Write-Output ('PASS: simulated network transaction '+$name)
     if($variant -eq 'error-84' -and -not $script:transitionCalled){throw 'Static-to-DHCP transition was not requested'}
     if($variant -in 'native-error','mode-unchanged','no-lease' -and -not $result.failureState){throw 'Pre-rollback evidence was lost'}
@@ -247,6 +269,8 @@ try {
     Check 'existing-trusted-operations-folder' 'set_dns' 'manual' 'keep' $false 'existing-trusted-root'
     Check 'leftover-temporary-files' 'set_dns' 'manual' 'keep' $false 'leftover-tmp'
     Check 'invalid-operation-id' 'set_dns' 'manual' 'keep' $false 'bad-id'
+    Check 'user-folder-junction' 'set_dns' 'manual' 'keep' $false 'user-junction'
+    Check 'user-folder-hard-links' 'set_dns' 'manual' 'keep' $false 'user-hardlinks'
     # Real ACL of the protected folder: Windows as administrator only. In GitHub Actions a skip is a failure.
     $onWindows=$PSVersionTable.PSEdition -eq 'Desktop' -or $IsWindows
     if($onWindows -and ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
