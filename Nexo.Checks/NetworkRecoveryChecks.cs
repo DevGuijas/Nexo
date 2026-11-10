@@ -1,5 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using Nexo.Support;
@@ -34,11 +36,19 @@ internal static class NetworkRecoveryChecks
             var applying = await Apply(store, trust, async (dir, _) => await Backup(dir, protectedRoot, Before), prompts, true);
             check(prompts.SequenceEqual(["Restaurar configuração de rede anterior?"]) && applying.RecoveryStarts == 1 && Flag(applying.Result, "reverted") && Bool(applying.Result, "changed") == true,
                 "Rede: executor encerrado após o backup oferece restauração e confirma o resultado");
+            check(File.Exists(Path.Combine(applying.Directory, NetworkRecovery.ResultFile)) && File.ReadAllText(Path.Combine(applying.Directory, NetworkRecovery.ResultFile)).Contains("restaurada e conferida"),
+                "Rede: o aplicativo copia sem elevação o resultado que o processo elevado gravou na pasta protegida");
             var id = Path.GetFileName(applying.Directory);
             check(applying.RecoveryScript.Contains("$recoveryMode=$true") && applying.RecoveryScript.Contains("$operationId='" + id + "'")
                 && !applying.RecoveryScript.Contains("$recoveryBeforeJson") && Decoded(applying.RecoveryScript).All(s => !s.Contains("10.0.0.10") && !s.Contains("10.0.0.2\"")),
                 "Rede: restauração não recebe o estado anterior do aplicativo; o processo elevado lê a cópia protegida pelo id da operação");
             check(applying.ForwardScript.Contains("$operationId='" + id + "'"), "Rede: executor recebe o id da operação para gravar a cópia protegida");
+            // O executor inteiro em -EncodedCommand passa do limite da linha de comando do Windows; compactado, cabe com folga.
+            var commandRoom = NetworkRecovery.CommandLineLimit - Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe").Length - 200;
+            check(NetworkRecovery.EncodedLength(applying.ForwardScript) > NetworkRecovery.CommandLineLimit
+                && NetworkRecovery.EncodedLength(NetworkRecovery.Compact(applying.ForwardScript)) < commandRoom && NetworkRecovery.EncodedLength(NetworkRecovery.Compact(applying.RecoveryScript)) < commandRoom,
+                "Rede: executor compactado cabe na linha de comando do Windows (" + NetworkRecovery.EncodedLength(NetworkRecovery.Compact(applying.ForwardScript)) + " de " + commandRoom + " caracteres)");
+            await CompactRuns(check, root);
 
             prompts.Clear();
             var restoring = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(dir, "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); }, prompts, true, keep: false);
@@ -246,6 +256,31 @@ internal static class NetworkRecoveryChecks
             var oddItem = NetworkRecovery.Inspect(odd, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
             check(NetworkRecovery.Describe(oddItem).Contains("#7 Eth_ernet _x_ _b_:"), "Rede: nome do adaptador na janela de restauração passa pelo filtro de caracteres");
 
+            // A fase da janela vem do registro protegido, não de applied.json/decision.txt em %LOCALAPPDATA%.
+            var phased = Transaction(startup, protectedRoot, 1, secureRecord: new NetworkTransactionRecord("set_ipv4", 7, Guid, DateTimeOffset.UtcNow, Phase: "applying"));
+            File.WriteAllText(Path.Combine(phased, "applied.json"), "{}");
+            File.WriteAllText(Path.Combine(phased, "decision.txt"), "rollback");
+            var phasedItem = NetworkRecovery.Inspect(phased, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
+            check(phasedItem.Phase == "applying" && NetworkRecovery.Describe(phasedItem).Contains("durante a aplicação da mudança"),
+                "Rede: a fase mostrada na restauração vem do registro protegido");
+
+            // Resultado elevado que ficou só na pasta protegida (o aplicativo fechou antes de copiá-lo): é copiado e não há nova oferta.
+            var copied = Transaction(startup, protectedRoot, 1);
+            File.WriteAllText(Path.Combine(protectedRoot, Path.GetFileName(copied), NetworkRecovery.ResultFile), "{\"success\":true,\"restored\":true,\"message\":\"Configuração anterior restaurada e conferida.\"}");
+            check(NetworkRecovery.Inspect(copied, DateTimeOffset.UtcNow, _ => false, trust: trust) == null && File.Exists(Path.Combine(copied, NetworkRecovery.ResultFile)),
+                "Rede: resultado elevado pendente na pasta protegida é copiado e encerra a transação");
+
+            // O executor tira o caminho protegido da API do Windows e nunca reescreve uma ACL.
+            using (var resource = typeof(NetworkRecovery).Assembly.GetManifestResourceStream("Nexo.NetworkTransaction.ps1")!)
+            using (var reader = new StreamReader(resource))
+            {
+                var executor = reader.ReadToEnd();
+                check(!executor.Contains("$env:ProgramData", StringComparison.OrdinalIgnoreCase) && executor.Contains("[Environment]::GetFolderPath('CommonApplicationData')")
+                    && !executor.Contains("Set-Acl", StringComparison.OrdinalIgnoreCase) && executor.Contains("[IO.Directory]::CreateDirectory($path, $security)"),
+                    "Rede: o executor usa a API do Windows para %ProgramData%, cria a pasta já protegida e não reescreve ACL");
+                RealAcl(check, executor);
+            }
+
             prompts.Clear();
             if (OperatingSystem.IsWindows())
             {
@@ -253,6 +288,65 @@ internal static class NetworkRecoveryChecks
                 check(killed.Killed && prompts.Contains("Restaurar configuração de rede anterior?") && Flag(killed.Result, "reverted"),
                     "Rede: processo PowerShell real encerrado à força após o backup leva à restauração oferecida");
             }
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        }
+    }
+
+    // O carregador compactado executa o script no mesmo escopo: variáveis do prefixo, funções e "return" no topo.
+    private static async Task CompactRuns(Action<bool, string> check, string root)
+    {
+        var shell = OperatingSystem.IsWindows() ? Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe") : Environment.GetEnvironmentVariable("NEXO_CHECKS_PWSH");
+        if (string.IsNullOrEmpty(shell)) return;
+        Directory.CreateDirectory(root);
+        var output = Path.Combine(root, "compact-ok.txt");
+        var script = "$requestJson='pedido'; $operationDir=" + "'" + output.Replace("'", "''") + "';\n"
+            + "$ErrorActionPreference = 'Stop'\nfunction Save-Result($value) { Set-Content -LiteralPath $operationDir -Value $value -Encoding UTF8 }\n"
+            + "if ($requestJson) { Save-Result ($requestJson + ' configuração ' + ('x' * 40000).Length); return }\nSave-Result 'return ignorado'\n";
+        using var process = Process.Start(new ProcessStartInfo(shell, "-NoProfile -NonInteractive -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(NetworkRecovery.Compact(script)))) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true })!;
+        var error = await process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        var text = File.Exists(output) ? File.ReadAllText(output).Trim() : "";
+        check(process.ExitCode == 0 && text == "pedido configuração 40000", "Rede: carregador compactado executa o executor com o prefixo, as funções e o return (" + (text.Length > 0 ? text : error.Trim()) + ")");
+    }
+
+    // ACL de verdade (#10): só no Windows como administrador. No GitHub Actions, pular é falha.
+    private static void RealAcl(Action<bool, string> check, string executor)
+    {
+        if (!OperatingSystem.IsWindows() || !new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
+        {
+            if (Environment.GetEnvironmentVariable("GITHUB_ACTIONS") == "true") check(false, "Rede: ACL real da pasta protegida precisa de Windows como administrador no CI");
+            return;
+        }
+        var root = Path.Combine(Path.GetTempPath(), "NexoAcl-" + System.Guid.NewGuid().ToString("N"));
+        var nexo = Path.Combine(root, "NexoSupport");
+        var operation = Path.Combine(nexo, "operations", System.Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(root);
+            // As funções reais do executor criam a cadeia de pastas e os dois arquivos.
+            var executorPath = Path.Combine(root, "executor.ps1");
+            File.WriteAllText(executorPath, executor, new UTF8Encoding(true));
+            var wrapperPath = Path.Combine(root, "acl.ps1");
+            File.WriteAllText(wrapperPath, "$source=Get-Content -LiteralPath '" + executorPath.Replace("'", "''") + "' -Raw -Encoding UTF8\n"
+                + "$ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)\n"
+                + "$definitions=@(($source -split \"`r?`n\") | Where-Object {$_ -match '^\\$trustedSids = '})\n"
+                + "foreach($function in 'New-ProtectedSecurity','New-ProtectedDirectory','Assert-Trusted','Use-ProtectedDirectory'){ $definitions+=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $function},$true).Extent.Text }\n"
+                + ". ([scriptblock]::Create($definitions -join \"`n\"))\n"
+                + "foreach($path in @('" + nexo.Replace("'", "''") + "','" + Path.Combine(nexo, "operations").Replace("'", "''") + "','" + operation.Replace("'", "''") + "')){ Use-ProtectedDirectory $path }\n"
+                + "foreach($name in 'before.json','transaction.json'){ Set-Content -LiteralPath (Join-Path '" + operation.Replace("'", "''") + "' $name) -Value '{}' }\n", new UTF8Encoding(true));
+            using var process = Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + wrapperPath + "\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true })!;
+            var error = process.StandardError.ReadToEnd();
+            process.WaitForExit(60000);
+            var created = process.ExitCode == 0 && NetworkRecovery.TrustedOnWindows(operation);
+            check(created, "Rede: pasta criada pelas funções reais do executor é aceita pela conferência de ACL do aplicativo" + (created ? "" : " (" + error.Trim() + ")"));
+            var file = new FileInfo(Path.Combine(operation, "before.json"));
+            var security = file.GetAccessControl();
+            security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), FileSystemRights.Modify, AccessControlType.Allow));
+            file.SetAccessControl(security);
+            check(!NetworkRecovery.TrustedOnWindows(operation), "Rede: arquivo protegido com Users:Modify é recusado pela conferência de ACL do aplicativo");
         }
         finally
         {
@@ -274,7 +368,8 @@ internal static class NetworkRecoveryChecks
             if (script.Contains("$recoveryMode=$true"))
             {
                 starts++; recoveryScript = script;
-                return new SimulatedProcess(async _ => { if (recoveryWrites) await Write(dir, NetworkRecovery.ResultFile, "{\"success\":true,\"restored\":true,\"message\":\"Configuração anterior restaurada e conferida.\"}"); });
+                // O processo elevado grava o resultado só na pasta protegida (#10).
+                return new SimulatedProcess(async _ => { if (recoveryWrites) await Write(Path.Combine(trust.ProtectedRoot, Path.GetFileName(dir)), NetworkRecovery.ResultFile, "{\"success\":true,\"restored\":true,\"message\":\"Configuração anterior restaurada e conferida.\"}"); });
             }
             directory = dir; forwardScript = script;
             return new SimulatedProcess(stop => executor(dir, stop));
@@ -292,7 +387,7 @@ internal static class NetworkRecoveryChecks
         Func<string, IElevatedProcess> start = script =>
         {
             var dir = OperationDir(script);
-            if (script.Contains("$recoveryMode=$true")) return new SimulatedProcess(async _ => await Write(dir, NetworkRecovery.ResultFile, "{\"success\":true,\"restored\":true}"));
+            if (script.Contains("$recoveryMode=$true")) return new SimulatedProcess(async _ => await Write(Path.Combine(protectedRoot, Path.GetFileName(dir)), NetworkRecovery.ResultFile, "{\"success\":true,\"restored\":true}"));
             directory = dir;
             var secured = Path.Combine(protectedRoot, Path.GetFileName(dir));
             Directory.CreateDirectory(secured);

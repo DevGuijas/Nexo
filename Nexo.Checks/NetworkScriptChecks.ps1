@@ -6,9 +6,11 @@ function Get-CimInstance { param($ClassName,$Filter,$ErrorAction) if($ClassName 
 function Invoke-CimMethod { throw 'Legacy renewal must not run after removing the last IP (Windows error 84)' }
 # Every simulated mutation requires the protected copy to exist first (#10): no network change before it.
 function Assert-Backed { if($script:currentProtected -and -not (Test-Path -LiteralPath (Join-Path $script:currentProtected 'before.json'))){throw 'Network changed before the protected backup was written'} }
-# Simulated protected store: the real ACL functions are renamed in the code under test.
-function Protect-Directory($path) { if(Test-Path -LiteralPath $path){ if((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint){throw 'link'} } else { New-Item -ItemType Directory -Path $path -Force | Out-Null } }
-function Assert-Trusted($path) { if(-not (Test-Path -LiteralPath $path)){throw ('Arquivo protegido ausente: '+$path)}; if($script:untrusted){throw 'Simulated untrusted protected copy. Automatic restore refused.'} }
+# Simulated protected store: the real ACL primitives are renamed in the code under test; Use-ProtectedDirectory and
+# Open-ProtectedDir keep their real logic. Set-Acl must never be called by the executor.
+function New-ProtectedDirectory($path) { if(Test-Path -LiteralPath $path){throw ('Created over an existing folder: '+$path)}; New-Item -ItemType Directory -Path $path | Out-Null; $script:created+=@($path) }
+function Assert-Trusted($path) { if(-not (Test-Path -LiteralPath $path)){throw ('Protected item missing: '+$path)}; if($script:untrusted -or $script:untrustedPaths -contains $path){throw ('Simulated untrusted protected copy at '+$path+'; it is not used.')} }
+function Set-Acl { $script:aclWrites++ }
 function Invoke-TestNetsh {
     Assert-Backed
     if (($args -join ' ') -ne 'interface ipv4 set address name=10 source=dhcp store=persistent') { throw 'Unexpected native arguments' }
@@ -47,11 +49,16 @@ $testRoot=Join-Path ([IO.Path]::GetTempPath()) ('NexoNetworkTests-'+[guid]::NewG
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Nexo.Support\NetworkTransaction.ps1') -Raw
 $scriptBlock=[scriptblock]::Create($source)
-$protectedTestRoot=Join-Path $testRoot 'programdata\NexoSupport\operations'
-$productionRoot="Join-Path `$env:ProgramData 'NexoSupport\operations'"
+$productionRoot="([Environment]::GetFolderPath('CommonApplicationData'))"
+# The protected root comes from the Windows API, never from an environment variable the caller could change, and the
+# executor never rewrites an ACL.
+foreach($forbidden in '$env:ProgramData','Set-Acl'){ if($source.Contains($forbidden)){throw ('NetworkTransaction.ps1 must not use '+$forbidden)} }
+Write-Output 'PASS: executor uses the Windows API for the protected root and never calls Set-Acl'
+# Each scenario gets its own simulated %ProgramData%.
+function UseProgramData($name) { $script:programData=Join-Path $testRoot ('pd-'+$name); $script:protectedTestRoot=Join-Path $script:programData 'NexoSupport\operations'; $script:created=@(); $script:untrustedPaths=@(); $script:aclWrites=0 }
 function Isolated($text) {
-    foreach($piece in @($productionRoot,'function Protect-Directory(','function Assert-Trusted(')){ if(-not $text.Contains($piece)){throw ('Protected-store hook not found: '+$piece)} }
-    $text.Replace($productionRoot,"'"+$protectedTestRoot.Replace("'","''")+"'").Replace('function Protect-Directory(','function Protect-Directory-Windows(').Replace('function Assert-Trusted(','function Assert-Trusted-Windows(')
+    foreach($piece in @($productionRoot,'function New-ProtectedDirectory(','function Assert-Trusted(')){ if(-not $text.Contains($piece)){throw ('Protected-store hook not found: '+$piece)} }
+    $text.Replace($productionRoot,"'"+$script:programData.Replace("'","''")+"'").Replace('function New-ProtectedDirectory(','function New-ProtectedDirectory-Windows(').Replace('function Assert-Trusted(','function Assert-Trusted-Windows(')
 }
 function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') {
     $script:state=@{Dhcp='Disabled';StaticDns='10.0.0.2';Dns=@('10.0.0.2');Addresses=@([pscustomobject]@{IPAddress='10.0.0.10';PrefixLength=24;PrefixOrigin=1;AddressState=4});Routes=@([pscustomobject]@{DestinationPrefix='0.0.0.0/0';NextHop='10.0.0.1';RouteMetric=256})}
@@ -64,17 +71,24 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
     $script:adapterDescription=$(if($variant -in 'hyperv','default-switch'){'Hyper-V Virtual Ethernet Adapter #2'}elseif($variant -eq 'vpn'){'VPN Adapter'}else{'Realtek Ethernet'})
     $operationId=$(if($variant -eq 'bad-id'){'NAO-E-GUID'}else{[guid]::NewGuid().ToString('N')})
     $operationDir=Join-Path $testRoot $(if($variant -eq 'bad-id'){'NAO-E-GUID'}else{$operationId}); New-Item -ItemType Directory -Path $operationDir | Out-Null
-    $script:currentProtected=Join-Path $protectedTestRoot $operationId; $script:untrusted=$false
-    if($variant -eq 'protected-exists'){New-Item -ItemType Directory -Path $script:currentProtected -Force | Out-Null; Set-Content -LiteralPath (Join-Path $script:currentProtected 'before.json') -Value '{"forjado":true}'}
+    UseProgramData $name
+    $script:currentProtected=Join-Path $script:protectedTestRoot $operationId; $script:untrusted=$false
+    $nexoRoot=Split-Path -Parent $script:protectedTestRoot
+    # A folder that already exists is used only if it is already protected; it is never repaired or adopted.
+    if($variant -eq 'protected-exists'){New-Item -ItemType Directory -Path $script:currentProtected -Force | Out-Null; Set-Content -LiteralPath (Join-Path $script:currentProtected 'before.json') -Value '{"forjado":true}'; $script:untrustedPaths=@($script:currentProtected)}
+    if($variant -eq 'existing-untrusted-root'){New-Item -ItemType Directory -Path $nexoRoot -Force | Out-Null; $script:untrustedPaths=@($nexoRoot)}
+    if($variant -eq 'existing-trusted-root'){New-Item -ItemType Directory -Path $script:protectedTestRoot -Force | Out-Null}
     if($decision -ne 'timeout'){Set-Content -LiteralPath (Join-Path $operationDir 'decision.txt') -Value $decision}
     $requestJson=@{Action=$action;Index=10;ExpectedGuid=$(if($variant -eq 'identity-changed'){'00000000-0000-0000-0000-000000000099'}else{'00000000-0000-0000-0000-000000000001'});Mode=$mode;Servers=@('1.1.1.1');Address='10.0.0.20';Prefix=24;Gateway='10.0.0.1'} | ConvertTo-Json
     $testSource=(Isolated $source).Replace('"$env:WINDIR\System32\netsh.exe"','Invoke-TestNetsh').Replace('.AddSeconds(60)', '.AddMilliseconds(500)').Replace('Start-Sleep -Milliseconds 500','Start-Sleep -Milliseconds 10').Replace('Start-Sleep -Seconds 3','Start-Sleep -Milliseconds 1')
     if($testSource.Contains('netsh.exe')){throw 'Native command was not isolated by the simulator'}
     & ([scriptblock]::Create($testSource))
     $result=Get-Content -LiteralPath (Join-Path $operationDir 'result.json') -Raw | ConvertFrom-Json
-    if($variant -in 'default-switch','vpn','identity-changed','protected-exists','bad-id') {
+    if($script:aclWrites -ne 0){throw ($name+': the executor rewrote an ACL')}
+    if($variant -in 'default-switch','vpn','identity-changed','protected-exists','bad-id','existing-untrusted-root') {
         if($result.success -or (Test-Path (Join-Path $operationDir 'before.json')) -or $script:state.Addresses[0].IPAddress -ne '10.0.0.10' -or $script:state.Dns[0] -ne '10.0.0.2'){throw ($name+': disallowed target was changed')}
-        if($variant -eq 'protected-exists' -and ((Get-Content -LiteralPath (Join-Path $script:currentProtected 'before.json') -Raw) -notmatch 'forjado' -or $result.error -notmatch 'existia')){throw ($name+': pre-existing protected folder was used or removed')}
+        if($variant -eq 'protected-exists' -and ((Get-Content -LiteralPath (Join-Path $script:currentProtected 'before.json') -Raw) -notmatch 'forjado' -or $result.error -notmatch 'not used')){throw ($name+': untrusted pre-existing protected folder was used or removed')}
+        if($variant -eq 'existing-untrusted-root' -and ($result.error -notmatch 'not used' -or $script:created.Count -ne 0 -or (Test-Path -LiteralPath $script:protectedTestRoot))){throw ($name+': untrusted pre-existing NexoSupport folder was adopted')}
         if($variant -eq 'bad-id' -and $result.error -notmatch 'Identificador'){throw ($name+': invalid operation id was accepted')}
     } elseif($decision -eq 'keep' -and -not $failure -and -not $script:noLease -and -not $script:nativeError -and -not $script:modeUnchanged) {
         if(-not $result.success){throw ($name+': '+($result | ConvertTo-Json -Depth 5))}
@@ -85,7 +99,11 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
         if($result.success -or -not $result.reverted){throw ($name+': rollback not reported: '+($result | ConvertTo-Json -Depth 5))}
         if($script:state.Dns[0] -ne '10.0.0.2' -or $script:state.Addresses[0].IPAddress -ne '10.0.0.10'){throw ($name+': prior state not restored')}
     }
-    if($variant -notin 'default-switch','vpn','identity-changed','protected-exists','bad-id' -and (Test-Path -LiteralPath $script:currentProtected)){throw ($name+': protected copy was left behind after the result')}
+    if($variant -notin 'default-switch','vpn','identity-changed','protected-exists','bad-id','existing-untrusted-root') {
+        if(Test-Path -LiteralPath $script:currentProtected){throw ($name+': protected copy was left behind after the result')}
+        $expected=$(if($variant -eq 'existing-trusted-root'){@($script:currentProtected)}else{@($nexoRoot,$script:protectedTestRoot,$script:currentProtected)})
+        if((@($script:created) -join '|') -ne ($expected -join '|')){throw ($name+': protected folders created: '+(@($script:created) -join ', '))}
+    }
     Write-Output ('PASS: simulated network transaction '+$name)
     if($variant -eq 'error-84' -and -not $script:transitionCalled){throw 'Static-to-DHCP transition was not requested'}
     if($variant -in 'native-error','mode-unchanged','no-lease' -and -not $result.failureState){throw 'Pre-rollback evidence was lost'}
@@ -102,7 +120,8 @@ function Recover($name,$action,$current,$expect,$variant='normal') {
     $beforeJson=[pscustomobject]@{Index=10;Name='Adapter-Test';Guid=$guid;Dhcp=$(if($dhcpBefore){'Enabled'}else{'Disabled'});StaticDns=$(if($dhcpBefore){''}else{'10.0.0.2'});Dns=@($(if($dhcpBefore){'10.0.0.1'}else{'10.0.0.2'}));Addresses=$(if($dhcpBefore){@([pscustomobject]@{IPAddress='10.0.0.25';PrefixLength=24;PrefixOrigin='3';AddressState='4'})}else{@([pscustomobject]@{IPAddress='10.0.0.10';PrefixLength=24;PrefixOrigin='1';AddressState='4'})});Routes=$(if($dhcpBefore){@()}else{@([pscustomobject]@{NextHop='10.0.0.1';RouteMetric=256})})} | ConvertTo-Json -Depth 5
     $operationId=[guid]::NewGuid().ToString('N'); $recoveryMode=$true
     $operationDir=Join-Path $testRoot $operationId; New-Item -ItemType Directory -Path $operationDir | Out-Null
-    $script:currentProtected=Join-Path $protectedTestRoot $operationId; $script:untrusted=$variant -eq 'untrusted'
+    UseProgramData $name
+    $script:currentProtected=Join-Path $script:protectedTestRoot $operationId; $script:untrusted=$variant -eq 'untrusted'
     if($variant -ne 'missing-protected'){
         New-Item -ItemType Directory -Path $script:currentProtected -Force | Out-Null
         @{Action=$action;Index=10;ExpectedGuid=$guid.Trim('{}');Created=(Get-Date).ToUniversalTime().ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $script:currentProtected 'transaction.json')
@@ -115,7 +134,13 @@ function Recover($name,$action,$current,$expect,$variant='normal') {
     $testSource=(Isolated $source).Replace('"$env:WINDIR\System32\netsh.exe"','Invoke-TestNetsh')
     & ([scriptblock]::Create($testSource))
     if(Test-Path (Join-Path $operationDir 'result.json')){throw ($name+': recovery ran the normal transaction')}
-    $result=Get-Content -LiteralPath (Join-Path $operationDir 'recovery-result.json') -Raw | ConvertFrom-Json
+    # The elevated recovery writes its result only to the protected folder; the app copies it without elevation.
+    if(Test-Path (Join-Path $operationDir 'recovery-result.json')){throw ($name+': elevated recovery wrote to the user folder')}
+    $resultPath=Join-Path $script:currentProtected 'recovery-result.json'
+    if($variant -in 'untrusted','missing-protected') {
+        if(Test-Path -LiteralPath $resultPath){throw ($name+': result written without a trusted protected copy')}
+        $result=$null; $expect='silent'
+    } else { $result=Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json }
     switch($expect) {
         'restored' { if(-not $result.success -or -not $result.restored -or -not $result.found -or -not $result.after){throw ($name+': restore not reported: '+($result | ConvertTo-Json -Depth 5))} }
         'already' { if(-not $result.success -or $result.restored -or -not $result.alreadyRestored){throw ($name+': matching state was not detected')} }
@@ -123,10 +148,10 @@ function Recover($name,$action,$current,$expect,$variant='normal') {
     }
     if($variant -eq 'dhcp-before') { if($script:state.Dhcp -ne 'Enabled' -or -not $script:transitionCalled){throw ($name+': DHCP was not restored')} }
     elseif($variant -in 'identity-changed','untrusted','request-mismatch','missing-protected') { if($script:state.Addresses[0].IPAddress -ne '10.0.0.20' -or $script:state.Dns[0] -ne '1.1.1.1'){throw ($name+': network was changed without a trusted protected backup')} }
-    elseif($expect -ne 'failed') { if($script:state.Addresses[0].IPAddress -ne '10.0.0.10' -or $script:state.Dns[0] -ne '10.0.0.2'){throw ($name+': prior state not present after recovery')} }
+    elseif($expect -notin 'failed','silent') { if($script:state.Addresses[0].IPAddress -ne '10.0.0.10' -or $script:state.Dns[0] -ne '10.0.0.2'){throw ($name+': prior state not present after recovery')} }
     if(@($script:state.Dns) -contains '203.0.113.66'){throw ($name+': user-writable backup was applied')}
     if($variant -eq 'untrusted' -and -not (Test-Path -LiteralPath (Join-Path $script:currentProtected 'before.json'))){throw ($name+': untrusted protected folder was deleted with elevation')}
-    if($variant -notin 'untrusted','missing-protected' -and (Test-Path -LiteralPath $script:currentProtected)){throw ($name+': protected copy was left behind after recovery')}
+    if($script:aclWrites -ne 0){throw ($name+': the executor rewrote an ACL')}
     $recoveryMode=$false
     Write-Output ('PASS: simulated network recovery '+$name)
 }
@@ -137,9 +162,9 @@ try {
     Recover 'recovery-dhcp-after-crash' 'set_ipv4' (StaticState '10.0.0.20' '1.1.1.1') 'restored' 'dhcp-before'
     Recover 'recovery-identity-changed' 'set_ipv4' (StaticState '10.0.0.20' '1.1.1.1') 'failed' 'identity-changed'
     Recover 'recovery-restore-fails' 'set_dns' (StaticState '10.0.0.10' '1.1.1.1') 'failed' 'restore-fails'
-    Recover 'recovery-untrusted-copy' 'set_ipv4' (StaticState '10.0.0.20' '1.1.1.1') 'failed' 'untrusted'
+    Recover 'recovery-untrusted-copy' 'set_ipv4' (StaticState '10.0.0.20' '1.1.1.1') 'silent' 'untrusted'
     Recover 'recovery-request-mismatch' 'set_ipv4' (StaticState '10.0.0.20' '1.1.1.1') 'failed' 'request-mismatch'
-    Recover 'recovery-missing-protected' 'set_ipv4' (StaticState '10.0.0.20' '1.1.1.1') 'failed' 'missing-protected'
+    Recover 'recovery-missing-protected' 'set_ipv4' (StaticState '10.0.0.20' '1.1.1.1') 'silent' 'missing-protected'
     Check 'dns-keep' 'set_dns' 'manual' 'keep'
     Check 'dns-rollback' 'set_dns' 'manual' 'rollback'
     Check 'dns-error-rollback' 'set_dns' 'manual' 'keep' $true
@@ -157,20 +182,23 @@ try {
     Check 'vpn-blocked' 'set_ipv4' 'dhcp' 'keep' $false 'vpn'
     Check 'identity-changed-blocked' 'set_ipv4' 'dhcp' 'keep' $false 'identity-changed'
     Check 'protected-folder-already-exists' 'set_dns' 'manual' 'keep' $false 'protected-exists'
+    Check 'existing-untrusted-nexo-folder' 'set_dns' 'manual' 'keep' $false 'existing-untrusted-root'
+    Check 'existing-trusted-operations-folder' 'set_dns' 'manual' 'keep' $false 'existing-trusted-root'
     Check 'invalid-operation-id' 'set_dns' 'manual' 'keep' $false 'bad-id'
-    # Real ACL of the protected folder: Windows as administrator only (GitHub CI runs elevated).
+    # Real ACL of the protected folder: Windows as administrator only. In GitHub Actions a skip is a failure.
     $onWindows=$PSVersionTable.PSEdition -eq 'Desktop' -or $IsWindows
     if($onWindows -and ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         $ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)
         $definitions=@(($source -split "`r?`n") | Where-Object {$_ -match '^\$trustedSids = '})
-        foreach($function in 'Protect-Directory','Assert-Trusted'){ $definitions+=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $function},$true).Extent.Text }
+        foreach($function in 'New-ProtectedSecurity','New-ProtectedDirectory','Assert-Trusted','Use-ProtectedDirectory'){ $definitions+=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $function},$true).Extent.Text }
         $real=[scriptblock]::Create(($definitions -join "`n")+"`n"+@'
 $dir=Join-Path $args[0] 'acl-real'
-Protect-Directory $dir
+Use-ProtectedDirectory $dir
 $acl=Get-Acl -LiteralPath $dir
-if(-not $acl.AreAccessRulesProtected){throw 'Real ACL: inheritance was not disabled'}
+if(-not $acl.AreAccessRulesProtected){throw 'Real ACL: the new folder inherits permissions'}
 if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne 'S-1-5-32-544'){throw 'Real ACL: owner is not Administrators'}
 foreach($rule in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])){ if($rule.IdentityReference.Value -eq 'S-1-5-32-545' -and ([int64]$rule.FileSystemRights -band 0x500D0156)){throw 'Real ACL: Users can write to the protected folder'} }
+Use-ProtectedDirectory $dir
 $file=Join-Path $dir 'before.json'; Set-Content -LiteralPath $file -Value '{}'
 Assert-Trusted $dir; Assert-Trusted $file
 $open=Get-Acl -LiteralPath $file
@@ -178,10 +206,17 @@ $open.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRu
 Set-Acl -LiteralPath $file -AclObject $open
 $refused=$false; try { Assert-Trusted $file } catch { $refused=$true }
 if(-not $refused){throw 'Real ACL: a file writable by Users was accepted'}
+$plain=Join-Path $args[0] 'acl-preexisting'
+New-Item -ItemType Directory -Path $plain | Out-Null
+$sddl=(Get-Acl -LiteralPath $plain).Sddl
+$refused=$false; try { Use-ProtectedDirectory $plain } catch { $refused=$true }
+if(-not $refused){throw 'Real ACL: an inheriting pre-existing folder was adopted'}
+if((Get-Acl -LiteralPath $plain).Sddl -ne $sddl){throw 'Real ACL: the pre-existing folder ACL was changed'}
 '@)
         & $real $testRoot
         Write-Output 'PASS: real ACL of the protected backup folder (administrator)'
-    } else { Write-Output 'SKIP: real ACL of the protected backup folder needs Windows as administrator' }
+    } elseif($env:GITHUB_ACTIONS -eq 'true') { throw 'Real ACL of the protected backup folder was skipped in CI: the job must run on Windows as administrator' }
+    else { Write-Output 'SKIP: real ACL of the protected backup folder needs Windows as administrator' }
 } finally {
     $resolved=[IO.Path]::GetFullPath($testRoot)
     if($resolved.StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath())) -and (Split-Path $resolved -Leaf) -like 'NexoNetworkTests-*'){Remove-Item -LiteralPath $resolved -Recurse -Force}
