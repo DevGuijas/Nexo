@@ -18,7 +18,16 @@ function Get-Content { param([string]$LiteralPath,[switch]$Raw) if($LiteralPath 
 # Simulated protected store: the real ACL primitives are renamed in the code under test; Use-ProtectedDirectory and
 # Open-ProtectedDir keep their real logic. Set-Acl must never be called by the executor.
 function New-ProtectedDirectory($path) { if(Test-Path -LiteralPath $path){throw ('Created over an existing folder: '+$path)}; New-Item -ItemType Directory -Path $path | Out-Null; $script:created+=@($path) }
-function Assert-Trusted($path) { if(-not (Test-Path -LiteralPath $path)){throw ('Protected item missing: '+$path)}; if($script:untrusted -or $script:untrustedPaths -contains $path){throw ('Simulated untrusted protected copy at '+$path+'; it is not used.')} }
+# The simulated Assert-Trusted runs the executor's real decision (Get-UntrustedReason) on a simulated descriptor: by
+# default the protected one; a scenario can give a path a Users:Modify ACE or another owner.
+function Assert-Trusted($path) {
+    if(-not (Test-Path -LiteralPath $path)){throw ('Protected item missing: '+$path)}
+    $descriptor=$(if($script:fakeAcl.ContainsKey($path)){$script:fakeAcl[$path]}elseif($script:untrusted){UsersModify}else{ProtectedDescriptor})
+    $reason=Get-UntrustedReason $path (Test-Path -LiteralPath $path -PathType Container) $descriptor.Owner $descriptor.Protected $descriptor.Rules
+    if($reason){throw ('Simulated protected copy not used: '+$reason)}
+}
+function ProtectedDescriptor { @{Owner='S-1-5-32-544';Protected=$true;Rules=@([pscustomobject]@{Sid='S-1-5-18';Rights=0x1F01FF;Type='Allow';Propagation=0},[pscustomobject]@{Sid='S-1-5-32-544';Rights=0x1F01FF;Type='Allow';Propagation=0},[pscustomobject]@{Sid='S-1-5-32-545';Rights=0x1200A9;Type='Allow';Propagation=0})} }
+function UsersModify { $d=ProtectedDescriptor; $d.Rules+=@([pscustomobject]@{Sid='S-1-5-32-545';Rights=0x1301BF;Type='Allow';Propagation=0}); $d }
 function Set-Acl { $script:aclWrites++ }
 function Write-ProtectedFile($path, $text) { Set-Content -LiteralPath $path -Value $text; $script:protectedWrites+=@(Split-Path -Leaf $path); if($script:leaveTmp){Set-Content -LiteralPath ($path+'.tmp') -Value 'interrupted'} }
 function Invoke-TestNetsh {
@@ -62,6 +71,32 @@ $scriptBlock=[scriptblock]::Create($source)
 $productionRoot="([Environment]::GetFolderPath('CommonApplicationData'))"
 # The protected root comes from the Windows API, never from an environment variable the caller could change, and the
 # executor never rewrites an ACL.
+# The executor's ACE decision, loaded once so the simulated Assert-Trusted and the unit cases below use the real code.
+$decisionAst=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)
+. ([scriptblock]::Create((@(($source -split "`r?`n") | Where-Object {$_ -match '^\$trustedSids = '}) + $decisionAst.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-UntrustedReason'},$true).Extent.Text) -join "`n"))
+function Rule($sid,$rights,$type='Allow',$propagation=0) { [pscustomobject]@{Sid=$sid;Rights=[int64]$rights;Type=$type;Propagation=$propagation} }
+$base=(ProtectedDescriptor).Rules
+$cases=@(
+    @('protected file',$false,'S-1-5-32-544',$false,$base,$false),
+    @('protected folder',$true,'S-1-5-32-544',$true,$base,$false),
+    @('Users Modify on a file',$false,'S-1-5-32-544',$false,($base+@(Rule 'S-1-5-32-545' 0x1301BF)),$true),
+    @('Users FullControl on a folder',$true,'S-1-5-32-544',$true,($base+@(Rule 'S-1-5-32-545' 0x1F01FF)),$true),
+    @('Everyone GENERIC_WRITE',$false,'S-1-5-32-544',$false,($base+@(Rule 'S-1-1-0' 0x40000000)),$true),
+    @('Authenticated Users Delete',$false,'S-1-5-32-544',$false,($base+@(Rule 'S-1-5-11' 0x10000)),$true),
+    @('Users ChangePermissions',$false,'S-1-5-32-544',$false,($base+@(Rule 'S-1-5-32-545' 0x40000)),$true),
+    @('Users AppendData only',$false,'S-1-5-32-544',$false,($base+@(Rule 'S-1-5-32-545' 0x4)),$true),
+    @('Users Modify inherit-only',$true,'S-1-5-32-544',$true,($base+@(Rule 'S-1-5-32-545' 0x1301BF 'Allow' 2)),$false),
+    @('Users Modify denied',$false,'S-1-5-32-544',$false,($base+@(Rule 'S-1-5-32-545' 0x1301BF 'Deny')),$false),
+    @('TrustedInstaller FullControl',$false,'S-1-5-32-544',$false,($base+@(Rule 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' 0x1F01FF)),$false),
+    @('user as owner',$false,'S-1-5-21-1-2-3-1001',$false,$base,$true),
+    @('inheriting folder',$true,'S-1-5-32-544',$false,$base,$true)
+)
+foreach($case in $cases){
+    $reason=Get-UntrustedReason ('C:\case\'+$case[0]) $case[1] $case[2] $case[3] $case[4]
+    if([bool]$reason -ne $case[5]){throw ('ACE decision wrong for '+$case[0]+': '+$reason)}
+    if($case[5] -and $case[0] -like '*Modify on a file' -and ($reason -notmatch 'S-1-5-32-545' -or $reason -notmatch '0x1301BF')){throw ('Refusal reason lacks SID or rights: '+$reason)}
+}
+Write-Output 'PASS: executor ACE decision refuses write rights for non-admin SIDs on files and folders, with SID and rights in the reason'
 foreach($forbidden in '$env:ProgramData','Set-Acl'){ if($source.Contains($forbidden)){throw ('NetworkTransaction.ps1 must not use '+$forbidden)} }
 Write-Output 'PASS: executor uses the Windows API for the protected root and never calls Set-Acl'
 # Protected files are born with the explicit descriptor: only Save-Result (the %LOCALAPPDATA% folder) uses Set-Content.
@@ -72,7 +107,7 @@ $setContent=[regex]::Matches($source,'Set-Content|Out-File|WriteAllText|WriteAll
 if(-not $saveProtected.Contains('Write-ProtectedFile') -or $saveProtected -match 'Set-Content|Out-File|WriteAll' -or -not $writeProtected.Contains('FileSecurity') -or -not $writeProtected.Contains('FileStream($temporary, [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)') -or -not $writeProtected.Contains('Create((New-Object System.IO.FileInfo($temporary)), [IO.FileMode]::CreateNew, $rights, [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)') -or $writeProtected -match 'Set-Content|Out-File|WriteAll' -or $setContent -ne [regex]::Matches($saveResult,'Set-Content').Count){throw 'Protected files must be created only by Write-ProtectedFile with an explicit FileSecurity'}
 Write-Output 'PASS: protected files are created with an explicit descriptor, never with Set-Content'
 # Each scenario gets its own simulated %ProgramData%.
-function UseProgramData($name) { $script:programData=Join-Path $testRoot ('pd-'+$name); $script:protectedTestRoot=Join-Path $script:programData 'NexoSupport\operations'; $script:created=@(); $script:untrustedPaths=@(); $script:aclWrites=0; $script:phases=@(); $script:protectedWrites=@() }
+function UseProgramData($name) { $script:programData=Join-Path $testRoot ('pd-'+$name); $script:protectedTestRoot=Join-Path $script:programData 'NexoSupport\operations'; $script:created=@(); $script:untrustedPaths=@(); $script:aclWrites=0; $script:phases=@(); $script:protectedWrites=@(); $script:fakeAcl=@{} }
 function Isolated($text) {
     foreach($piece in @($productionRoot,'function New-ProtectedDirectory(','function Assert-Trusted(','function Write-ProtectedFile(')){ if(-not $text.Contains($piece)){throw ('Protected-store hook not found: '+$piece)} }
     $text.Replace($productionRoot,"'"+$script:programData.Replace("'","''")+"'").Replace('function New-ProtectedDirectory(','function New-ProtectedDirectory-Windows(').Replace('function Assert-Trusted(','function Assert-Trusted-Windows(').Replace('function Write-ProtectedFile(','function Write-ProtectedFile-Windows(')
@@ -94,8 +129,8 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
     $script:leaveTmp=$variant -eq 'leftover-tmp'
     $nexoRoot=Split-Path -Parent $script:protectedTestRoot
     # A folder that already exists is used only if it is already protected; it is never repaired or adopted.
-    if($variant -eq 'protected-exists'){New-Item -ItemType Directory -Path $script:currentProtected -Force | Out-Null; Set-Content -LiteralPath (Join-Path $script:currentProtected 'before.json') -Value '{"forjado":true}'; $script:untrustedPaths=@($script:currentProtected)}
-    if($variant -eq 'existing-untrusted-root'){New-Item -ItemType Directory -Path $nexoRoot -Force | Out-Null; $script:untrustedPaths=@($nexoRoot)}
+    if($variant -eq 'protected-exists'){New-Item -ItemType Directory -Path $script:currentProtected -Force | Out-Null; Set-Content -LiteralPath (Join-Path $script:currentProtected 'before.json') -Value '{"forjado":true}'; $script:fakeAcl[$script:currentProtected]=UsersModify}
+    if($variant -eq 'existing-untrusted-root'){New-Item -ItemType Directory -Path $nexoRoot -Force | Out-Null; $d=ProtectedDescriptor; $d.Owner='S-1-5-21-1-2-3-1001'; $script:fakeAcl[$nexoRoot]=$d}
     if($variant -eq 'existing-trusted-root'){New-Item -ItemType Directory -Path $script:protectedTestRoot -Force | Out-Null}
     if($decision -ne 'timeout'){Set-Content -LiteralPath (Join-Path $operationDir 'decision.txt') -Value $decision}
     $requestJson=@{Action=$action;Index=10;ExpectedGuid=$(if($variant -eq 'identity-changed'){'00000000-0000-0000-0000-000000000099'}else{'00000000-0000-0000-0000-000000000001'});Mode=$mode;Servers=@('1.1.1.1');Address='10.0.0.20';Prefix=24;Gateway='10.0.0.1'} | ConvertTo-Json
@@ -217,7 +252,7 @@ try {
     if($onWindows -and ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         $ast=[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$null,[ref]$null)
         $definitions=@(($source -split "`r?`n") | Where-Object {$_ -match '^\$trustedSids = '})
-        foreach($function in 'New-ProtectedSecurity','New-ProtectedDirectory','Assert-Trusted','Use-ProtectedDirectory','New-ProtectedFileSecurity','Write-ProtectedFile'){ $definitions+=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $function},$true).Extent.Text }
+        foreach($function in 'Get-UntrustedReason','New-ProtectedSecurity','New-ProtectedDirectory','Assert-Trusted','Use-ProtectedDirectory','New-ProtectedFileSecurity','Write-ProtectedFile'){ $definitions+=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $function},$true).Extent.Text }
         $real=[scriptblock]::Create(($definitions -join "`n")+"`n"+@'
 $dir=Join-Path $args[0] 'acl-real'
 Use-ProtectedDirectory $dir
@@ -233,7 +268,9 @@ if((Get-Content -LiteralPath $file -Raw) -notmatch 'again'){throw 'Real ACL: pro
 Assert-Trusted $dir; Assert-Trusted $file
 $open=Get-Acl -LiteralPath $file
 $open.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.SecurityIdentifier]'S-1-5-32-545','Modify','Allow')))
-Set-Acl -LiteralPath $file -AclObject $open
+# The suite mocks Set-Acl for the simulations above; the real cmdlet is called by its module name.
+Microsoft.PowerShell.Security\Set-Acl -LiteralPath $file -AclObject $open
+if(-not @((Get-Acl -LiteralPath $file).GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]) | Where-Object {$_.IdentityReference.Value -eq 'S-1-5-32-545' -and ([int64]$_.FileSystemRights -band 0x2)}).Count){throw 'Real ACL: the test could not apply Users:Modify to the file'}
 $refused=$false; try { Assert-Trusted $file } catch { $refused=$true }
 if(-not $refused){throw 'Real ACL: a file writable by Users was accepted'}
 $plain=Join-Path $args[0] 'acl-preexisting'
