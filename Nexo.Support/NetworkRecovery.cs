@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.Versioning;
@@ -11,9 +12,9 @@ using System.Text.Json.Nodes;
 
 namespace Nexo.Support;
 
-public sealed record NetworkTransactionRecord(string Action, int Index, string ExpectedGuid, DateTimeOffset Created, int? ProcessId = null, int? RecoveryProcessId = null);
+public sealed record NetworkTransactionRecord(string Action, int Index, string ExpectedGuid, DateTimeOffset Created, int? ProcessId = null, int? RecoveryProcessId = null, string? Phase = null);
 
-public sealed record InterruptedNetworkTransaction(string Directory, NetworkTransactionRecord Record, string Phase, string? Before, string? Resolution);
+public sealed record InterruptedNetworkTransaction(string Directory, NetworkTransactionRecord Record, string Phase, string? Before, string? Resolution, string? ProtectedDirectory = null);
 
 /// <summary>
 /// Onde fica a cópia protegida de cada transação (#10) e como conferir que ela só pode ter sido gravada com elevação.
@@ -52,7 +53,26 @@ public static class NetworkRecovery
     public static readonly TimeSpan MaxAge = TimeSpan.FromDays(7);
     public const string NotStartedMessage = "O executor de rede não foi iniciado ({0}). Nenhuma alteração de rede foi feita.";
 
-    public static IElevatedProcess StartElevated(string script) => new ElevatedProcess(WindowsTools.StartElevated(script));
+    /// <summary>Limite da linha de comando do Windows (CreateProcess), que inclui o caminho do powershell.exe.</summary>
+    public const int CommandLineLimit = 32767;
+
+    public static IElevatedProcess StartElevated(string script) => new ElevatedProcess(WindowsTools.StartElevated(Compact(script)));
+
+    /// <summary>
+    /// O executor de rede inteiro em -EncodedCommand (UTF-16 em Base64) passa do limite de 32 767 caracteres da linha de
+    /// comando do Windows. Ele vai compactado (GZip) dentro de um carregador curto, que o descompacta na memória do
+    /// processo elevado e o executa no mesmo escopo. Nada é gravado em disco no caminho até a elevação.
+    /// </summary>
+    public static string Compact(string script)
+    {
+        using var buffer = new MemoryStream();
+        using (var gzip = new GZipStream(buffer, CompressionLevel.SmallestSize, true)) gzip.Write(Encoding.UTF8.GetBytes(script));
+        return "$nexoScript=(New-Object System.IO.StreamReader((New-Object System.IO.Compression.GZipStream((New-Object System.IO.MemoryStream(,[Convert]::FromBase64String('"
+            + Convert.ToBase64String(buffer.ToArray()) + "'))),[System.IO.Compression.CompressionMode]::Decompress)),[System.Text.Encoding]::UTF8)).ReadToEnd(); . ([scriptblock]::Create($nexoScript))";
+    }
+
+    /// <summary>Tamanho do argumento -EncodedCommand que o Windows recebe para o script.</summary>
+    public static int EncodedLength(string script) => Convert.ToBase64String(Encoding.Unicode.GetBytes(script)).Length;
 
     public static void WriteRecord(string directory, NetworkTransactionRecord record) => WriteJson(Path.Combine(directory, RecordFile), record);
 
@@ -80,6 +100,15 @@ public static class NetworkRecovery
         // Só uma pasta de operação de verdade: GUID "N" e nenhum "..". Outra pasta é ignorada, sem gravar nada nela.
         var id = Path.GetFileName(Path.TrimEndingDirectorySeparator(directory));
         if (!IsOperationId(id) || directory.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Contains("..")) return null;
+        var protectedDirectory = Path.Combine(trust.ProtectedRoot, id);
+        // O resultado da restauração elevada fica na pasta protegida (#10); se o aplicativo fechou antes de copiá-lo, a
+        // cópia é feita aqui, sem elevação, e a transação não é oferecida de novo.
+        if (!File.Exists(Path.Combine(directory, ResultFile)) && File.Exists(Path.Combine(protectedDirectory, ResultFile)))
+        {
+            try { WriteTextAtomic(Path.Combine(directory, ResultFile), File.ReadAllText(Path.Combine(protectedDirectory, ResultFile))).GetAwaiter().GetResult(); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            return null;
+        }
         var recordPath = Path.Combine(directory, RecordFile);
         if (!File.Exists(recordPath) || File.Exists(Path.Combine(directory, "result.json")) || File.Exists(Path.Combine(directory, ResultFile))) return null;
         NetworkTransactionRecord record;
@@ -99,7 +128,6 @@ public static class NetworkRecovery
             return Resolved(directory, record, "before-backup", new { success = true, restored = false, unchanged = true, message = "A transação de rede foi interrompida antes de salvar o estado anterior; o executor não chegou a alterar a rede. Nenhuma restauração é necessária." });
         // A cópia em %LOCALAPPDATA% pode ser forjada por qualquer processo do usuário (#10): o que é mostrado e restaurado
         // vem só da cópia protegida, gravada pelo executor elevado.
-        var protectedDirectory = Path.Combine(trust.ProtectedRoot, id);
         var protectedBefore = Path.Combine(protectedDirectory, "before.json");
         var protectedRecord = Path.Combine(protectedDirectory, RecordFile);
         if (!File.Exists(protectedBefore) || !File.Exists(protectedRecord))
@@ -115,11 +143,13 @@ public static class NetworkRecovery
         if (secured.Action != record.Action || secured.Index != record.Index || !SameGuid(secured.ExpectedGuid, record.ExpectedGuid))
             return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "O registro da transação de rede não corresponde à cópia protegida. A restauração automática não foi oferecida; confira a rede manualmente.", backup = beforePath });
         record = secured with { ProcessId = record.ProcessId, RecoveryProcessId = record.RecoveryProcessId };
+        // A fase mostrada vem do registro protegido; applied.json e decision.txt de %LOCALAPPDATA% só valem sem ela.
+        if (secured.Phase is "applying" or "confirming" or "restoring") phase = secured.Phase;
         if (now - secured.Created > MaxAge)
             return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "A alteração de rede interrompida foi iniciada há mais de " + MaxAge.TotalDays.ToString("F0", System.Globalization.CultureInfo.InvariantCulture) + " dias (" + secured.Created.ToLocalTime().ToString("dd/MM/yyyy HH:mm", System.Globalization.CultureInfo.InvariantCulture) + "). A restauração automática não é oferecida para uma configuração tão antiga; confira a rede antes de outra alteração.", backup = beforePath });
         if (decision == "keep")
             return Resolved(directory, record, "keeping", new { success = false, restored = false, uncertain = true, message = "Você confirmou manter a nova configuração de rede, mas o executor terminou antes de registrar o resultado. A configuração atual não foi conferida; consulte a rede antes de outra alteração.", backup = beforePath });
-        try { return new InterruptedNetworkTransaction(directory, record, phase, Validate(File.ReadAllText(protectedBefore), record), null); }
+        try { return new InterruptedNetworkTransaction(directory, record, phase, Validate(File.ReadAllText(protectedBefore), record), null, protectedDirectory); }
         catch (Exception ex) when (ex is JsonException or InvalidDataException or FormatException or IOException or UnauthorizedAccessException)
         {
             return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "O backup da configuração anterior não pôde ser validado (" + ex.Message + "). A restauração automática não foi oferecida; confira a rede manualmente.", backup = beforePath });
@@ -206,10 +236,18 @@ public static class NetworkRecovery
         using (process)
         {
             WriteRecord(item.Directory, item.Record with { RecoveryProcessId = process.Id });
+            // O processo elevado grava o resultado só na pasta protegida; a cópia para %LOCALAPPDATA% é feita aqui, sem
+            // elevação (#10).
+            var elevatedResult = Path.Combine(item.ProtectedDirectory ?? item.Directory, ResultFile);
             var clock = Stopwatch.StartNew();
-            while (!File.Exists(resultPath) && !process.HasExited && clock.Elapsed < timeout) await Task.Delay(250, CancellationToken.None);
-            if (!File.Exists(resultPath) && process.HasExited) await Task.Delay(250, CancellationToken.None);
-            if (File.Exists(resultPath)) return await File.ReadAllTextAsync(resultPath, CancellationToken.None);
+            while (!File.Exists(elevatedResult) && !process.HasExited && clock.Elapsed < timeout) await Task.Delay(250, CancellationToken.None);
+            if (!File.Exists(elevatedResult) && process.HasExited) await Task.Delay(250, CancellationToken.None);
+            if (File.Exists(elevatedResult))
+            {
+                var text = await File.ReadAllTextAsync(elevatedResult, CancellationToken.None);
+                if (elevatedResult != resultPath) await WriteTextAtomic(resultPath, text);
+                return text;
+            }
             var running = !process.HasExited;
             var unconfirmed = Serialize(new { success = false, restored = false, uncertain = true, state = "unknown", processRunning = running, error = (running ? "A restauração não respondeu no prazo e ainda está em execução. " : "O processo de restauração terminou sem registrar resultado. ") + "O estado da rede não pôde ser confirmado; a restauração será oferecida novamente na próxima abertura do Nexo.", backup, recordedAt = DateTimeOffset.UtcNow });
             await WriteTextAtomic(Path.Combine(item.Directory, "recovery-unconfirmed.json"), unconfirmed);
@@ -243,8 +281,8 @@ public static class NetworkRecovery
 
     /// <summary>
     /// A pasta protegida e os dois arquivos só valem se nenhum deles é link, todos têm dono SYSTEM, Administradores ou
-    /// TrustedInstaller, e nenhuma outra conta tem direito de escrita, exclusão, troca de permissão ou de dono. A pasta
-    /// "operations" e a "NexoSupport" acima dela também são conferidas.
+    /// TrustedInstaller, as pastas não herdam permissões e nenhuma outra conta tem direito de escrita, exclusão, troca de
+    /// permissão ou de dono. A pasta "operations" e a "NexoSupport" acima dela também são conferidas.
     /// </summary>
     [SupportedOSPlatform("windows")]
     internal static bool TrustedOnWindows(string directory)
@@ -258,6 +296,8 @@ public static class NetworkRecovery
                 if (!item.Exists || item.Attributes.HasFlag(FileAttributes.ReparsePoint)) return false;
                 FileSystemSecurity security = item is DirectoryInfo folder ? folder.GetAccessControl() : ((FileInfo)item).GetAccessControl();
                 if (security.GetOwner(typeof(SecurityIdentifier)) is not SecurityIdentifier owner || !TrustedSid(owner)) return false;
+                // As pastas precisam estar com a herança desligada; os arquivos herdam da pasta protegida.
+                if (item is DirectoryInfo && !security.AreAccessRulesProtected) return false;
                 foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
                     if (rule.AccessControlType == AccessControlType.Allow && !rule.PropagationFlags.HasFlag(PropagationFlags.InheritOnly)
                         && ((long)rule.FileSystemRights & WriteRights) != 0 && !(rule.IdentityReference is SecurityIdentifier sid && TrustedSid(sid))) return false;

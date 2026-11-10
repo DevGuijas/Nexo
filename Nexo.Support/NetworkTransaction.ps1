@@ -7,18 +7,18 @@ $dhcpTransition = @{}
 $failureState = $null
 # Cópia protegida (#10): o backup e o registro também ficam em %ProgramData%, numa pasta que só SYSTEM e
 # Administradores podem alterar. A restauração lê só de lá; os arquivos em %LOCALAPPDATA% podem ser forjados por
-# qualquer processo do usuário e nunca definem o que é aplicado com elevação.
-$protectedRoot = Join-Path $env:ProgramData 'NexoSupport\operations'
+# qualquer processo do usuário e nunca definem o que é aplicado com elevação. O caminho vem da API do Windows, não de
+# variável de ambiente, que o processo que pede a elevação poderia trocar.
+$protectedRoot = Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'NexoSupport\operations'
 $protectedDir = Join-Path $protectedRoot ([string]$operationId)
 $protectedState = @{Opened=$false}
 $trustedSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
 function Assert-OperationId {
     if ([string]$operationId -cnotmatch '^[0-9a-f]{32}$' -or (Split-Path -Leaf $operationDir) -cne [string]$operationId) { throw 'Identificador de operação inválido. Nenhuma alteração foi feita.' }
 }
-function Protect-Directory($path) {
-    if (Test-Path -LiteralPath $path) {
-        if ((Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'A pasta protegida do Nexo é um link. Nenhuma alteração foi feita.' }
-    } else { New-Item -ItemType Directory -Path $path -Force | Out-Null }
+# Descritor da pasta protegida: dono Administradores, herança desligada, SYSTEM e Administradores com controle total,
+# Usuários só leitura.
+function New-ProtectedSecurity {
     $acl = New-Object System.Security.AccessControl.DirectorySecurity
     $acl.SetOwner([System.Security.Principal.SecurityIdentifier]'S-1-5-32-544')
     $acl.SetAccessRuleProtection($true, $false)
@@ -26,27 +26,38 @@ function Protect-Directory($path) {
     foreach ($entry in @(@('S-1-5-18', 'FullControl'), @('S-1-5-32-544', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
         $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule([System.Security.Principal.SecurityIdentifier]$entry[0], [System.Security.AccessControl.FileSystemRights]$entry[1], $inherit, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)))
     }
-    Set-Acl -LiteralPath $path -AclObject $acl
+    $acl
+}
+# A pasta nasce já com o descritor, numa única chamada (o executor roda no Windows PowerShell 5.1, .NET Framework).
+function New-ProtectedDirectory($path) {
+    $security = New-ProtectedSecurity
+    if ([IO.Directory].GetMethod('CreateDirectory', [type[]]@([string], [System.Security.AccessControl.DirectorySecurity]))) { [void][IO.Directory]::CreateDirectory($path, $security) }
+    else { [void][System.IO.FileSystemAclExtensions]::CreateDirectory($security, $path) }
 }
 function Assert-Trusted($path) {
     $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
-    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'O backup protegido está em um link. A restauração automática foi recusada.' }
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw ('A cópia protegida do Nexo em "' + $path + '" é um link e não é usada. Nenhuma alteração foi feita.') }
     $acl = Get-Acl -LiteralPath $path
-    if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $trustedSids) { throw 'O backup protegido não pertence ao sistema nem aos administradores. A restauração automática foi recusada.' }
+    if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $trustedSids) { throw ('A cópia protegida do Nexo em "' + $path + '" não pertence ao sistema nem aos administradores e não é usada. Nenhuma alteração foi feita.') }
+    if ($item.PSIsContainer -and -not $acl.AreAccessRulesProtected) { throw ('A pasta protegida do Nexo em "' + $path + '" herda permissões e não é usada. Nenhuma alteração foi feita.') }
     # Escrita, criação, exclusão, troca de permissão ou de dono, e os direitos genéricos de escrita.
     $write = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
     foreach ($rule in $acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
         if ($rule.AccessControlType -ne 'Allow' -or ($rule.PropagationFlags -band [System.Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
-        if (([int64]$rule.FileSystemRights -band $write) -and $rule.IdentityReference.Value -notin $trustedSids) { throw 'O backup protegido pode ser alterado por outros usuários. A restauração automática foi recusada.' }
+        if (([int64]$rule.FileSystemRights -band $write) -and $rule.IdentityReference.Value -notin $trustedSids) { throw ('A cópia protegida do Nexo em "' + $path + '" pode ser alterada por outros usuários e não é usada. Nenhuma alteração foi feita.') }
     }
 }
+# Uma pasta que já existe nunca é reparada nem adotada: só é usada se já estiver protegida. Sem isso, nada é gravado
+# (nem ACL) e a mudança de rede não acontece.
+function Use-ProtectedDirectory($path) {
+    if (-not (Test-Path -LiteralPath $path)) { New-ProtectedDirectory $path }
+    Assert-Trusted $path
+}
 function Open-ProtectedDir {
-    Protect-Directory (Split-Path -Parent $protectedRoot)
-    Protect-Directory $protectedRoot
+    Use-ProtectedDirectory (Split-Path -Parent $protectedRoot)
+    Use-ProtectedDirectory $protectedRoot
     Remove-StaleProtected
-    # O id é um GUID novo do aplicativo: uma pasta que já existe não foi criada por esta operação.
-    if (Test-Path -LiteralPath $protectedDir) { throw 'A pasta protegida desta operação já existia. Nenhuma alteração foi feita.' }
-    Protect-Directory $protectedDir
+    Use-ProtectedDirectory $protectedDir
     $protectedState.Opened = $true
 }
 function Save-Protected($filename, $value) {
@@ -55,10 +66,15 @@ function Save-Protected($filename, $value) {
     $value | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $temporary -Encoding UTF8
     Move-Item -LiteralPath $temporary -Destination $destination -Force
 }
+# Registro protegido com a fase (applying, confirming, restoring): a janela de restauração usa esta fase, e não os
+# arquivos de %LOCALAPPDATA%.
+function Save-ProtectedRecord($phase) {
+    Save-Protected 'transaction.json' @{Action=[string]$request.Action;Index=$interfaceIndex;ExpectedGuid=[string]$request.ExpectedGuid;Created=$protectedState.Created;Phase=$phase}
+}
 # Remove só os arquivos conhecidos e a pasta vazia: nunca apaga recursivamente com elevação (um link poderia apontar
 # para outro lugar).
 function Remove-ProtectedFolder($path) {
-    foreach ($name in 'before.json', 'transaction.json') { $file = Join-Path $path $name; if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } }
+    foreach ($name in 'before.json', 'transaction.json', 'recovery-result.json') { $file = Join-Path $path $name; if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } }
     [IO.Directory]::Delete($path, $false)
 }
 function Remove-Protected { if ($protectedState.Opened) { try { Remove-ProtectedFolder $protectedDir } catch { } } }
@@ -173,17 +189,19 @@ if ($recoveryMode) {
         $alreadyRestored = $true
         try { Assert-Restored $found } catch { $alreadyRestored = $false }
         if ($alreadyRestored) {
-            Save-Result 'recovery-result.json' @{success=$true;restored=$false;alreadyRestored=$true;message='A configuração atual já corresponde ao estado anterior salvo. Nenhuma alteração foi feita.';found=$found}
+            Save-Protected 'recovery-result.json' @{success=$true;restored=$false;alreadyRestored=$true;message='A configuração atual já corresponde ao estado anterior salvo. Nenhuma alteração foi feita.';found=$found}
         } else {
             Restore-Network
-            Save-Result 'recovery-result.json' @{success=$true;restored=$true;alreadyRestored=$false;message='Configuração anterior restaurada e conferida.';found=$found;after=(Snapshot)}
+            Save-Protected 'recovery-result.json' @{success=$true;restored=$true;alreadyRestored=$false;message='Configuração anterior restaurada e conferida.';found=$found;after=(Snapshot)}
         }
     } catch {
         $failure = $_.Exception.Message
         try { $state = Snapshot } catch { $state = @{error=$_.Exception.Message} }
-        Save-Result 'recovery-result.json' @{success=$false;restored=$false;alreadyRestored=$false;error=$failure;found=$found;state=$state}
+        # Sem cópia protegida confiável, nada é gravado: o aplicativo registra o resultado como não confirmado.
+        if ($protectedState.Opened) { Save-Protected 'recovery-result.json' @{success=$false;restored=$false;alreadyRestored=$false;error=$failure;found=$found;state=$state} }
     }
-    Remove-Protected
+    # O resultado fica na pasta protegida, e o aplicativo (sem elevação) o copia para %LOCALAPPDATA%. A pasta é removida
+    # depois de 7 dias por Remove-StaleProtected.
     return
 }
 try {
@@ -195,7 +213,8 @@ try {
     if ($managedSwitch -or (($adapter.Virtual -or -not $adapter.HardwareInterface) -and -not $hostHyperV)) { throw 'Esta interface é gerenciada pelo Windows ou por VPN. Reconfiguração de IP/DNS não permitida.' }
     $before = Snapshot
     Open-ProtectedDir
-    Save-Protected 'transaction.json' @{Action=[string]$request.Action;Index=$interfaceIndex;ExpectedGuid=[string]$request.ExpectedGuid;Created=(Get-Date).ToUniversalTime().ToString('o')}
+    $protectedState.Created = (Get-Date).ToUniversalTime().ToString('o')
+    Save-ProtectedRecord 'applying'
     Save-Protected 'before.json' $before
     Save-Result 'before.json' $before
     $changed = $true
@@ -241,6 +260,7 @@ try {
         if ($match.Count -ne 1 -or [string]$match[0].AddressState -in 'Duplicate','2') { throw 'IP estático não confirmado ou duplicado.' }
     }
     Save-Result 'applied.json' $after
+    Save-ProtectedRecord 'confirming'
     $deadline = (Get-Date).AddSeconds(60)
     $decisionPath = Join-Path $operationDir 'decision.txt'
     while (-not (Test-Path -LiteralPath $decisionPath) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
@@ -248,6 +268,7 @@ try {
     if ($keep) {
         Save-Result 'result.json' @{success=$true;message='Configuração aplicada, estado consultado e permanência confirmada pelo usuário.';before=$before;after=(Snapshot);dhcpTransition=$dhcpTransition}
     } else {
+        Save-ProtectedRecord 'restoring'
         Restore-Network
         Save-Result 'result.json' @{success=$false;reverted=$true;message='Configuração anterior restaurada por cancelamento ou ausência de confirmação.';after=(Snapshot)}
     }
@@ -256,7 +277,7 @@ try {
     try { $failureState = Snapshot } catch { $failureState = @{error=$_.Exception.Message} }
     $reverted = $false
     $rollbackError = $null
-    if ($changed -and $before) { try { Restore-Network; $reverted=$true } catch { $rollbackError=$_.Exception.Message } }
+    if ($changed -and $before) { try { Save-ProtectedRecord 'restoring'; Restore-Network; $reverted=$true } catch { $rollbackError=$_.Exception.Message } }
     Save-Result 'result.json' @{success=$false;error=$failure;changed=$changed;reverted=$reverted;rollbackError=$rollbackError;dhcpTransition=$dhcpTransition;failureState=$failureState;backup=(Join-Path $operationDir 'before.json')}
 }
 Remove-Protected
