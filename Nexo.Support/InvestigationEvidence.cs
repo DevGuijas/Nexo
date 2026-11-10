@@ -287,13 +287,20 @@ public sealed class InvestigationEvidence
     private bool PresentsClosedDisk(string normalized)
     {
         if (!diskClosed || diskActive || lowestFreePercent < LowFreePercent) return false;
-        return Sentences(normalized).SelectMany(sentence => Contrast.Split(sentence)).Any(sentence =>
-            !sentence.Contains('?') && !Regex.IsMatch(sentence, @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve)\b|resolvid|encerrad|\bnormal|\bja foi\b|\bantes\b")
-            && !AlertState.IsMatch(sentence) && !NoNeed.IsMatch(sentence)
+        // A isenção de estado de um trecho depois do contraste ("…, mas a ocorrência foi encerrada") vale para os anteriores;
+        // o trecho depois do contraste continua avaliado sozinho (@qa, no 2cbe6c7).
+        return Sentences(normalized).SelectMany(sentence =>
+        {
+            var parts = Contrast.Split(sentence);
+            return parts.Where((part, index) => !parts.Skip(index + 1).Any(StateExempt));
+        }).Any(sentence =>
+            !sentence.Contains('?') && !Regex.IsMatch(sentence, @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve|teve|tinha|tiveram)\b|\bnormal|\bja foi\b|\bantes\b")
+            && !StateExempt(sentence) && !NoNeed.IsMatch(sentence)
             && LowSpace.Matches(sentence).Any(match => !Negated(sentence, match) && !NotNeeded.IsMatch(sentence[(match.Index + match.Length)..])));
     }
     private static readonly Regex AlertState = new(@"\b(?:alerta|ocorrencia|aviso)s?\b.*(?:\bnao (?:esta|estao|e|sao|fica|ficou)(?: mais)? (?:ativ\w*|atua(?:l|is))\b|\bsaiu do relatorio\b|\bnao aparece(?:m)? mais\b)");
     private static readonly Regex NotNeeded = new(@"^\W*(?:\w+\W+){0,2}?nao (?:(?:e|sera|seria|esta) (?:necessari\w*|precis\w*)|precis\w*|dev\w*)\b");
+    private static bool StateExempt(string part) => Regex.IsMatch(part, "resolvid|encerrad") || AlertState.IsMatch(part);
     private static readonly Regex NoNeed = new(@"\bnao (?:ha|existe) (?:necessidade|motivo)\b");
     private static readonly Regex Contrast = new(@"\b(?:mas|porem|contudo|entretanto|todavia|no entanto)\b");
 

@@ -220,7 +220,12 @@ internal static class ValidationRetestChecks
             "Liberar espaço não é necessário: o C: tem 87% livre.",
             // Revisão do @qa no ceb7f40.
             "Não há necessidade de liberar espaço.",
-            "Abrir espaço no disco não deve ajudar agora."
+            "Abrir espaço no disco não deve ajudar agora.",
+            // Revisão do @qa no 2cbe6c7: o passado com "teve" e a isenção depois do contraste.
+            "O disco T: teve pouco espaço, mas a ocorrência foi encerrada.",
+            "O T: teve pouco espaço, porém o alerta foi resolvido.",
+            "O disco T: teve pouco espaço ontem.",
+            "O disco T: está com pouco espaço, mas a ocorrência foi encerrada."
         };
         var passed = allowed.Count(text => closed.ValidateStatement(text, false) == null);
         assert(passed == allowed.Length,
