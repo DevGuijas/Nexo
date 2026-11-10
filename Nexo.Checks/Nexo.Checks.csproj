@@ -9,7 +9,7 @@
 <ItemGroup><Compile Include="../Nexo.Support/InterfaceProbe.cs" Link="InterfaceProbe.cs"/></ItemGroup><ItemGroup><Compile Include="../Nexo.Support/SupportIntake.cs" Link="SupportIntake.cs"/><Compile Include="../Nexo.Support/DriverWorkflow.cs" Link="DriverWorkflow.cs"/><Compile Include="../Nexo.Support/OfficialDriverSource.cs" Link="OfficialDriverSource.cs"/><Compile Include="../Nexo.Support/ToolResultPresentation.cs" Link="ToolResultPresentation.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/HealthModels.cs" Link="HealthModels.cs"/><Compile Include="../Nexo.Support/OperationalStore.cs" Link="OperationalStore.cs"/><PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.33" /></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/HealthRules.cs" Link="HealthRules.cs"/></ItemGroup>
-<ItemGroup><Compile Include="../Nexo.Support/MonitoringEngine.cs" Link="MonitoringEngine.cs"/><Compile Include="../Nexo.Support/WindowsHealthSampler.cs" Link="WindowsHealthSampler.cs"/></ItemGroup>
+<ItemGroup><Compile Include="../Nexo.Support/MonitoringEngine.cs" Link="MonitoringEngine.cs"/><Compile Include="../Nexo.Support/WindowsHealthSampler.cs" Link="WindowsHealthSampler.cs"/><Compile Include="../Nexo.Support/HardwareSensors.cs" Link="HardwareSensors.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/ConnectivityProbe.cs" Link="ConnectivityProbe.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/WindowsEventCollector.cs" Link="WindowsEventCollector.cs"/><Compile Include="../Nexo.Support/EventAnalyzer.cs" Link="EventAnalyzer.cs"/><Compile Include="../Nexo.Support/DiagnosticEngine.cs" Link="DiagnosticEngine.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/HealthReportPresentation.cs" Link="HealthReportPresentation.cs"/></ItemGroup>
@@ -18,4 +18,5 @@
 <ItemGroup><Compile Include="../Nexo.Support/HealthSettings.cs" Link="HealthSettings.cs"/><Compile Include="../Nexo.Support/AppVersion.cs" Link="AppVersion.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/RestorePointProtection.cs" Link="RestorePointProtection.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/ServiceEvents.cs" Link="ServiceEvents.cs"/><Compile Include="../Nexo.Support/TurnFacts.cs" Link="TurnFacts.cs"/><Compile Include="../Nexo.Support/QuickReplies.cs" Link="QuickReplies.cs"/></ItemGroup>
+<ItemGroup><Compile Include="../Nexo.Support/NetworkRecovery.cs" Link="NetworkRecovery.cs"/></ItemGroup>
 </Project>

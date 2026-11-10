@@ -117,6 +117,7 @@ public sealed class WindowsHealthSampler : IHealthSampler
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception ex) { result.Warnings.Add("CPU, memória ou serviços indisponíveis: " + ex.Message); }
+        await HardwareSensors.Collect(result, (script, timeout, cancel) => SupportService.Powershell(script, cancel, timeout), token);
         try
         {
             var readings = await connectivityProbe.Run(settings, result.Connectivity == "local", gateways, token);

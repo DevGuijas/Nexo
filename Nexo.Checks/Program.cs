@@ -12,6 +12,7 @@ try
     await ConnectivityProbeChecks.Run(Assert);
     ProcessMemoryChecks.Run(Assert);
     DiagnosticChecks.Run(Assert);
+    HardwareSensorChecks.Run(Assert);
     DeviceDriverChecks.Run(Assert);
     EventCollectionChecks.Run(Assert);
     HealthAgentChecks.Run(Assert);
@@ -222,6 +223,8 @@ try
     await ServiceTransitionChecks.Run(Assert);
     ReleaseGuardChecks.Run(Assert);
     await ValidationFollowUpChecks.Run(store, admin, Assert);
+    await ValidationRetestChecks.Run(store, admin, Assert);
+    await NetworkRecoveryChecks.Run(Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
     await ObservationChecks.Run(store, admin, Assert);

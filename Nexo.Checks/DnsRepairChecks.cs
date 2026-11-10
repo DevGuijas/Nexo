@@ -214,6 +214,18 @@ internal static class DnsRepairChecks
                 "#73: " + label + ": mudança de rede sem restauração confirmada fica sem confirmação na linha de fatos (" + failedAnswer + ")");
         }
 
+        // #9: prazo esgotado com o executor ainda ativo (state=unknown). A resposta diz que o estado não foi confirmado e
+        // não fala em restauração automática.
+        var unknownResult = JsonSerializer.Serialize(new { success = false, reverted = false, state = "unknown", timedOut = true, processRunning = true, cancelled = false, phase = "applying",
+            error = "O executor de rede não chegou à confirmação em 300 segundos e ainda está em execução. A mudança pode ter sido aplicada parcialmente; o estado da rede não pôde ser confirmado e nenhuma restauração foi confirmada.", backup = "before.json", recoveryFolder = "op" });
+        var unknownTools = new FlowTools((name, _) => name switch { "get_network" => Network(), "set_dns" => unknownResult, _ => throw new Exception("Ferramenta inesperada: " + name) });
+        var unknownAnswer = await Execute(store, actor, Conversation(actor, Sites), unknownTools, new ModelSequence([Call("get_network", new { }), Call("set_dns", new { interface_index = 13, mode = "automatic" })]));
+        assert(unknownAnswer.StartsWith("A alteração de rede não foi concluída.", StringComparison.Ordinal)
+            && unknownAnswer.Contains("O estado da rede não pôde ser confirmado e nenhuma restauração foi confirmada. O caminho do backup está no cartão acima; consulte a rede antes de tentar outra mudança.", StringComparison.Ordinal)
+            && !unknownAnswer.Contains("A restauração automática não foi confirmada", StringComparison.Ordinal) && !unknownAnswer.Contains("restaurada e conferida", StringComparison.Ordinal)
+            && unknownAnswer.Contains("Sem confirmação do resultado: DNS automático da interface 13", StringComparison.Ordinal),
+            "#9: prazo esgotado com estado desconhecido não anuncia restauração automática (" + unknownAnswer + ")");
+
         foreach (var (label, request, server, reaches) in new[]
         {
             ("servidor escrito no pedido", "Os sites não abrem; configure o DNS 1.1.1.1 na Ethernet", "1.1.1.1", true),
