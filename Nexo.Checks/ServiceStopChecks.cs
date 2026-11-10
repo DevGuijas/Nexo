@@ -41,8 +41,9 @@ internal static class ServiceStopChecks
             "Linha de base do cenário 4: serviços de início atrasado parados com código 0 não geram alerta");
         check(Twice(Trigger("ServicoPorGatilho", 0)).Count == 0,
             "Serviço de início por gatilho parado com código 0 não gera alerta");
-        check(Twice(Plain("Spooler")).SequenceEqual(["service-stopped:Spooler"]),
-            "Spooler (Auto comum) parado com código 0 continua gerando alerta em 2 leituras");
+        // Desde a decisão da #57, parada normal sem execução estável observada antes é informativa (ServiceTransitionChecks).
+        check(Twice(Plain("Spooler")).Count == 0,
+            "Spooler (Auto comum) parado com código 0 em 2 leituras, sem execução observada antes, não gera alerta");
         check(Stopped(At(0, Plain("Spooler"))).Count == 0,
             "Spooler parado em uma só leitura ainda não gera alerta");
         check(Twice(Delayed("sppsvc", 1067)).SequenceEqual(["service-stopped:sppsvc"]),
@@ -114,8 +115,12 @@ internal static class ServiceStopChecks
 
         var spooler = new HealthFinding { Id = "service-stopped:Spooler:snapshot", Time = Now.AddSeconds(-600), Source = "rules" };
         OccurrenceStatus Spooler(params HealthSnapshot[] history) => HealthOccurrences.Classify([spooler], history, limits, Now)[0].Status;
-        check(Spooler(At(30, Plain("Spooler")), At(0, Plain("Spooler"))).State == OccurrenceState.Persistent,
-            "Ocorrência do Spooler (Auto comum) parado com código 0 continua persistente");
+        // Registro anterior à #57 não guarda a execução observada antes da parada: com saída normal, o estado é desconhecido.
+        var legacy = Spooler(At(30, Plain("Spooler")), At(0, Plain("Spooler")));
+        check(legacy.State == OccurrenceState.Unknown && legacy.Label.Contains("parado com saída normal, sem execução estável observada antes da parada", StringComparison.Ordinal),
+            "Ocorrência antiga do Spooler parado com código 0, sem prova de execução antes, fica com estado desconhecido e o motivo");
+        check(Spooler(At(30, Plain("Spooler", 1067)), At(0, Plain("Spooler", 1067))).State == OccurrenceState.Persistent,
+            "Ocorrência do Spooler parado com código 1067 continua persistente");
         // Aqui a regra já não está ativa e quem decide é o critério de resolução: código 0 sozinho não prova o fim.
         check(Spooler(At(30, Plain("Spooler")), At(0, Plain("Spooler") with { Status = "Running" })).State == OccurrenceState.Unknown,
             "Spooler parado com código 0 não conta como leitura sem a condição para resolver a ocorrência");
@@ -127,7 +132,7 @@ internal static class ServiceStopChecks
         static string Compact(string text) => Regex.Replace(text.ReplaceLineEndings("\n"), @"\s+", "");
         var script = Compact(WindowsHealthSampler.MetricsScript);
         bool Has(string fragment) => script.Contains(Compact(fragment), StringComparison.OrdinalIgnoreCase);
-        check(Has("DelayedAutoStart = $_.DelayedAutoStart") && Has("ExitCode = $_.ExitCode")
+        check(Has("DelayedAutoStart = $_.DelayedAutoStart") && Has("ExitCode = $_.ExitCode") && Has("ServiceSpecificExitCode = $_.ServiceSpecificExitCode")
             && Has("TriggerStart = (Get-NexoTriggerStart $_.Name)")
             && Has("'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\' + $Name + '\\TriggerInfo'")
             && Has(".Action -eq 1) { return $true }")
@@ -140,6 +145,7 @@ internal static class ServiceStopChecks
             {"Services":[
               {"Name":"sppsvc","State":"Stopped","DelayedAutoStart":true,"ExitCode":0,"TriggerStart":false},
               {"Name":"ServicoFalhou","State":"Stopped","DelayedAutoStart":false,"ExitCode":4294967295,"TriggerStart":null},
+              {"Name":"ServicoEspecifico","State":"Stopped","DelayedAutoStart":false,"ExitCode":1066,"ServiceSpecificExitCode":7,"TriggerStart":false},
               {"Name":"ServicoTexto","State":"Stopped","DelayedAutoStart":"True","ExitCode":"0","TriggerStart":1},
               {"Name":"Audiosrv","State":"Running"}]}
             """);
@@ -148,6 +154,7 @@ internal static class ServiceStopChecks
         check(read["sppsvc"] == Delayed("sppsvc", 0)
             && read["ServicoFalhou"] == new ServiceHealth("ServicoFalhou", "Stopped", "Automatic", false, null, 4294967295)
             && read["ServicoTexto"] == new ServiceHealth("ServicoTexto", "Stopped", "Automatic")
+            && read["ServicoEspecifico"] == new ServiceHealth("ServicoEspecifico", "Stopped", "Automatic", false, false, 1066, 7)
             && read["Audiosrv"] == new ServiceHealth("Audiosrv", "Running", "Automatic"),
             "Leitura da coleta aceita os campos novos, o código de saída sem sinal e ignora tipos inesperados");
     }
@@ -180,7 +187,7 @@ internal static class ServiceStopChecks
             using var meta = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "meta.json")));
             var reads = meta.RootElement.GetProperty("RegistryReads").EnumerateArray().Select(r => r.GetString() ?? "").Order(StringComparer.Ordinal).ToArray();
             check(meta.RootElement.GetProperty("ScriptExit").GetInt32() == 0 && reads.SequenceEqual(
-                    ["MapsBroker", "ServicoFalhou", "ServicoNegado", "ServicoPorGatilho", "ServicoSemPropriedade", "ServicoSoParada", "Spooler", "edgeupdate", "sppsvc"]),
+                    ["MapsBroker", "ServicoEspecifico", "ServicoFalhou", "ServicoNegado", "ServicoPorGatilho", "ServicoSemPropriedade", "ServicoSoParada", "Spooler", "edgeupdate", "sppsvc"]),
                 "Script executado: o registro só é consultado para serviços Auto fora de execução, um por serviço");
 
             using var output = JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "out.json")));
@@ -188,21 +195,22 @@ internal static class ServiceStopChecks
             WindowsHealthSampler.ReadServices(output.RootElement, sample);
             var read = sample.Services.ToDictionary(s => s.Name);
             check(output.RootElement.GetProperty("Cpu").GetDouble() == 12 && output.RootElement.GetProperty("TotalKb").GetInt64() == 33554432
-                && read.Count == 10 && !read.ContainsKey("ServicoManual")
-                && read["sppsvc"] == Delayed("sppsvc", 0) && read["Spooler"] == Plain("Spooler")
-                && read["ServicoPorGatilho"] == Trigger("ServicoPorGatilho", 0)
-                && read["ServicoSoParada"] == Plain("ServicoSoParada")
-                && read["ServicoNegado"] == new ServiceHealth("ServicoNegado", "Stopped", "Automatic", false, null, 0)
-                && read["ServicoFalhou"] == Delayed("ServicoFalhou", 1067)
+                && read.Count == 11 && !read.ContainsKey("ServicoManual")
+                && read["sppsvc"] == Delayed("sppsvc", 0) with { ServiceSpecificExitCode = 0 } && read["Spooler"] == Plain("Spooler") with { ServiceSpecificExitCode = 0 }
+                && read["ServicoEspecifico"] == Plain("ServicoEspecifico", 1066) with { ServiceSpecificExitCode = 7 }
+                && read["ServicoPorGatilho"] == Trigger("ServicoPorGatilho", 0) with { ServiceSpecificExitCode = 0 }
+                && read["ServicoSoParada"] == Plain("ServicoSoParada") with { ServiceSpecificExitCode = 0 }
+                && read["ServicoNegado"] == new ServiceHealth("ServicoNegado", "Stopped", "Automatic", false, null, 0, 0)
+                && read["ServicoFalhou"] == Delayed("ServicoFalhou", 1067) with { ServiceSpecificExitCode = 0 }
                 && read["ServicoSemPropriedade"] == new ServiceHealth("ServicoSemPropriedade", "Stopped", "Automatic", null, true, 0)
                 && read["Audiosrv"] == new ServiceHealth("Audiosrv", "Running", "Automatic"),
-                "Script executado: traz início atrasado, código de saída e gatilho; gatilho só de parada não conta e registro negado vira nulo sem derrubar a coleta");
+                "Script executado: traz início atrasado, códigos de saída e gatilho; gatilho só de parada não conta e registro negado vira nulo sem derrubar a coleta");
 
             var previous = new HealthSnapshot { Time = Now.AddSeconds(-30) };
             WindowsHealthSampler.ReadServices(output.RootElement, previous);
             check(Stopped(previous, sample).Order(StringComparer.Ordinal).SequenceEqual(
-                    ["service-stopped:ServicoFalhou", "service-stopped:ServicoNegado", "service-stopped:ServicoSoParada", "service-stopped:Spooler"]),
-                "Script executado: em 2 leituras alerta Spooler, código 1067, gatilho só de parada e gatilho ilegível, e não alerta a linha de base");
+                    ["service-stopped:ServicoEspecifico", "service-stopped:ServicoFalhou", "service-stopped:ServicoNegado"]),
+                "Script executado: em 2 leituras alerta código 1067, código específico e gatilho ilegível; sem execução observada antes, Spooler e gatilho só de parada ficam informativos");
         }
         finally { try { Directory.Delete(dir, true); } catch (IOException) { } }
     }
@@ -214,8 +222,9 @@ internal static class ServiceStopChecks
         # Ação de cada gatilho em TriggerInfo: 1 inicia o serviço, 2 para. Serviço ausente daqui não tem a chave.
         $global:Triggers=@{ 'ServicoPorGatilho'=@(2,1); 'ServicoSoParada'=@(2); 'ServicoSemPropriedade'=@(1); 'ServicoNegado'=@(1) }
         $global:RegistryReads=[System.Collections.Generic.List[string]]::new()
-        function global:FakeService($name, $state, $mode, $delayed, $exit) {
-            [pscustomobject]@{ Name=$name; State=$state; StartMode=$mode; DelayedAutoStart=$delayed; ExitCode=[uint32]$exit }
+        function global:FakeService {
+            param($name, $state, $mode, $delayed, $exit, $specific=0)
+            [pscustomobject]@{ Name=$name; State=$state; StartMode=$mode; DelayedAutoStart=$delayed; ExitCode=[uint32]$exit; ServiceSpecificExitCode=[uint32]$specific }
         }
         function global:Get-CimInstance {
             [CmdletBinding()] param([Parameter(Position=0)][string]$ClassName)
@@ -231,6 +240,7 @@ internal static class ServiceStopChecks
                     FakeService 'ServicoSoParada' 'Stopped' 'Auto' $false 0
                     FakeService 'ServicoNegado' 'Stopped' 'Auto' $false 0
                     FakeService 'ServicoFalhou' 'Stopped' 'Auto' $true 1067
+                    FakeService 'ServicoEspecifico' 'Stopped' 'Auto' $false 1066 7
                     [pscustomobject]@{ Name='ServicoSemPropriedade'; State='Stopped'; StartMode='Auto'; ExitCode=[uint32]0 }
                     FakeService 'Audiosrv' 'Running' 'Auto' $false 0
                     FakeService 'ServicoManual' 'Stopped' 'Manual' $false 0

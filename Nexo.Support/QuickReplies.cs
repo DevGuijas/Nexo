@@ -9,6 +9,8 @@ public static class QuickReplies
     // Conservative fallback for natural-language questions: never invent answers to open questions.
     public static string[] For(string message)
     {
+        // A linha de fatos do fim da resposta (#73) não é pergunta: as opções saem só do texto acima dela.
+        message = TurnFacts.Body(message);
         if (message.Count(c => c == '?') != 1) return [];
         var plain = new string(message.Normalize(NormalizationForm.FormD).Where(c => CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark).ToArray())
             .Normalize(NormalizationForm.FormC).ToLowerInvariant().Replace("**", "").Trim();

@@ -26,7 +26,10 @@ Start-Process -FilePath "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.
 $source=Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\Nexo.Support\NetworkTransaction.ps1') -Raw
 try {
     foreach($mode in @('static','dhcp')) {
-        $operationDir=Join-Path $testRoot $mode; New-Item -ItemType Directory -Path $operationDir | Out-Null
+        # The executor requires a GUID "N" operation id and writes its protected copy under %ProgramData% (#10).
+        $operationId=[guid]::NewGuid().ToString('N')
+        $operationDir=Join-Path $testRoot $operationId; New-Item -ItemType Directory -Path $operationDir | Out-Null
+        Set-Content -LiteralPath (Join-Path $operationDir 'mode.txt') -Value $mode
         # User authorizes both transitions before starting this opt-in test.
         Set-Content -LiteralPath (Join-Path $operationDir 'decision.txt') -Value 'keep'
         $requestJson=@{Action='set_ipv4';Index=$InterfaceIndex;ExpectedGuid=[string]$ExpectedGuid;Mode=$mode;Address=$(if($mode -eq 'static'){$lease[0].IPAddress}else{''});Prefix=$(if($mode -eq 'static'){$lease[0].PrefixLength}else{0});Gateway=$(if($mode -eq 'static'){$routes[0].NextHop}else{''});Servers=@()} | ConvertTo-Json

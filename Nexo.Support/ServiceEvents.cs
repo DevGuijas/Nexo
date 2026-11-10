@@ -24,7 +24,7 @@ public static class ServiceEvents
     internal const int FailureScan = 100;
     internal const int StateScan = 400;
     internal const int MaxMessageLength = 160;
-    private static readonly string[] Allowed = ["Audiosrv", "Spooler", "bthserv", "WlanSvc"];
+    internal static readonly string[] Allowed = ["Audiosrv", "Spooler", "bthserv", "WlanSvc"];
     private static readonly int[] FailureIds = [7000, 7001, 7009, 7011, 7022, 7023, 7024, 7031, 7034, 7038];
     // Nome interno de serviço: letras, dígitos e _ . $ -. Outra coisa no Binary não identifica o serviço.
     private const string ServiceKeyPattern = "^[A-Za-z0-9_.$-]+$";
@@ -123,8 +123,8 @@ public static class ServiceEvents
 
     public static string Unavailable(string service) => $"Não foi possível consultar os eventos do serviço {service}; a causa da parada não foi verificada.";
 
-    public static string RestartDetails(string service, string events) =>
-        "Reiniciar " + service + ". Áudio, impressão, Bluetooth ou Wi-Fi poderão ser interrompidos conforme o serviço escolhido.\n" + events;
+    public static string RestartDetails(string service, string events, string? state = null) =>
+        "Reiniciar " + service + ". Áudio, impressão, Bluetooth ou Wi-Fi poderão ser interrompidos conforme o serviço escolhido.\n" + (state == null ? "" : state + "\n") + events;
 
     // Resultado da ferramenta: a frase pronta e os eventos, com a mensagem limpa, entre aspas e curta.
     public static string Result(Reading reading, DateTimeOffset now) => WindowsTools.Ok(new

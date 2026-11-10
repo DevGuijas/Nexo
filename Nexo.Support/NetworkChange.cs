@@ -41,19 +41,29 @@ public static class NetworkChange
     public static Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token)
         => Apply(request, store, confirm, progress, token, NetworkRecovery.StartElevated);
 
-    public static async Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token, Func<string, IElevatedProcess> start, NetworkDeadlines? deadlines = null)
+    public static async Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token, Func<string, IElevatedProcess> start, NetworkDeadlines? deadlines = null, NetworkRecoveryTrust? trust = null)
     {
         deadlines ??= NetworkDeadlines.Default;
         token.ThrowIfCancellationRequested();
-        var dir = Path.Combine(store.Root, "operations", Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
+        var id = Guid.NewGuid().ToString("N");
+        var dir = Path.Combine(store.Root, "operations", id); Directory.CreateDirectory(dir);
         var parameters = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(request)));
         using var source = typeof(NetworkChange).Assembly.GetManifestResourceStream("Nexo.NetworkTransaction.ps1") ?? throw new IOException("Executor de rede ausente.");
         using var reader = new StreamReader(source);
-        var script = "$requestJson=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + parameters + "')); $operationDir=" + WindowsTools.Quote(dir) + ";\n" + await reader.ReadToEndAsync(token);
+        var script = "$requestJson=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + parameters + "')); $operationId=" + WindowsTools.Quote(id) + "; $operationDir=" + WindowsTools.Quote(dir) + ";\n" + await reader.ReadToEndAsync(token);
         token.ThrowIfCancellationRequested();
         var record = new NetworkTransactionRecord(request.Action, request.Index, request.ExpectedGuid, DateTimeOffset.UtcNow);
         NetworkRecovery.WriteRecord(dir, record);
-        using var process = start(script);
+        IElevatedProcess process;
+        // UAC recusado (Win32 1223) ou falha ao iniciar: nada foi alterado, e a abertura seguinte não pode mostrar isso
+        // como "alteração de rede que não terminou".
+        try { process = start(script); }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or InvalidOperationException)
+        {
+            try { NetworkRecovery.MarkNotStarted(dir, ex.Message); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            throw;
+        }
+        using var started = process;
         NetworkRecovery.WriteRecord(dir, record with { ProcessId = process.Id });
         var ready = Path.Combine(dir, "applied.json"); var final = Path.Combine(dir, "result.json"); var decision = Path.Combine(dir, "decision.txt");
         var backup = Path.Combine(dir, "before.json");
@@ -94,7 +104,7 @@ public static class NetworkChange
         if (File.Exists(final)) return await File.ReadAllTextAsync(final, CancellationToken.None);
         await process.WaitForExitAsync(CancellationToken.None);
         if (File.Exists(final)) return await File.ReadAllTextAsync(final, CancellationToken.None);
-        var interrupted = NetworkRecovery.Inspect(dir, DateTimeOffset.UtcNow, _ => false, exited: true);
+        var interrupted = NetworkRecovery.Inspect(dir, DateTimeOffset.UtcNow, _ => false, exited: true, trust: trust);
         if (interrupted == null) return JsonSerializer.Serialize(new { success = false, reverted = false, error = "Executor encerrado sem resultado. Verifique a rede; estado não confirmado.", backup, recoveryFolder = dir });
         if (interrupted.Resolution == null) progress.Report("O executor de rede terminou sem resultado. Oferecendo a restauração da configuração anterior…");
         var recovery = await NetworkRecovery.Recover(interrupted, confirm, start, NetworkRecovery.DefaultTimeout, CancellationToken.None);
