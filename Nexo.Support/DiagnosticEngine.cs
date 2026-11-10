@@ -7,8 +7,9 @@ public static class DiagnosticEngine
         var report = new DiagnosticReport { Created = now };
         report.Findings.AddRange(ruleFindings);
         report.Findings.AddRange(EventAnalyzer.Analyze(events.Events));
-        if (snapshot.CpuTemperatureC == null) report.Limitations.Add("Sensor de temperatura da CPU indisponível.");
-        if (snapshot.StorageHealth == "unavailable") report.Limitations.Add("Saúde SMART do armazenamento indisponível.");
+        if (snapshot.CpuTemperatureC == null) report.Limitations.Add("Sensor de temperatura da CPU indisponível." + (snapshot.CpuTemperature?.Detail is { Length: > 0 } reason ? " " + reason : ""));
+        if (snapshot.StorageHealth == "unavailable") report.Limitations.Add("Estado dos discos físicos indisponível." + (snapshot.Storage?.Detail is { Length: > 0 } detail ? " " + detail : ""));
+        else report.Limitations.Add(HealthReportPresentation.StorageScope);
         if (snapshot.CollectionStatus != "complete") report.Limitations.Add("A coleta de métricas foi parcial.");
         report.Limitations.AddRange(snapshot.Warnings);
         report.Limitations.AddRange(events.Warnings);

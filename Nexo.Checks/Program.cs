@@ -12,6 +12,7 @@ try
     await ConnectivityProbeChecks.Run(Assert);
     ProcessMemoryChecks.Run(Assert);
     DiagnosticChecks.Run(Assert);
+    HardwareSensorChecks.Run(Assert);
     DeviceDriverChecks.Run(Assert);
     EventCollectionChecks.Run(Assert);
     HealthAgentChecks.Run(Assert);

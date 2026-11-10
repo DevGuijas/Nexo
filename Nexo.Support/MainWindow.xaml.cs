@@ -278,9 +278,22 @@ public partial class MainWindow : Window
                 metrics.Children.Add(MetricTile("Memória", MetricPercent(latest.MemoryUsedPercent), "health"));
                 metrics.Children.Add(MetricTile("Rede local", latest.Connectivity switch { "local" => "Interface ativa", "none" => "Sem interface", _ => "Indisponível" }, "network"));
                 overview.Children.Add(metrics);
-                var storageStatus = latest.StorageHealth == "unavailable" ? "indisponível" : latest.StorageHealth;
                 var collectionStatus = latest.CollectionStatus switch { "complete" => "completa", "partial" => "parcial", _ => latest.CollectionStatus };
-                overview.Children.Add(Text("Temperatura: " + (latest.CpuTemperatureC?.ToString("F0") ?? "indisponível") + "  ·  SMART: " + storageStatus + "  ·  Coleta: " + collectionStatus, 12, "Secondary"));
+                overview.Children.Add(Text("Coleta: " + collectionStatus, 12, "Secondary"));
+                var temperature = Text("Temperatura da CPU: " + HealthReportPresentation.DescribeTemperature(latest), 12, latest.CpuTemperature?.State is "error" or "invalid" ? "Warning" : "Secondary");
+                temperature.Margin = new Thickness(0, 6, 0, 0); overview.Children.Add(temperature);
+                var storage = Text("Discos físicos: " + HealthReportPresentation.DescribeStorage(latest), 12, latest.StorageHealth is "warning" or "unhealthy" ? "Warning" : "Secondary");
+                storage.Margin = new Thickness(0, 6, 0, 0); overview.Children.Add(storage);
+                foreach (var physical in latest.Storage?.Disks.Take(6) ?? [])
+                {
+                    var physicalText = Text(HealthReportPresentation.DescribeDisk(physical), 12, physical.State is "warning" or "unhealthy" ? "Warning" : "Secondary");
+                    physicalText.Margin = new Thickness(12, 4, 0, 0); overview.Children.Add(physicalText);
+                }
+                if (latest.Storage is { Total: > 0 })
+                {
+                    var scope = Text(HealthReportPresentation.StorageScope, 11, "Secondary");
+                    scope.Margin = new Thickness(0, 4, 0, 0); overview.Children.Add(scope);
+                }
                 foreach (var (label, reading) in new[]
                 {
                     ("Gateway", latest.GatewayProbe), ("DNS", latest.DnsProbe), ("Destino externo", latest.ExternalProbe)
@@ -735,7 +748,7 @@ public partial class MainWindow : Window
             catch (Exception ex) { connectionStatus.Text = "Não foi possível verificar: " + ex.Message; }
         })); panel.Children.Add(connectionStatus); PageContent.Children.Add(Card(panel));
         var healthPanel = new StackPanel(); var monitorHeading = SectionHeading("health", "Monitoramento local"); monitorHeading.Margin = new Thickness(0, 0, 0, 8); healthPanel.Children.Add(monitorHeading);
-        healthPanel.Children.Add(Text("A coleta funciona enquanto a janela está aberta. Temperatura e SMART podem permanecer indisponíveis.", 12, "Secondary"));
+        healthPanel.Children.Add(Text("A coleta funciona enquanto a janela está aberta. A temperatura da CPU só aparece quando o Libre Hardware Monitor está em execução e publica o sensor por WMI. O estado dos discos é o informado pelo Windows, não um SMART completo.", 12, "Secondary"));
         var interval = Field(healthPanel, "Intervalo entre amostras (segundos: 10–3600)", healthSettings.IntervalSeconds.ToString());
         var cpu = Field(healthPanel, "Alerta de CPU persistente (%)", healthSettings.CpuHighPercent.ToString("F0"));
         var disk = Field(healthPanel, "Alerta de espaço livre abaixo de (%)", healthSettings.DiskLowFreePercent.ToString("F0"));
@@ -847,8 +860,13 @@ public partial class MainWindow : Window
                 GatewayProbe = new NetworkProbeReading("no_response", "192.0.2.1"),
                 DnsProbe = new NetworkProbeReading("ok", "example.com"),
                 ExternalProbe = new NetworkProbeReading("unexpected", "example.com"),
+                CpuTemperatureC = 52, CpuTemperature = new TemperatureReading("read", 52, "CPU Package (/intelcpu/0/temperature/0)", HardwareSensors.TemperatureSource, DateTimeOffset.UtcNow),
+                StorageHealth = "warning", Storage = new StorageReading("warning", HardwareSensors.StorageSource, DateTimeOffset.UtcNow, 2,
+                    [new PhysicalDiskReading("1", "Disco de exemplo HDD", "HDD", "SATA", "Warning", ["Predictive Failure"], "warning"), new PhysicalDiskReading("0", "Disco de exemplo NVMe", "SSD", "NVMe", "Healthy", ["OK"], "healthy")]),
                 CollectionStatus = "complete", Disks = [new DiskHealth("C:\\", 80, 200)] });
             ShowPage("health");
+            if (!new[] { "Temperatura da CPU: 52 °C", "Discos físicos: atenção informada pelo Windows", "Disco 1 Disco de exemplo HDD", "não é uma leitura SMART completa" }.All(label => Descendants<TextBlock>(PageContent).Any(text => text.Text.Contains(label))))
+                throw new InvalidOperationException("O painel não mostra temperatura, estado dos discos e o limite da leitura do Windows.");
             if (!new[] { "Gateway:", "DNS:", "Destino externo:" }.All(label => Descendants<TextBlock>(PageContent).Any(text => text.Text.Contains(label))))
                 throw new InvalidOperationException("O painel não separa gateway, DNS e destino externo.");
             await Capture("nexo-health-data.png");
