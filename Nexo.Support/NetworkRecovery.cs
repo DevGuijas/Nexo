@@ -398,7 +398,7 @@ public static class NetworkRecovery
     internal static async Task WriteTextAtomic(string path, string text)
     {
         var temporary = path + ".tmp";
-        await File.WriteAllTextAsync(temporary, text, CancellationToken.None);
+        await File.WriteAllTextAsync(temporary, text, CancellationToken.None).ConfigureAwait(false);
         File.Move(temporary, path, true);
     }
 

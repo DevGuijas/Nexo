@@ -290,6 +290,7 @@ internal static class NetworkRecoveryChecks
 
             await CheckResultsInProtectedFolder(check, store, trust, protectedRoot, startup, untrusted);
             CheckUserCreatedFolderOnWindows(check, root);
+            CheckWritesOnInterfaceThread(check, trust, protectedRoot, startup);
 
             // O executor tira o caminho protegido da API do Windows e nunca reescreve uma ACL.
             using (var resource = typeof(NetworkRecovery).Assembly.GetManifestResourceStream("Nexo.NetworkTransaction.ps1")!)
@@ -451,6 +452,39 @@ internal static class NetworkRecoveryChecks
         var reason = NetworkRecovery.UntrustedReasonOnWindows(userCreated, ["result.json"]);
         check(reason != null && !NetworkRecovery.TrustedFileOnWindows(userCreated, "result.json"),
             "Rede: resultado numa pasta criada sem elevação é recusado pela conferência real de ACL (" + reason + ")");
+    }
+
+    private static void CheckWritesOnInterfaceThread(Action<bool, string> check, NetworkRecoveryTrust trust, string protectedRoot, string startup)
+    {
+        var recorded = Path.Combine(startup, "operations", System.Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(recorded);
+        var recordWritten = CompletesOnInterfaceThread(() => NetworkRecovery.WriteRecord(recorded, new NetworkTransactionRecord("set_dns", 7, Guid, DateTimeOffset.UtcNow)));
+        check(recordWritten && File.Exists(Path.Combine(recorded, NetworkRecovery.RecordFile)),
+            "Rede: registro da transação é gravado na thread da interface sem esperar por ela (sem travar depois da autorização)");
+
+        var pending = Transaction(startup, protectedRoot, 1);
+        File.WriteAllText(Path.Combine(Secured(protectedRoot, pending), "result.json"), "{\"success\":false,\"reverted\":true}");
+        var copied = CompletesOnInterfaceThread(() => NetworkRecovery.Inspect(pending, DateTimeOffset.UtcNow, _ => false, trust: trust));
+        check(copied && File.Exists(Path.Combine(pending, "result.json")),
+            "Rede: cópia do resultado protegido na abertura do Nexo roda na thread da interface sem travar");
+    }
+
+    private static bool CompletesOnInterfaceThread(Action action)
+    {
+        var completed = false;
+        var thread = new Thread(() =>
+        {
+            SynchronizationContext.SetSynchronizationContext(new UnpumpedContext());
+            action();
+            completed = true;
+        }) { IsBackground = true };
+        thread.Start();
+        return thread.Join(TimeSpan.FromSeconds(10)) && completed;
+    }
+
+    private sealed class UnpumpedContext : SynchronizationContext
+    {
+        public override void Post(SendOrPostCallback callback, object? state) { }
     }
 
     private sealed record Outcome(JsonElement Result, string Directory, int RecoveryStarts, string RecoveryScript, string ForwardScript = "", bool Killed = false);
