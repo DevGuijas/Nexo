@@ -9,6 +9,13 @@ function ConvertTo-NexoBytes($content) {
     return , [System.Text.Encoding]::UTF8.GetBytes([string]$content)
 }
 
+# Leitura HTTP real: um código de erro (404 no HEAD do pacote, por exemplo) volta como Status, sem exceção; falha de
+# conexão continua sendo exceção. O Content é byte[] para tipos binários e texto para JSON/texto.
+function Invoke-NexoHttp([string]$Uri, [string]$Method) {
+    $r = Invoke-WebRequest -Uri $Uri -Method $Method -UseBasicParsing -SkipHttpErrorCheck -TimeoutSec 60
+    return @{ Status = [int]$r.StatusCode; Content = $r.Content }
+}
+
 # Lê um endereço da origem. Erro de rede vira falha explícita; o código HTTP volta para quem chamou decidir.
 function Invoke-NexoPublishedRequest([scriptblock]$Fetch, [string]$Uri, [string]$Method) {
     try { $response = & $Fetch $Uri $Method }
@@ -26,11 +33,7 @@ function Assert-NexoNewRelease {
     param(
         [Parameter(Mandatory)][string]$Version,
         [Parameter(Mandatory)][string]$PublicKeyPath,
-        [scriptblock]$Fetch = {
-            param($Uri, $Method)
-            $r = Invoke-WebRequest -Uri $Uri -Method $Method -UseBasicParsing -SkipHttpErrorCheck
-            @{ Status = [int]$r.StatusCode; Content = $r.Content }
-        }
+        [scriptblock]$Fetch = ${function:Invoke-NexoHttp}
     )
     if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Versão do projeto inválida: $Version." }
     $manifestUri = $NexoPublishedOrigin + 'latest.json'

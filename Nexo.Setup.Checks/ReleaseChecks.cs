@@ -48,14 +48,23 @@ internal static class ReleaseChecks
         // A última publicada é a primeira entrada anterior com data real (AAAA-MM-DD que existe no calendário).
         var published = headings.Skip(1).Where(h => IsDate(h.Date)).Select(h => h.Version).FirstOrDefault();
         check(published != null && System.Version.Parse(app) > System.Version.Parse(published), "A versão do aplicativo é maior que a última publicada e não a sobrescreve");
-        var start = published == null ? -1 : changelog.IndexOf("## [" + published + "]", StringComparison.Ordinal);
-        var section = start < 0 ? "" : changelog[start..];
-        check(published != null && Regex.IsMatch(section, @"\| `Nexo\.exe`[^|]*\| \d+ \| `[0-9A-F]{64}` \|") && Regex.IsMatch(section, @"\| `releases/" + Regex.Escape(published) + @"/nexo-app\.zip` \| \d+ \| `[0-9A-F]{64}` \|"),
-            "A última versão publicada registra tamanho e SHA-256 do Nexo.exe e do pacote");
+        check(published != null && Registered(changelog, published), "A última versão publicada registra tamanho e SHA-256 do Nexo.exe e do pacote");
+        // Ao trocar "não publicada" pela data, a mesma entrada precisa trazer a tabela preenchida com o que o script imprimiu.
+        check(current.Version == null || !IsDate(current.Date) || Registered(changelog, current.Version),
+            "A versão atual, quando já tem data de publicação, registra tamanho e SHA-256 do Nexo.exe e do pacote");
     }
 
-    // Um CHANGELOG sem versão publicada, com data impossível ou com a versão atual abaixo da publicada reprova a regra
-    // correspondente em vez de lançar exceção (antes, sem versão publicada, IndexOf devolvia -1 e o recorte quebrava).
+    // Tabela de artefatos da entrada da versão: só o trecho entre o título dela e o próximo título "## [".
+    private static bool Registered(string changelog, string version)
+    {
+        var start = changelog.IndexOf("## [" + version + "]", StringComparison.Ordinal);
+        if (start < 0) return false;
+        var next = changelog.IndexOf("\n## [", start + 1, StringComparison.Ordinal);
+        var section = next < 0 ? changelog[start..] : changelog[start..next];
+        return Regex.IsMatch(section, @"\| `Nexo\.exe`[^|]*\| \d+ \| `[0-9A-F]{64}` \|")
+            && Regex.IsMatch(section, @"\| `releases/" + Regex.Escape(version) + @"/nexo-app\.zip` \| \d+ \| `[0-9A-F]{64}` \|");
+    }
+
     private static void ChangelogFailures(Action<bool, string> check)
     {
         const string Hashes = "| `Nexo.exe` | 1 | `" + "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF" + "` |\n";
@@ -73,6 +82,10 @@ internal static class ReleaseChecks
         var current = Failed("## [1.7.0] — 2026-02-30\n\n## [1.6.3] — 2026-10-22\n\n" + Hashes + Package("1.6.3"));
         var lower = Failed("## [1.7.0] — não publicada\n\n## [1.8.0] — 2026-10-22\n\n" + Hashes + Package("1.8.0"));
         var unregistered = Failed("## [1.7.0] — não publicada\n\n## [1.6.3] — 2026-10-22\n\nSem hashes.\n");
+        var datedEmpty = Failed("## [1.7.0] — 2026-11-10\n\n| `Nexo.exe` | | |\n| `releases/1.7.0/nexo-app.zip` | | |\n\n## [1.6.3] — 2026-10-22\n\n" + Hashes + Package("1.6.3"));
+        // Só o Nexo.exe da 1.7.0 ficou sem hash: a linha preenchida da 1.6.3, logo abaixo, não pode contar por ela.
+        var datedHalf = Failed("## [1.7.0] — 2026-11-10\n\n| `Nexo.exe` | | |\n" + Package("1.7.0") + "\n## [1.6.3] — 2026-10-22\n\n" + Hashes + Package("1.6.3"));
+        var datedRegistered = Failed("## [1.7.0] — 2026-11-10\n\n" + Hashes + Package("1.7.0") + "\n## [1.6.3] — 2026-10-22\n\n" + Hashes + Package("1.6.3"));
         const string Newer = "A versão do aplicativo é maior que a última publicada e não a sobrescreve";
         const string Registered = "A última versão publicada registra tamanho e SHA-256 do Nexo.exe e do pacote";
         check(valid.Length == 0, "CHANGELOG montado com a 1.6.3 publicada e registrada passa nas regras de versão");
@@ -82,6 +95,9 @@ internal static class ReleaseChecks
             "Data de publicação inexistente no calendário (2026-02-30) na versão atual reprova");
         check(lower.SequenceEqual([Newer]) && unregistered.SequenceEqual([Registered]),
             "Versão atual abaixo da publicada, ou publicada sem hashes, reprova só a regra correspondente");
+        check(datedEmpty.SequenceEqual(["A versão atual, quando já tem data de publicação, registra tamanho e SHA-256 do Nexo.exe e do pacote"])
+            && datedHalf.SequenceEqual(["A versão atual, quando já tem data de publicação, registra tamanho e SHA-256 do Nexo.exe e do pacote"]) && datedRegistered.Length == 0,
+            "Versão atual com data e tabela vazia reprova; com a tabela preenchida passa, sem usar os hashes da versão anterior");
     }
 
     private static bool IsDate(string text) => DateOnly.TryParseExact(text, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _);
