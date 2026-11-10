@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using Nexo.Support;
 
@@ -25,6 +27,10 @@ internal static class HardwareSensorChecks
                 }
                 'invalid' { [pscustomobject]@{ Name='CPU Package'; Identifier='/intelcpu/0/temperature/0'; Value=[single]0 } }
                 'gpu-only' { [pscustomobject]@{ Name='GPU Core'; Identifier='/gpu-nvidia/0/temperature/0'; Value=[single]70 } }
+                'many-cores' {
+                    foreach ($i in 0..39) { [pscustomobject]@{ Name='Core #'+$i; Identifier='/amdcpu/0/temperature/'+$i; Value=[single]60 } }
+                    [pscustomobject]@{ Name='Core (Tctl/Tdie)'; Identifier='/amdcpu/0/temperature/40'; Value=[single]64.5 }
+                }
             }
         }
         function Get-PhysicalDisk {
@@ -39,6 +45,7 @@ internal static class HardwareSensorChecks
                 'alert-beyond-limit' { foreach ($i in 0..19) { Disk $i 'Healthy' 'OK' }; Disk 20 'Unhealthy' 'Lost Communication' }
                 'healthy' { Disk 0 'Healthy' 'OK'; Disk 1 'Healthy' 'OK' }
                 'unknown-status' { Disk 0 'Healthy' 'Starting' }
+                'hang' { Start-Sleep -Seconds 60 }
             }
         }
         """;
@@ -47,7 +54,8 @@ internal static class HardwareSensorChecks
     {
         Parsing(check);
         Presentation(check);
-        if (OperatingSystem.IsWindows()) ScriptRuns(check);
+        Independent(check);
+        if (Shell() != null) ScriptRuns(check);
         if (Environment.GetEnvironmentVariable("NEXO_LIVE_SAMPLE") == "1") Live(check);
     }
 
@@ -107,8 +115,8 @@ internal static class HardwareSensorChecks
     private static void Presentation(Action<bool, string> check)
     {
         var read = Parse("""{"Time":"2026-11-08T15:00:00Z","Temperature":{"Available":true,"Sensors":[{"Name":"CPU Package","Identifier":"/intelcpu/0/temperature/0","Value":55}]},"Storage":{"Total":2,"Disks":[{"Device":"0","Name":"NVMe","MediaType":"SSD","BusType":"NVMe","Health":"Healthy","Operational":"OK"},{"Device":"1","Name":"HDD","MediaType":"HDD","BusType":"SATA","Health":"Warning","Operational":["Predictive Failure"]}]}}""");
-        var temperature = HealthReportPresentation.DescribeTemperature(read);
-        var storage = HealthReportPresentation.DescribeStorage(read);
+        var temperature = HealthReportPresentation.DescribeTemperature(read, now: Now);
+        var storage = HealthReportPresentation.DescribeStorage(read, now: Now);
         check(temperature.StartsWith("55 °C, sensor CPU Package") && temperature.Contains("Libre Hardware Monitor") && temperature.Contains("lida às"),
             "Sensores: painel mostra valor, sensor, origem e horário da temperatura");
         check(storage.StartsWith("atenção informada pelo Windows, 2 de 2 discos físicos") && storage.Contains("Get-PhysicalDisk") && storage.Contains("lido às")
@@ -116,6 +124,13 @@ internal static class HardwareSensorChecks
             "Sensores: painel mostra resumo, origem, horário e cada disco com o estado informado pelo Windows");
         check(!storage.Contains("SMART") && HealthReportPresentation.StorageScope.Contains("não é uma leitura SMART completa"),
             "Sensores: estado do Windows não é chamado de SMART completo");
+        var day = Now.ToLocalTime().ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        var later = Now.AddDays(2);
+        check(HealthReportPresentation.DescribeTemperature(read, now: later).Contains(", lida em " + day + " às ") && HealthReportPresentation.DescribeStorage(read, now: later).Contains(", lido em " + day + " às ")
+            && !temperature.Contains(" em " + day) && !storage.Contains(" em " + day),
+            "Sensores: leitura de outro dia mostra a data junto do horário; a de hoje, só o horário");
+        check(HealthReportPresentation.DescribeDisk(read.Storage!.Disks[0], true).StartsWith("Disco 1 “HDD” (HDD, SATA)") && HealthReportPresentation.DescribeDisk(read.Storage.Disks[0]).StartsWith("Disco 1 HDD ("),
+            "Sensores: no relatório ao modelo o nome do disco vai entre aspas; no painel, sem aspas");
 
         var absent = Parse("""{"Temperature":{"Available":false,"Error":"HRESULT 0x8004100e"},"Storage":{"Total":0,"Disks":[]}}""");
         check(HealthReportPresentation.DescribeTemperature(absent).StartsWith("indisponível, Libre Hardware Monitor não está em execução") && !HealthReportPresentation.DescribeTemperature(absent).Contains("°C")
@@ -138,11 +153,73 @@ internal static class HardwareSensorChecks
             read.Time = DateTimeOffset.UtcNow;
             store.SaveSnapshot(read);
             var text = HealthReportPresentation.FromStore(store);
-            check(text.Contains("Temperatura da CPU: 55 °C, sensor CPU Package") && text.Contains("Discos físicos: atenção informada pelo Windows") && text.Contains("Disco 1 HDD")
+            check(text.Contains("Temperatura da CPU: 55 °C, sensor CPU Package") && text.Contains("Discos físicos: atenção informada pelo Windows") && text.Contains("Disco 1 “HDD”")
                 && text.Contains("não é uma leitura SMART completa"),
                 "Sensores: relatório de saúde para o assistente traz temperatura, discos e o limite da fonte");
+            var lines = text.Split('\n').Select(l => l.TrimEnd('\r')).ToList();
+            var scope = lines.IndexOf(HealthReportPresentation.PhysicalDiskScope);
+            check(scope > 0 && scope == lines.FindLastIndex(l => l.StartsWith("Disco ")) + 1 && HealthReportPresentation.PhysicalDiskScope.Contains("não estão ligados às letras de unidade"),
+                "Sensores: relatório avisa, logo depois dos discos físicos, que eles não estão ligados às letras de unidade (#93)");
+            var noDisks = new HealthSnapshot { Time = DateTimeOffset.UtcNow.AddSeconds(1), Storage = new StorageReading("unavailable", HardwareSensors.StorageSource, DateTimeOffset.UtcNow, 0, [], "O Windows não listou discos físicos."), StorageHealth = "unavailable" };
+            store.SaveSnapshot(noDisks);
+            check(!HealthReportPresentation.FromStore(store).Contains(HealthReportPresentation.PhysicalDiskScope),
+                "Sensores: sem disco físico listado, o aviso das letras de unidade não aparece");
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
+    }
+
+    private const string TemperatureJson = """{"Time":"2026-11-08T15:00:00Z","Temperature":{"Available":true,"Sensors":[{"Name":"CPU Package","Identifier":"/intelcpu/0/temperature/0","Value":55}]}}""";
+    private const string StorageJson = """{"Time":"2026-11-08T15:00:00Z","Storage":{"Total":1,"Disks":[{"Device":"0","Name":"NVMe","Health":"Healthy","Operational":"OK"}]}}""";
+
+    // Temperatura e discos com prazo e falha próprios (#19): no PC há AMD-RAID, e um Get-PhysicalDisk travado não pode
+    // apagar a temperatura. Roda sem PowerShell, com executores falsos.
+    private static void Independent(Action<bool, string> check)
+    {
+        var timeouts = new Dictionary<string, int>();
+        HealthSnapshot Collect(Func<string, Task<string>> temperature, Func<string, Task<string>> storage, CancellationToken token = default)
+        {
+            var snapshot = new HealthSnapshot { Time = Now };
+            var task = HardwareSensors.Collect(snapshot, (script, timeout, _) =>
+            {
+                var isTemperature = script == HardwareSensors.TemperatureScript;
+                timeouts[isTemperature ? "temperature" : "storage"] = timeout;
+                return isTemperature ? temperature(script) : storage(script);
+            }, token, () => Now);
+            if (!task.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException("Collect não terminou: as consultas não foram iniciadas juntas.");
+            return snapshot;
+        }
+
+        var stuckDisks = Collect(_ => Task.FromResult(TemperatureJson), _ => Task.FromException<string>(new TimeoutException("O Windows demorou mais que o esperado. Tente novamente.")));
+        check(stuckDisks.CpuTemperatureC == 55 && stuckDisks.CpuTemperature!.State == "read" && stuckDisks.StorageHealth == "unavailable"
+            && stuckDisks.Storage!.Detail == $"O Windows não informou os discos físicos em {HardwareSensors.StorageTimeoutSeconds} s." && stuckDisks.Storage.Time == Now
+            && stuckDisks.Warnings.SequenceEqual(["Estado dos discos: " + stuckDisks.Storage.Detail]),
+            "Sensores independentes: disco travado fica indisponível pelo prazo e a temperatura lida continua no registro");
+        check(timeouts["temperature"] == HardwareSensors.TemperatureTimeoutSeconds && timeouts["storage"] == HardwareSensors.StorageTimeoutSeconds
+            && HardwareSensors.TemperatureTimeoutSeconds + HardwareSensors.StorageTimeoutSeconds > 0 && HardwareSensors.StorageTimeoutSeconds <= 20,
+            "Sensores independentes: cada consulta recebe o próprio prazo");
+
+        var brokenWmi = Collect(_ => Task.FromException<string>(new InvalidOperationException("O Windows não concluiu a operação. WMI travou")), _ => Task.FromResult(StorageJson));
+        check(brokenWmi.CpuTemperature!.State == "error" && brokenWmi.CpuTemperature.Detail.Contains("WMI travou") && brokenWmi.CpuTemperatureC == null
+            && brokenWmi.StorageHealth == "healthy" && brokenWmi.Warnings.Count == 1,
+            "Sensores independentes: falha da temperatura não apaga o estado dos discos");
+
+        var stuckTemperature = Collect(_ => Task.FromException<string>(new TimeoutException("x")), _ => Task.FromResult("não é json"));
+        check(stuckTemperature.CpuTemperature!.Detail == $"O Libre Hardware Monitor não respondeu em {HardwareSensors.TemperatureTimeoutSeconds} s." && stuckTemperature.StorageHealth == "unavailable"
+            && stuckTemperature.Storage!.Detail.StartsWith("A consulta dos discos físicos falhou:") && stuckTemperature.Warnings.Count == 2,
+            "Sensores independentes: prazo da temperatura e resposta inválida dos discos são registrados cada um com o seu motivo");
+
+        // As duas começam antes de qualquer uma terminar: a temperatura só responde depois que a consulta dos discos começou.
+        var storageStarted = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var parallel = Collect(async _ => { await storageStarted.Task; return TemperatureJson; }, _ => { storageStarted.TrySetResult(""); return Task.FromResult(StorageJson); });
+        check(parallel.CpuTemperatureC == 55 && parallel.StorageHealth == "healthy",
+            "Sensores independentes: temperatura e discos são consultados ao mesmo tempo, não um depois do outro");
+
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        var propagated = false;
+        try { Collect(_ => Task.FromCanceled<string>(cancelled.Token), _ => Task.FromResult(StorageJson), cancelled.Token); }
+        catch (AggregateException ex) when (ex.InnerException is OperationCanceledException) { propagated = true; }
+        check(propagated, "Sensores independentes: cancelamento pedido continua interrompendo a coleta, sem virar leitura indisponível");
     }
 
     private static void ScriptRuns(Action<bool, string> check)
@@ -167,27 +244,55 @@ internal static class HardwareSensorChecks
         var gpuOnly = Run("gpu-only", "empty");
         check(gpuOnly.CpuTemperature!.State == "no_sensor" && gpuOnly.StorageHealth == "unavailable",
             "Script de sensores executado: sensor só de GPU não vira temperatura da CPU e lista vazia fica indisponível");
+        var manyCores = Run("many-cores", "healthy");
+        check(manyCores.CpuTemperatureC == 64.5 && manyCores.CpuTemperature!.Sensor == "Core (Tctl/Tdie) (/amdcpu/0/temperature/40)",
+            "Script de sensores executado: com mais de 32 sensores de núcleo, o de pacote ou die continua lido (#19)");
+        // Get-PhysicalDisk preso de verdade: o processo dos discos é encerrado pelo prazo (aqui encurtado) e a temperatura fica.
+        var watch = Stopwatch.StartNew();
+        var hung = Run("intel", "hang", 4);
+        check(hung.CpuTemperatureC == 55.5 && hung.StorageHealth == "unavailable" && hung.Storage!.Detail.Contains($"em {HardwareSensors.StorageTimeoutSeconds} s") && watch.Elapsed < TimeSpan.FromSeconds(30),
+            "Script de sensores executado: Get-PhysicalDisk travado é encerrado pelo prazo sem apagar a temperatura");
     }
 
     private static void Live(Action<bool, string> check)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-        using var document = JsonDocument.Parse(SupportService.Powershell(HardwareSensors.Script, timeout.Token, 20).GetAwaiter().GetResult());
         var live = new HealthSnapshot();
-        HardwareSensors.Read(document.RootElement, live, DateTimeOffset.UtcNow);
+        var watch = Stopwatch.StartNew();
+        HardwareSensors.Collect(live, (script, seconds, token) => SupportService.Powershell(script, token, seconds), timeout.Token).GetAwaiter().GetResult();
+        Console.WriteLine($"SENSORES: coleta em {watch.ElapsedMilliseconds} ms");
         check(live.CpuTemperature != null && live.Storage != null, "Consulta real de sensores retorna leitura ou indisponibilidade explícita");
         Console.WriteLine("SENSORES: temperatura " + HealthReportPresentation.DescribeTemperature(live) + "; discos " + HealthReportPresentation.DescribeStorage(live)
             + string.Concat(live.Storage!.Disks.Select(d => "; " + HealthReportPresentation.DescribeDisk(d))));
     }
 
-    private static HealthSnapshot Run(string temperatureScenario, string storageScenario)
+    // No Windows usa powershell.exe, como no CI; fora dele, só com NEXO_CHECKS_PWSH.
+    private static string? Shell() => OperatingSystem.IsWindows() ? "powershell.exe" : Environment.GetEnvironmentVariable("NEXO_CHECKS_PWSH") is { Length: > 0 } pwsh ? pwsh : null;
+
+    // Executa os dois scripts reais pela coleta de verdade, com os cmdlets falsos na frente. Sem prazo informado, cada
+    // processo tem 60 s, folga para o início a frio do PowerShell no CI; com prazo, simula o do Nexo de forma mais curta.
+    private static HealthSnapshot Run(string temperatureScenario, string storageScenario, int? seconds = null)
     {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-        var script = $"$temperatureScenario='{temperatureScenario}'; $storageScenario='{storageScenario}'\n" + Fakes + "\n" + HardwareSensors.Script;
-        using var document = JsonDocument.Parse(SupportService.Powershell(script, timeout.Token, 50).GetAwaiter().GetResult());
         var snapshot = new HealthSnapshot();
-        HardwareSensors.Read(document.RootElement, snapshot, Now);
+        HardwareSensors.Collect(snapshot, (script, _, _) =>
+            Execute($"$temperatureScenario='{temperatureScenario}'; $storageScenario='{storageScenario}'\n" + Fakes + "\n" + script, seconds ?? 60),
+            CancellationToken.None, () => Now).GetAwaiter().GetResult();
         return snapshot;
+    }
+
+    private static async Task<string> Execute(string script, int seconds)
+    {
+        var start = new ProcessStartInfo(Shell()!) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8 };
+        foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(SupportService.PowershellCommand(script))) })
+            start.ArgumentList.Add(argument);
+        using var process = Process.Start(start)!;
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch (OperationCanceledException) { try { process.Kill(true); } catch (InvalidOperationException) { } throw new TimeoutException("O Windows demorou mais que o esperado. Tente novamente."); }
+        if (process.ExitCode != 0) throw new InvalidOperationException("O Windows não concluiu a operação. " + (await stderr).Trim());
+        return await stdout;
     }
 
     private static HealthSnapshot Parse(string json)

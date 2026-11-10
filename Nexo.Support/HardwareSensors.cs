@@ -17,15 +17,25 @@ public static class HardwareSensors
     private static readonly string[] AlertStatuses = ["Degraded", "Stressed", "Predictive Failure", "Error", "Non-Recoverable Error", "No Contact", "Lost Communication", "Aborted", "Supporting Entity in Error", "Failed Media", "Split", "Stale Metadata", "IO Error", "Unrecognized Metadata", "Transient Error", "Not Usable"];
     private static readonly string[] NormalStatuses = ["OK", "Online", "In Service"];
 
-    internal const string Script = """
+    // Temperatura e discos são consultas separadas, cada uma no próprio processo e com o próprio prazo (#19): um
+    // Get-PhysicalDisk travado (RAID, USB) não pode apagar uma temperatura válida, nem o contrário.
+    public const int TemperatureTimeoutSeconds = 10;
+    public const int StorageTimeoutSeconds = 15;
+    // Só os sensores de pacote ou die entram, antes do corte de 32: numa CPU com muitos núcleos, "CPU Package" vinha
+    // depois do 32º sensor de núcleo e a leitura virava no_sensor.
+    internal const string TemperatureScript = """
         $time=(Get-Date).ToUniversalTime().ToString('o')
         $temperature=[pscustomobject]@{ Available=$false; Error=''; Sensors=@() }
         try{
             $temperature.Sensors=@(Get-CimInstance -Namespace 'root/LibreHardwareMonitor' -ClassName 'Sensor' -Filter "SensorType='Temperature'" -ErrorAction Stop |
-                Where-Object { [string]$_.Identifier -match '^/(intelcpu|amdcpu)/\d+/temperature/\d+$' } |
+                Where-Object { [string]$_.Identifier -match '^/(intelcpu|amdcpu)/\d+/temperature/\d+$' -and [string]$_.Name -in @('CPU Package','Package','Core (Tdie)','Core (Tctl/Tdie)') } |
                 Select-Object -First 32 @{N='Name';E={[string]$_.Name}},@{N='Identifier';E={[string]$_.Identifier}},@{N='Value';E={$_.Value}})
             $temperature.Available=$true
         }catch{ $temperature.Error=[string]$_.FullyQualifiedErrorId+' '+$_.Exception.Message }
+        [pscustomobject]@{ Time=$time; Temperature=$temperature } | ConvertTo-Json -Compress -Depth 5
+        """;
+    internal const string StorageScript = """
+        $time=(Get-Date).ToUniversalTime().ToString('o')
         $storage=[pscustomobject]@{ Error=''; Total=0; Disks=@() }
         try{
             $all=@(Get-PhysicalDisk -ErrorAction Stop)
@@ -34,22 +44,91 @@ public static class HardwareSensors
                 Sort-Object @{E={ switch([string]$_.HealthStatus){ 'Unhealthy'{0} '2'{0} 'Warning'{1} '1'{1} 'Healthy'{3} '0'{3} default{2} } }},@{E={[string]$_.DeviceId}} |
                 Select-Object -First 16 @{N='Device';E={[string]$_.DeviceId}},@{N='Name';E={[string]$_.FriendlyName}},@{N='MediaType';E={[string]$_.MediaType}},@{N='BusType';E={[string]$_.BusType}},@{N='Health';E={[string]$_.HealthStatus}},@{N='Operational';E={(@($_.OperationalStatus | ForEach-Object { [string]$_ }) -join ',')}})
         }catch{ $storage.Error=$_.Exception.Message }
-        [pscustomobject]@{ Time=$time; Temperature=$temperature; Storage=$storage } | ConvertTo-Json -Compress -Depth 5
+        [pscustomobject]@{ Time=$time; Storage=$storage } | ConvertTo-Json -Compress -Depth 5
         """;
+
+    /// <summary>
+    /// Lê temperatura e discos em paralelo, cada um com o próprio prazo e a própria falha (#19). O resultado é aplicado
+    /// depois das duas consultas, na mesma ordem, para a lista de avisos não ser escrita por duas tarefas ao mesmo tempo.
+    /// </summary>
+    public static async Task Collect(HealthSnapshot snapshot, Func<string, int, CancellationToken, Task<string>> run, CancellationToken token, Func<DateTimeOffset>? clock = null)
+    {
+        var now = clock ?? (() => DateTimeOffset.UtcNow);
+        var temperature = Attempt(() => run(TemperatureScript, TemperatureTimeoutSeconds, token), token);
+        var storage = Attempt(() => run(StorageScript, StorageTimeoutSeconds, token), token);
+        var (temperatureOutput, temperatureError) = await temperature;
+        var (storageOutput, storageError) = await storage;
+        try
+        {
+            if (temperatureError != null) throw temperatureError;
+            using var document = JsonDocument.Parse(temperatureOutput!);
+            ReadTemperature(document.RootElement, snapshot, now());
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !token.IsCancellationRequested)
+        {
+            TemperatureUnavailable(snapshot, now(), ex is TimeoutException ? $"O Libre Hardware Monitor não respondeu em {TemperatureTimeoutSeconds} s." : "A consulta de temperatura falhou: " + Limit(ex.Message));
+        }
+        try
+        {
+            if (storageError != null) throw storageError;
+            using var document = JsonDocument.Parse(storageOutput!);
+            ReadStorage(document.RootElement, snapshot, now());
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !token.IsCancellationRequested)
+        {
+            StorageUnavailable(snapshot, now(), ex is TimeoutException ? $"O Windows não informou os discos físicos em {StorageTimeoutSeconds} s." : "A consulta dos discos físicos falhou: " + Limit(ex.Message));
+        }
+    }
+
+    // Espera a consulta sem deixar a falha de uma interromper a outra; o cancelamento pedido pelo usuário continua subindo.
+    private static async Task<(string? Output, Exception? Error)> Attempt(Func<Task<string>> start, CancellationToken token)
+    {
+        try { return (await start(), null); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+        catch (Exception ex) { return (null, ex); }
+    }
 
     public static void Read(JsonElement root, HealthSnapshot snapshot, DateTimeOffset fallbackTime)
     {
-        var time = root.TryGetProperty("Time", out var t) && t.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(t.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed) ? parsed : fallbackTime;
+        ReadTemperature(root, snapshot, fallbackTime);
+        ReadStorage(root, snapshot, fallbackTime);
+    }
+
+    private static DateTimeOffset TimeOf(JsonElement root, DateTimeOffset fallbackTime) =>
+        root.TryGetProperty("Time", out var t) && t.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(t.GetString(), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsed) ? parsed : fallbackTime;
+
+    public static void ReadTemperature(JsonElement root, HealthSnapshot snapshot, DateTimeOffset fallbackTime)
+    {
+        var time = TimeOf(root, fallbackTime);
         snapshot.CpuTemperature = root.TryGetProperty("Temperature", out var temperature) && temperature.ValueKind == JsonValueKind.Object
             ? ReadTemperature(temperature, time)
             : new TemperatureReading("error", Source: TemperatureSource, Time: time, Detail: "Resposta sem dados de temperatura.");
         snapshot.CpuTemperatureC = snapshot.CpuTemperature.State == "read" ? snapshot.CpuTemperature.Celsius : null;
         if (snapshot.CpuTemperature.State is "error" or "invalid") snapshot.Warnings.Add("Temperatura da CPU: " + snapshot.CpuTemperature.Detail);
+    }
+
+    public static void ReadStorage(JsonElement root, HealthSnapshot snapshot, DateTimeOffset fallbackTime)
+    {
+        var time = TimeOf(root, fallbackTime);
         snapshot.Storage = root.TryGetProperty("Storage", out var storage) && storage.ValueKind == JsonValueKind.Object
             ? ReadStorage(storage, time)
             : new StorageReading("unavailable", StorageSource, time, 0, [], "Resposta sem dados dos discos.");
         snapshot.StorageHealth = snapshot.Storage.State;
         if (snapshot.Storage.Detail.Length > 0 && snapshot.Storage.State is "unavailable" or "unknown") snapshot.Warnings.Add("Estado dos discos: " + snapshot.Storage.Detail);
+    }
+
+    public static void TemperatureUnavailable(HealthSnapshot snapshot, DateTimeOffset time, string detail)
+    {
+        snapshot.CpuTemperature = new TemperatureReading("error", Source: TemperatureSource, Time: time, Detail: detail);
+        snapshot.CpuTemperatureC = null;
+        snapshot.Warnings.Add("Temperatura da CPU: " + detail);
+    }
+
+    public static void StorageUnavailable(HealthSnapshot snapshot, DateTimeOffset time, string detail)
+    {
+        snapshot.Storage = new StorageReading("unavailable", StorageSource, time, 0, [], detail);
+        snapshot.StorageHealth = "unavailable";
+        snapshot.Warnings.Add("Estado dos discos: " + detail);
     }
 
     public static void Unavailable(HealthSnapshot snapshot, DateTimeOffset time, string detail)
