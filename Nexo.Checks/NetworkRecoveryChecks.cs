@@ -32,6 +32,26 @@ internal static class NetworkRecoveryChecks
                 && Text(beforeBackup.Result.GetProperty("recovery"), "message").Contains("não chegou a alterar"),
                 "Rede: executor encerrado antes do backup registra que nada foi alterado, sem oferecer restauração");
 
+            // #97: executor que sai sem resultado e sem pasta protegida, com a cadeia NexoSupport recusada.
+            prompts.Clear();
+            const string HostileReason = @"C:\ProgramData\NexoSupport: é link (reparse point)";
+            var hostileTrust = trust with { ChainProblem = _ => HostileReason };
+            var hostile = await Apply(store, hostileTrust, async (dir, _) => await Task.Yield(), prompts, true);
+            var hostileError = Text(hostile.Result, "error");
+            check(Flag(hostile.Result, "protectedFolderRefused") && Bool(hostile.Result, "changed") == false && prompts.Count == 0 && hostile.RecoveryStarts == 0
+                && hostileError.StartsWith("A troca de rede foi recusada porque a pasta %ProgramData%\\NexoSupport") && hostileError.Contains(HostileReason)
+                && hostileError.Contains("A rede não foi alterada") && hostileError.Contains("Rede e recuperação") && hostileError.Contains("takeown") && hostileError.Contains("icacls") && hostileError.Contains("rmdir"),
+                "Rede: pasta NexoSupport não confiável explica a recusa, diz que a rede não mudou e aponta os comandos do README (#97)");
+            prompts.Clear();
+            var trustedChain = await Apply(store, trust with { ChainProblem = _ => null }, async (dir, _) => await Task.Yield(), prompts, true);
+            check(!Flag(trustedChain.Result, "protectedFolderRefused") && Text(trustedChain.Result, "error").StartsWith("Executor encerrado sem resultado."),
+                "Rede: com a pasta NexoSupport confiável, a mensagem de executor encerrado continua a mesma (#97)");
+            prompts.Clear();
+            var backedUp = await Apply(store, hostileTrust, async (dir, _) => await Backup(dir, protectedRoot, Before), prompts, true);
+            check(!Flag(backedUp.Result, "protectedFolderRefused") && !Text(backedUp.Result, "error").Contains("foi recusada porque a pasta") && backedUp.RecoveryStarts == 1,
+                "Rede: executor que chegou a gravar o backup protegido não é explicado como pasta recusada (#97)");
+            if (OperatingSystem.IsWindows()) await HostileChainOnWindows(check, root);
+
             prompts.Clear();
             var applying = await Apply(store, trust, async (dir, _) => await Backup(dir, protectedRoot, Before), prompts, true);
             check(prompts.SequenceEqual(["Restaurar configuração de rede anterior?"]) && applying.RecoveryStarts == 1 && Flag(applying.Result, "reverted") && Bool(applying.Result, "changed") == true,
@@ -510,6 +530,35 @@ internal static class NetworkRecoveryChecks
     }
 
     private sealed record Outcome(JsonElement Result, string Directory, int RecoveryStarts, string RecoveryScript, string ForwardScript = "", bool Killed = false);
+
+    // #97: a conferência real da cadeia %ProgramData%\NexoSupport\operations, com pastas criadas sem elevação e com junção.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static async Task HostileChainOnWindows(Action<bool, string> check, string root)
+    {
+        var chainRoot = Path.Combine(root, "chain-" + System.Guid.NewGuid().ToString("N"));
+        var missing = Path.Combine(chainRoot, "ausente", "NexoSupport", "operations");
+        check(NetworkRecovery.ProtectedChainProblemOnWindows(missing) == null, "Rede: cadeia NexoSupport ainda inexistente não é recusada; o executor a cria (#97)");
+
+        var plain = Path.Combine(chainRoot, "comum", "NexoSupport", "operations");
+        Directory.CreateDirectory(plain);
+        var plainReason = NetworkRecovery.ProtectedChainProblemOnWindows(plain);
+        check(plainReason != null && plainReason.StartsWith(Path.Combine(chainRoot, "comum", "NexoSupport") + ":") && (plainReason.Contains("herda permissões") || plainReason.Contains("dono não confiável") || plainReason.Contains("ACE de escrita")),
+            "Rede: pasta NexoSupport criada sem elevação é recusada com o motivo (" + plainReason + ") (#97)");
+
+        var target = Path.Combine(chainRoot, "destino");
+        Directory.CreateDirectory(Path.Combine(target, "operations"));
+        var linkParent = Path.Combine(chainRoot, "link");
+        Directory.CreateDirectory(linkParent);
+        var junction = Path.Combine(linkParent, "NexoSupport");
+        using (var mklink = Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), "/d /c mklink /J \"" + junction + "\" \"" + target + "\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true })!)
+        {
+            await mklink.StandardOutput.ReadToEndAsync(); await mklink.StandardError.ReadToEndAsync(); await mklink.WaitForExitAsync();
+        }
+        var linkReason = NetworkRecovery.ProtectedChainProblemOnWindows(Path.Combine(junction, "operations"));
+        check(linkReason == junction + ": é link (reparse point)", "Rede: pasta NexoSupport que é junção é recusada como link (#97)");
+        Directory.Delete(junction);
+        check(Directory.Exists(Path.Combine(target, "operations")), "Rede: o teste da junção não apaga o destino");
+    }
 
     private static async Task<Outcome> Apply(Store store, NetworkRecoveryTrust trust, Func<string, CancellationToken, Task> executor, List<string> prompts, bool restore, bool keep = false, bool recoveryWrites = true, NetworkDeadlines? deadlines = null, CancellationToken token = default, bool unanswered = false)
     {

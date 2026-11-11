@@ -27,10 +27,14 @@ public sealed record NetworkRecoveryTrust(string ProtectedRoot, Func<string, boo
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexoSupport", "operations"),
         directory => OperatingSystem.IsWindows() && NetworkRecovery.TrustedOnWindows(directory))
     {
-        TrustedFile = (directory, file) => OperatingSystem.IsWindows() && NetworkRecovery.TrustedFileOnWindows(directory, file)
+        TrustedFile = (directory, file) => OperatingSystem.IsWindows() && NetworkRecovery.TrustedFileOnWindows(directory, file),
+        ChainProblem = root => OperatingSystem.IsWindows() ? NetworkRecovery.ProtectedChainProblemOnWindows(root) : null
     };
 
     public Func<string, string, bool>? TrustedFile { get; init; }
+
+    /// <summary>Motivo pelo qual o executor elevado recusaria a cadeia NexoSupport\operations que já existe (#97), ou null.</summary>
+    public Func<string, string?>? ChainProblem { get; init; }
 
     public bool TrustsFile(string directory, string file) => TrustedFile?.Invoke(directory, file) ?? Trusted(directory);
 }
@@ -331,21 +335,56 @@ public static class NetworkRecovery
             foreach (var item in items)
             {
                 if (!item.Exists) return item.FullName + ": não existe";
-                if (item.Attributes.HasFlag(FileAttributes.ReparsePoint)) return item.FullName + ": é link (reparse point)";
-                FileSystemSecurity security = item is DirectoryInfo folder ? folder.GetAccessControl() : ((FileInfo)item).GetAccessControl();
-                var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
-                if (owner == null || !TrustedSid(owner)) return item.FullName + ": dono não confiável (" + Account(owner) + ")";
-                // As pastas precisam estar com a herança desligada; os arquivos são criados já com o descritor explícito.
-                if (item is DirectoryInfo && !security.AreAccessRulesProtected) return item.FullName + ": pasta herda permissões (dono " + Account(owner) + ")";
-                foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
-                    if (rule.AccessControlType == AccessControlType.Allow && !rule.PropagationFlags.HasFlag(PropagationFlags.InheritOnly)
-                        && ((long)rule.FileSystemRights & WriteRights) != 0 && !(rule.IdentityReference is SecurityIdentifier sid && TrustedSid(sid)))
-                        return item.FullName + ": ACE de escrita para " + Account(rule.IdentityReference as SecurityIdentifier) + " (" + rule.FileSystemRights + (rule.IsInherited ? ", herdada" : "") + "; dono " + Account(owner) + ")";
+                if (UntrustedItem(item) is { } reason) return reason;
             }
             return null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or SystemException) { return directory + ": não foi possível ler a ACL (" + ex.GetType().Name + ": " + ex.Message + ")"; }
     }
+
+    /// <summary>
+    /// #97: confere só as pastas da cadeia (NexoSupport e operations) que já existem, com as mesmas regras da cópia
+    /// protegida. Pasta que não existe é criada pelo executor e não é problema; a primeira ausente encerra a conferência.
+    /// </summary>
+    [SupportedOSPlatform("windows")]
+    internal static string? ProtectedChainProblemOnWindows(string protectedRoot)
+    {
+        var operations = Path.TrimEndingDirectorySeparator(protectedRoot);
+        try
+        {
+            foreach (var folder in new[] { Path.GetDirectoryName(operations)!, operations })
+            {
+                var item = new DirectoryInfo(folder);
+                if (!item.Exists) return null;
+                if (UntrustedItem(item) is { } reason) return reason;
+            }
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or SystemException) { return operations + ": não foi possível ler a ACL (" + ex.GetType().Name + ": " + ex.Message + ")"; }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static string? UntrustedItem(FileSystemInfo item)
+    {
+        if (item.Attributes.HasFlag(FileAttributes.ReparsePoint)) return item.FullName + ": é link (reparse point)";
+        FileSystemSecurity security = item is DirectoryInfo folder ? folder.GetAccessControl() : ((FileInfo)item).GetAccessControl();
+        var owner = security.GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+        if (owner == null || !TrustedSid(owner)) return item.FullName + ": dono não confiável (" + Account(owner) + ")";
+        // As pastas precisam estar com a herança desligada; os arquivos são criados já com o descritor explícito.
+        if (item is DirectoryInfo && !security.AreAccessRulesProtected) return item.FullName + ": pasta herda permissões (dono " + Account(owner) + ")";
+        foreach (FileSystemAccessRule rule in security.GetAccessRules(true, true, typeof(SecurityIdentifier)))
+            if (rule.AccessControlType == AccessControlType.Allow && !rule.PropagationFlags.HasFlag(PropagationFlags.InheritOnly)
+                && ((long)rule.FileSystemRights & WriteRights) != 0 && !(rule.IdentityReference is SecurityIdentifier sid && TrustedSid(sid)))
+                return item.FullName + ": ACE de escrita para " + Account(rule.IdentityReference as SecurityIdentifier) + " (" + rule.FileSystemRights + (rule.IsInherited ? ", herdada" : "") + "; dono " + Account(owner) + ")";
+        return null;
+    }
+
+    /// <summary>Resposta da troca de rede recusada por causa da pasta protegida (#97): causa, rede intacta e como liberar.</summary>
+    internal static string HostileChainMessage(string reason) =>
+        "A troca de rede foi recusada porque a pasta %ProgramData%\\NexoSupport, onde o Nexo guarda o backup protegido, tem dono ou permissões inesperados, ou é um link (" + reason + "). "
+        + "A rede não foi alterada, e novas tentativas vão falhar do mesmo jeito enquanto a pasta estiver assim. "
+        + "Para liberar, siga o README do Nexo, seção \"Rede e recuperação\": num prompt como administrador, rode takeown /F \"%ProgramData%\\NexoSupport\" /A /R /D S (em Windows em inglês, /D Y), "
+        + "icacls \"%ProgramData%\\NexoSupport\" /reset /T e rmdir /S /Q \"%ProgramData%\\NexoSupport\". Se ela for um link (junção), use só rmdir \"%ProgramData%\\NexoSupport\", sem /S, para não apagar o destino.";
 
     [SupportedOSPlatform("windows")]
     private static string Account(SecurityIdentifier? sid)

@@ -67,6 +67,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - Transação de rede interrompida (executor elevado encerrado no meio) é detectada na hora ou na próxima abertura e, se a mudança ficou pendente, o Nexo oferece restaurar a configuração anterior, com autorização e UAC. O backup confiável fica numa cópia protegida em `%ProgramData%`, e o que vem da pasta do usuário não é aplicado (#10, PR #76).
 - Prazo total de 5 minutos para a transação de rede, por fase; esgotado o prazo, o estado fica desconhecido e a resposta diz que nenhuma restauração foi confirmada, sem encerrar nem disputar com o executor ainda ativo (#9, PR #78).
 - O executor de rede elevado grava o estado aplicado e o resultado só na pasta protegida; nada é gravado com elevação em `%LOCALAPPDATA%`, e a troca de IP/DNS não trava mais antes do UAC (#95, PR #96).
+- Quando o executor de rede sai sem resultado e sem pasta protegida, o Nexo confere a cadeia `%ProgramData%\NexoSupport`. Se ela tem dono ou permissões inesperados ou é um link, a resposta diz que a troca foi recusada por causa dela, que a rede não foi alterada, e traz os comandos `takeown`, `icacls` e `rmdir` do README; com a pasta confiável, a mensagem continua a mesma (#97).
 
 ### Interface e repositório
 
