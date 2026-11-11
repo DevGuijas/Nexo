@@ -102,7 +102,7 @@ internal static class PcValidationChecks
         assert(line.Contains("Pelo monitor de saúde: “NexoMemTeste-toca” (PID 1732) subiu de 2072 MB para 7192 MB"),
             "#88 linha dos MB: o processo citado por um começo do nome (\"NexoMemTeste\" para \"NexoMemTeste-toca\") ganha a leitura do monitor");
         var figure = evidence.WithMemoryFigures("O NexoMemTeste usa cerca de 7 GB agora.");
-        var shortName = evidence.WithMemoryFigures("O Nexo está aberto.");
+        var shortName = evidence.WithMemoryFigures("O Nexo está aberto. Feche o NexoM.exe se não usar.");
         // "chrome" é o nome inteiro de outro processo atual, não o começo do "chromedriver".
         var browsers = Observed(HealthReportPresentation.CurrentHeader + "\n" + Holding("chrome", 4120, 500, 900) + Holding("chromedriver", 77, 300, 800)).WithMemoryFigures("O chrome está aberto há horas.");
         assert(!figure.Contains("Pelo monitor") && !shortName.Contains("Pelo monitor") && browsers.Contains("“chrome” (PID 4120)") && !browsers.Contains("chromedriver"),
@@ -148,9 +148,11 @@ internal static class PcValidationChecks
         var asked = Observed(MemoryReport(status, 57));
         asked.UserRequest = "o NexoMemTeste-toca está deixando o pc lento?";
         var unknown = Observed(MemoryReport(status, null));
+        // Outra ocorrência de memória atual (o chrome persistindo) mantém a memória como possível causa.
+        var other = Observed(MemoryReport(status, 57) + HealthReportPresentation.CurrentHeader + "\n" + Holding("chrome", 4120, 500, 900));
         assert(high.ValidateStatement(Blamed, false) == null && persisting.ValidateStatement(Blamed, false) == null
-            && asked.ValidateStatement(Blamed, false) == null && unknown.ValidateStatement(Blamed, false) == null,
-            "#71 patamar estável: com a RAM no limite, com o alerta persistindo, com o processo citado pelo usuário ou sem a leitura de memória, nada é recusado");
+            && asked.ValidateStatement(Blamed, false) == null && unknown.ValidateStatement(Blamed, false) == null && other.ValidateStatement(Blamed, false) == null,
+            "#71 patamar estável: com a RAM no limite, com o alerta persistindo, com outra ocorrência de memória ativa, com o processo citado pelo usuário ou sem a leitura de memória, nada é recusado");
         var repeated = evidence.RepeatedGuidance(InvestigationEvidence.StablePlateauReason, Blamed);
         assert(repeated.Contains("“Isso pode estar contribuindo para a lentidão.”") && !repeated.Contains("Recomendo salvar"),
             "#71 patamar estável: na 2ª recusa o controle cita só a frase que culpa o processo");
