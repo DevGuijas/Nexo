@@ -244,6 +244,13 @@ internal static class NetworkRecoveryChecks
             check(staleItem.Before == null && staleItem.Resolution != null && NetworkRecovery.Explain(staleItem.Resolution).Contains("mais de 7 dias") && recentItem.Resolution == null && recentItem.Before != null,
                 "Rede: transação interrompida há mais de 7 dias não tem a restauração oferecida");
 
+            // Mais de 7 dias e a pasta protegida já apagada pela limpeza: não se afirma que a rede ficou como estava.
+            var cleaned = Transaction(startup, protectedRoot, 1, created: DateTimeOffset.UtcNow.AddDays(-8), secure: false);
+            var cleanedItem = NetworkRecovery.Inspect(cleaned, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
+            check(cleanedItem.Before == null && cleanedItem.Resolution != null && NetworkRecovery.Explain(cleanedItem.Resolution).Contains("mais de 7 dias")
+                && NetworkRecovery.Explain(cleanedItem.Resolution).Contains("confira a rede") && !NetworkRecovery.Explain(cleanedItem.Resolution).Contains("não chegou a alterar"),
+                "Rede: transação com mais de 7 dias sem a pasta protegida pede para conferir a rede, sem afirmar que nada mudou");
+
             // Pasta que não é id de operação, ou caminho com "..": ignorada, sem gravar nada.
             var named = Path.Combine(startup, "operations", "nao-e-guid");
             Directory.CreateDirectory(named);
@@ -428,6 +435,21 @@ internal static class NetworkRecoveryChecks
         check(!Flag(distrusted.Result, "success") && Text(distrusted.Result, "state") == "unknown" && Text(distrusted.Result, "error").Contains("permissões inesperados")
             && Text(distrusted.Result, "backup").EndsWith("before.json") && !File.Exists(Path.Combine(distrusted.Directory, "result.json")),
             "Rede: resultado em pasta protegida com dono ou permissões inesperados é ignorado e fica como estado desconhecido");
+
+        // applied.json numa pasta protegida não confiável não abre "Manter a configuração de rede?": a espera termina no
+        // prazo com estado desconhecido e a restauração é pedida ao executor.
+        prompts.Clear();
+        var quick = new NetworkDeadlines(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        var distrustedApplied = await Apply(store, trust, async (dir, stop) =>
+        {
+            untrusted.Add(Path.GetFileName(dir));
+            await Backup(dir, protectedRoot, Before);
+            await Write(Secured(protectedRoot, dir), "applied.json", "{\"Dns\":\"203.0.113.66\"}");
+            await WaitFor(Path.Combine(dir, "decision.txt"), stop);
+            await Task.Delay(Timeout.Infinite, stop);
+        }, prompts, true, keep: true, deadlines: quick);
+        check(prompts.Count == 0 && !Flag(distrustedApplied.Result, "success") && Text(distrustedApplied.Result, "state") == "unknown" && Decision(distrustedApplied.Directory) == "rollback",
+            "Rede: estado aplicado em pasta protegida não confiável não abre a confirmação e termina como estado desconhecido");
 
         var finished = Transaction(startup, protectedRoot, 1);
         File.WriteAllText(Path.Combine(Secured(protectedRoot, finished), "result.json"), "{\"success\":true,\"message\":\"Configuração aplicada, estado consultado e permanência confirmada pelo usuário.\"}");
