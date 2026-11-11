@@ -10,11 +10,11 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 
 ### Antes de publicar
 
-- [ ] **Prioridade alta:** o executor de rede elevado deixa de gravar resultados na pasta do usuário (`%LOCALAPPDATA%`) e passa a gravar só na pasta protegida em `%ProgramData%` (#95).
-- [ ] Corrigir as respostas do modelo fora do lugar vistas na validação da `11fa078` (#93).
+- [x] **Prioridade alta:** o executor de rede elevado deixa de gravar resultados na pasta do usuário (`%LOCALAPPDATA%`) e passa a gravar só na pasta protegida em `%ProgramData%` (#95, PR #96, validado no PC com UAC real em 10/11/2026).
+- [ ] Investigar com o log do Ollama ativo as etapas expiradas na 1ª chamada ao modelo, antes de mudar o limite de 3 minutos (#93, item 4).
 - [ ] Validar as sete falhas controladas em VM Windows (#8).
 - [ ] Autenticar a decisão de manter uma mudança de rede elevada (#11) e alinhar o prazo da instalação NVIDIA ao supervisor (#12).
-- [ ] Validar no PC: a recuperação e o prazo da rede com ACL e UAC reais (#9, #10); o custo da coleta de sensores, com e sem o Libre Hardware Monitor, e os discos atrás do AMD-RAID (#19); o patamar estável de memória com o NexoMemTeste-toca (#71); e o disco e a memória na resposta (#88).
+- [ ] Validar no PC: a recuperação e o prazo da rede com ACL e UAC reais (#9, #10); o custo da coleta de sensores, com e sem o Libre Hardware Monitor, e os discos atrás do AMD-RAID (#19); o patamar estável de memória com o NexoMemTeste-toca (#71); o disco e a memória na resposta (#88); e as respostas da #93 (recusa repetida, processo desconhecido e a letra da unidade com um VHDX e um pendrive ao mesmo tempo).
 - [ ] Trocar "não publicada" pela data de publicação, gerar os pacotes e registrar abaixo o commit e os hashes impressos pelo script.
 
 ### Saúde do computador
@@ -44,6 +44,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - Ocorrência encerrada (resolvida ou histórica) não é apresentada como problema atual; ocorrências estáveis e informativas vão ao modelo marcadas como tal (#88).
 - Os MB do processo que segura memória e, com alerta de pouco espaço ativo, a indicação de Configurações > Sistema > Armazenamento entram na resposta pelo próprio Nexo; a oferta de achar os maiores arquivos é recusada, e um alerta de disco já encerrado não vira pedido para liberar espaço (#88, PR #94).
 - Rótulos de progresso para todas as ferramentas, e "ferramenta inexistente pedida pelo modelo" quando ele pede uma que não existe (#84, #88).
+- Na 2ª recusa da resposta pelo mesmo motivo, o Nexo diz ao modelo qual frase remover e, quando houver, qual processo não citar; a resposta que sugere que um processo é malicioso sem evidência é recusada; e o inventário de armazenamento liga cada letra de unidade ao disco que a contém, com o VHD/VHDX marcado como disco virtual (#93).
 
 ### Recuperação e drivers
 
@@ -63,6 +64,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - DNS fixo com DHCP apontado, teste TCP por IP e preferência por DNS automático.
 - Transação de rede interrompida (executor elevado encerrado no meio) é detectada na hora ou na próxima abertura e, se a mudança ficou pendente, o Nexo oferece restaurar a configuração anterior, com autorização e UAC. O backup confiável fica numa cópia protegida em `%ProgramData%`, e o que vem da pasta do usuário não é aplicado (#10, PR #76).
 - Prazo total de 5 minutos para a transação de rede, por fase; esgotado o prazo, o estado fica desconhecido e a resposta diz que nenhuma restauração foi confirmada, sem encerrar nem disputar com o executor ainda ativo (#9, PR #78).
+- O executor de rede elevado grava o estado aplicado e o resultado só na pasta protegida; nada é gravado com elevação em `%LOCALAPPDATA%`, e a troca de IP/DNS não trava mais antes do UAC (#95, PR #96).
 
 ### Interface e repositório
 
