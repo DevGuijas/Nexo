@@ -105,6 +105,66 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         "printer" => "$_.PNPClass -in 'Printer','PrintQueue'",
         _ => throw new InvalidOperationException("Categoria de hardware não permitida.")
     };
+    // Letra de unidade → disco que a contém (#93). Na validação da 11fa078, o T: era um VHDX montado e o modelo o atribuiu
+    // ao "USB DISK 2.0", porque o inventário listava os discos sem as letras. MSFT_Partition dá a letra e o número do disco;
+    // MSFT_Disk dá nome, barramento e, para VHD/VHDX, o arquivo (Location). Roda no mesmo processo do inventário, só na
+    // categoria storage, e cada consulta ao provedor do Storage tem prazo próprio de 10 s: um provedor travado (RAID, USB)
+    // não segura o inventário até os 90 s dele (@qa). Uma falha ou o prazo esgotado deixam só a ligação indisponível.
+    internal const int VolumesTimeoutSeconds = 10;
+    internal const string StorageVolumesScript = "$volumes=@(); $volumesError=''; $volumesClock=[Diagnostics.Stopwatch]::StartNew(); " +
+        "try{ $disks=@{}; @(Get-CimInstance -Namespace 'root/Microsoft/Windows/Storage' -ClassName 'MSFT_Disk' -OperationTimeoutSec 10 -ErrorAction Stop) | ForEach-Object {$disks[[int]$_.Number]=$_}; " +
+        "$volumes=@(Get-CimInstance -Namespace 'root/Microsoft/Windows/Storage' -ClassName 'MSFT_Partition' -OperationTimeoutSec 10 -ErrorAction Stop | Where-Object {[string]$_.DriveLetter -match '^[A-Za-z]$'} | Sort-Object {[string]$_.DriveLetter} | Select-Object -First 26 | ForEach-Object {$k=$disks[[int]$_.DiskNumber]; " +
+        "[pscustomobject]@{Letter=([string]$_.DriveLetter+':');DiskNumber=[int]$_.DiskNumber;Disk=[string]$k.FriendlyName;BusType=[string]$k.BusType;Location=[string]$k.Location}}) }" +
+        "catch{ $volumes=@(); $volumesError=if($volumesClock.Elapsed.TotalSeconds -ge 9.5 -or [string]$_.Exception.Message -match 'timed? ?out|OperationTimeout|tempo limite|0x80338029'){'prazo esgotado (10 s)'}else{[string]$_.Exception.Message} }; ";
+    internal const string VolumesNote = "Volumes liga cada letra de unidade ao disco que a contém. Disco virtual é um arquivo VHD/VHDX montado, não um dispositivo: não atribua a letra dele a um disco da lista Devices. Não associe a um disco uma letra que não esteja em Volumes.";
+
+    // Resultado do inventário de armazenamento com a ligação letra → disco já interpretada: o modelo recebe o tipo do disco
+    // (virtual, USB, interno) em vez de ter de deduzi-lo do nome.
+    internal static string StorageInventoryResult(JsonElement root)
+    {
+        static string Field(JsonElement item, string name) => item.ValueKind == JsonValueKind.Object && item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
+        var error = Field(root, "VolumesError");
+        var volumes = (root.TryGetProperty("Volumes", out var listed) && listed.ValueKind == JsonValueKind.Array ? listed.EnumerateArray() : Enumerable.Empty<JsonElement>())
+            .Where(item => Regex.IsMatch(Field(item, "Letter"), "^[A-Za-z]:$")).Take(26).Select(item =>
+            {
+                var bus = BusName(Field(item, "BusType")); var location = Field(item, "Location");
+                var virtualDisk = bus.Equals("File Backed Virtual", StringComparison.OrdinalIgnoreCase) || Regex.IsMatch(location, @"\.(?:vhdx?|avhdx?)\s*$", RegexOptions.IgnoreCase);
+                return new
+                {
+                    Letter = Field(item, "Letter").ToUpperInvariant(),
+                    Disk = InvestigationEvidence.Clean(Field(item, "Disk")),
+                    BusType = bus,
+                    Kind = virtualDisk ? "disco virtual (VHD/VHDX montado de arquivo)" : DiskKind(bus),
+                    File = virtualDisk ? InvestigationEvidence.Clean(location) : null
+                };
+            }).ToArray();
+        return Ok(new
+        {
+            Category = "storage",
+            Total = root.TryGetProperty("Total", out var total) ? total.Clone() : (JsonElement?)null,
+            Truncated = root.TryGetProperty("Truncated", out var truncated) ? truncated.Clone() : (JsonElement?)null,
+            Devices = root.GetProperty("Devices").Clone(),
+            Volumes = volumes,
+            VolumesNote = error.Length > 0 || volumes.Length == 0
+                ? "O Windows não informou a ligação entre letras de unidade e discos" + (error.Length > 0 ? " (" + InvestigationEvidence.Clean(error) + ")" : "") + ". Não associe uma letra a um disco pelo nome, pelo tipo ou pelo tamanho."
+                : VolumesNote
+        });
+    }
+    // Barramento vazio ou Unknown não vira "disco interno" (@qa); SD, MMC, iSCSI... aparecem pelo nome.
+    internal static string DiskKind(string bus) => bus.ToUpperInvariant() switch
+    {
+        "USB" => "disco USB (removível)",
+        "" or "UNKNOWN" => "tipo não identificado",
+        "NVME" or "SATA" or "SAS" or "ATA" or "ATAPI" or "SCSI" or "RAID" or "SCM" or "UFS" or "STORAGE SPACES" => "disco interno",
+        _ => "disco " + bus
+    };
+    // MSFT_Disk.BusType pode chegar como número quando a formatação do módulo Storage não se aplica.
+    internal static string BusName(string bus) => bus switch
+    {
+        "0" => "Unknown", "1" => "SCSI", "2" => "ATAPI", "3" => "ATA", "4" => "1394", "5" => "SSA", "6" => "Fibre Channel", "7" => "USB", "8" => "RAID", "9" => "iSCSI",
+        "10" => "SAS", "11" => "SATA", "12" => "SD", "13" => "MMC", "14" => "Virtual", "15" => "File Backed Virtual", "16" => "Storage Spaces", "17" => "NVMe", "18" => "SCM", "19" => "UFS",
+        _ => InvestigationEvidence.Clean(bus)
+    };
     private static string HardwareTopic(string category) => category is "camera" or "audio" or "bluetooth" or "printer" or "network" ? category : "hardware";
 
     // A consulta de impressoras confere antes o estado do Spooler (#84). Parado ou em outro estado que não Running, o script
@@ -456,14 +516,15 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 var inventoryScript = "$drivers=@{}; @(Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop) | ForEach-Object {if($_.DeviceID){$drivers[[string]$_.DeviceID]=$_}}; " +
                     "$items=@(Get-CimInstance Win32_PnPEntity -ErrorAction Stop | Where-Object {$_.Present -eq $true -and (" + filter + ")} | Sort-Object Name); " +
                     "$selected=@($items | Select-Object -First 80 | ForEach-Object {$d=$drivers[[string]$_.PNPDeviceID]; [pscustomobject]@{Name=[string]$_.Name;Id=[string]$_.PNPDeviceID;Code=[int]$_.ConfigManagerErrorCode;Status=[string]$_.Status;Class=[string]$_.PNPClass;Manufacturer=[string]$_.Manufacturer;HardwareIds=@($_.HardwareID | Where-Object {$_});CompatibleIds=@($_.CompatibleID | Where-Object {$_});DriverProvider=[string]$d.DriverProviderName;DriverVersion=[string]$d.DriverVersion}}); " +
-                    "[pscustomobject]@{Category=" + Quote(category) + ";Total=$items.Count;Truncated=($items.Count -gt 80);Devices=$selected} | ConvertTo-Json -Depth 6 -Compress";
+                    (category == "storage" ? StorageVolumesScript : "") +
+                    "[pscustomobject]@{Category=" + Quote(category) + ";Total=$items.Count;Truncated=($items.Count -gt 80);Devices=$selected" + (category == "storage" ? ";Volumes=$volumes;VolumesError=$volumesError" : "") + "} | ConvertTo-Json -Depth 6 -Compress";
                 using (var inventory = JsonDocument.Parse(await SupportService.Powershell(inventoryScript, token, 90)))
                 {
                     var listed = inventory.RootElement.GetProperty("Devices");
                     var foundDevices = JsonSerializer.Deserialize<List<Device>>(listed.GetRawText()) ?? [];
                     foreach (var device in foundDevices.Where(d => !string.IsNullOrWhiteSpace(d.Id))) observedDevices[device.Id] = (HardwareTopic(category), device);
                     observedDevicesAt = DateTimeOffset.UtcNow;
-                    return Ok(inventory.RootElement.Clone());
+                    return category == "storage" ? StorageInventoryResult(inventory.RootElement) : Ok(inventory.RootElement.Clone());
                 }
             case "get_printers":
                 observedPrinters.Clear(); observedPrinterDetails.Clear();

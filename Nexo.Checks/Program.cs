@@ -224,6 +224,7 @@ try
     ReleaseGuardChecks.Run(Assert);
     await ValidationFollowUpChecks.Run(store, admin, Assert);
     await ValidationRetestChecks.Run(store, admin, Assert);
+    await ValidationAnswerChecks.Run(store, admin, Assert);
     await NetworkRecoveryChecks.Run(Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);

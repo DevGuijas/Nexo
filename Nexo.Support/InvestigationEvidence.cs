@@ -238,7 +238,74 @@ public sealed class InvestigationEvidence
         if (PresentsStaleProcess(text)) return StaleProcessReason;
         if (OffersFileSearch(text)) return FileSearchReason;
         if (PresentsClosedDisk(text)) return ClosedDiskReason;
+        if (SuggestsMalware(text)) return MalwareReason;
         return null;
+    }
+
+    // Na validação da 11fa078 (#93), o modelo reenviou 4 vezes o mesmo texto recusado, com o mesmo Motivo, até o turno acabar
+    // no relatório determinístico. Na 2ª recusa pelo mesmo motivo, o controle passa a citar o que remover: as frases que a
+    // trava recusou (testadas uma a uma) e, quando houver, o processo. Sem frase identificável, pede a resposta do zero.
+    public string RepeatedGuidance(string reason, string message)
+    {
+        Func<string, bool>? refuses = reason switch
+        {
+            StaleProcessReason => PresentsStaleProcess,
+            FileSearchReason => OffersFileSearch,
+            ClosedDiskReason => PresentsClosedDisk,
+            MalwareReason => SuggestsMalware,
+            _ => null
+        };
+        var passages = refuses == null ? Array.Empty<string>() : Regex.Split(message, @"(?<=[!?;\n])|(?<=\.)(?=\s|$)").Select(part => part.Trim())
+            .Where(part => part.Length > 0 && refuses(AgentProtocol.Normalize(part))).Take(2).ToArray();
+        var text = "Esta é a mesma recusa da tentativa anterior: não reenvie o mesmo texto.";
+        if (passages.Length == 0) return text + " Escreva a resposta de novo, do zero, sem o ponto indicado no motivo.";
+        text += (passages.Length == 1 ? " Remova ou reescreva este trecho: " : " Remova ou reescreva estes trechos: ") + string.Join(" ", passages.Select(part => Quoted(part, 240))) + ".";
+        var names = (reason == StaleProcessReason ? staleProcesses : ProcessNames()).Where(name => passages.Any(part => Cites(AgentProtocol.Normalize(part), name)))
+            .Distinct(StringComparer.OrdinalIgnoreCase).Take(2).Select(name => Quoted(name)).ToArray();
+        if (names.Length > 0)
+            text += reason == StaleProcessReason ? " Não apresente " + string.Join(" nem ", names) + " como consumo atual: a ocorrência está encerrada."
+                : reason == MalwareReason ? " Não chame " + string.Join(" nem ", names) + " de malicioso, vírus ou suspeito." : "";
+        return text;
+    }
+
+    // Processos que o turno conhece (consulta de processos e relatório de saúde), pelo nome.
+    private IEnumerable<string> ProcessNames() => topProcesses.Select(p => p.Name).Concat(currentProcesses).Concat(staleProcesses).Concat(memoryHolders.Select(h => h.Name));
+    private static bool Cites(string normalized, string name) =>
+        AgentProtocol.Normalize(name) is { Length: > 0 } key && Regex.IsMatch(normalized, @"(?<![\w.-])" + Regex.Escape(key) + @"(?:\.exe)?(?![\w-]|\.\w)");
+
+    internal const string MalwareReason = "A resposta sugere que um processo pode ser malicioso (vírus, malware), mas nenhuma ferramenta do Nexo traz evidência de segurança. Fale só do consumo medido; se o usuário não reconhece o programa, oriente conferir o nome e o local do arquivo no Gerenciador de Tarefas, sem chamá-lo de malicioso ou suspeito.";
+    // O usuário perguntou sobre vírus ou malware neste turno: responder sobre isso não é sugestão do modelo.
+    public bool UserRaisedSecurity { get; set; }
+    internal static bool MentionsMalware(string text) => AskedTerm.IsMatch(SecurityNames.Replace(AgentProtocol.Normalize(text), " "));
+
+    // Na validação da 11fa078 (#93), a resposta sobre memória sugeriu verificar se o NexoMemTeste "é um processo malicioso",
+    // sem nenhuma evidência. O Nexo não tem ferramenta de segurança, então a frase que liga um processo (pelo nome ou por
+    // "processo", "programa", ".exe"...) a vírus, malware ou suspeita é recusada. Passa a frase que nega o termo: a negação
+    // colada a ele (até quatro palavras antes, na mesma oração) ou a falta de indício dita na oração ("não há indício de que
+    // o NexoMemTeste seja malicioso"), desde que a frase não mande verificar ("verifique se não é malicioso" continua
+    // sugestão). "Se você não reconhece o NexoMemTeste, ele pode ser um malware" é recusada: a negação é de outra oração (@qa).
+    // Nomes do próprio Windows ("anti-malware", "Proteção contra vírus e ameaças", "Segurança do Windows") saem antes do
+    // teste, e a frase sem processo passa. A resposta a um usuário que perguntou sobre vírus também passa.
+    private static readonly Regex MalwareTerm = new(@"\b(?:malicios[oa]s?|malware|virus|trojan|cavalo de troia|spyware|ransomware|adware|infectad[oa]s?|infeccao)\b|" + Suspicious);
+    // "Suspeito" só como qualificação ("parece suspeito", "processo suspeito"); "suspeito que…" e "a suspeita é a memória" passam.
+    private const string Suspicious = @"\b(?:parecem?|e|sao|esta|estao|seja|sejam|como|processos?|programas?|arquivos?|executave(?:l|is)|aplicativos?|atividades?|comportamentos?)\s+(?:\w+\s+)?suspeit[oa]s?\b(?!\s+(?:de|que)\b)";
+    private static readonly Regex AskedTerm = new(@"\b(?:malicios[oa]s?|malware|virus|trojan|cavalo de troia|spyware|ransomware|adware|infectad[oa]s?|infeccao)\b");
+    private static readonly Regex SecurityNames = new(@"\banti-?\s?(?:malware|virus)\b|\bprotecao contra virus(?: e ameacas)?|\bseguranca do windows\b");
+    private static readonly Regex ProcessWord = new(@"\b(?:processos?|programas?|aplicativos?|apps?|executave(?:l|is)|software)\b|\.exe\b");
+    private static readonly Regex Verification = new(@"\b(?:verifi\w*|confir\w*|certifi\w*|chec\w*|investig\w*|analis\w*|escane\w*|examin\w*|avali\w*)\b");
+    private static readonly Regex NoEvidence = new(@"\b(?:nao (?:ha|existe|existem|temos|tenho|vejo|vi|encontrei)|nada indica|nenhum\w* (?:indicio|evidencia|sinal|indicacao)|sem (?:indicio|evidencia|sinal|sinais|indicacao))\b");
+    private static bool DeniesTerm(string sentence, Match term)
+    {
+        var clause = Regex.Split(sentence[..term.Index], @"[,;:()]")[^1];
+        return Regex.Matches(clause, @"[\p{L}\p{N}]+").TakeLast(4).Any(word => word.Value is "nao" or "nem" or "nunca") || NoEvidence.IsMatch(clause);
+    }
+    private bool SuggestsMalware(string normalized)
+    {
+        if (UserRaisedSecurity) return false;
+        var names = ProcessNames().ToArray();
+        return Sentences(normalized).Select(sentence => SecurityNames.Replace(sentence, " ")).Any(sentence => MalwareTerm.Matches(sentence).Any(term =>
+            (ProcessWord.IsMatch(sentence) || names.Any(name => Cites(sentence, name)))
+            && !(DeniesTerm(sentence, term) && !Verification.IsMatch(sentence))));
     }
 
     internal const string FileSearchReason = "O Nexo não lista nem procura arquivos ou pastas: não ofereça identificar os maiores arquivos nem o que ocupa espaço. No lugar, diga o espaço livre medido e indique que o usuário vê o que ocupa espaço em Configurações > Sistema > Armazenamento no Windows.";
