@@ -192,6 +192,39 @@ internal static class NetworkRecoveryChecks
             check(Text(keptHung.Result, "phase") == "keeping" && Decision(keptHung.Directory) == "keep" && Text(keptHung.Result, "error").Contains("não foi conferida") && !Flag(keptHung.Result, "reverted"),
                 "Rede: executor travado após confirmar manter preserva a escolha e informa que o estado não foi conferido");
 
+            // #98: restaurar escolhido na janela é escolha do usuário; o cartão e a resposta não mostram falha.
+            prompts.Clear();
+            var chosen = await Apply(store, trust, async (dir, stop) =>
+            {
+                await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}");
+                await WaitFor(Path.Combine(dir, "decision.txt"), stop);
+                await Write(Secured(protectedRoot, dir), "result.json", Decision(dir) == "keep" ? "{\"success\":true}" : "{\"success\":false,\"reverted\":true,\"message\":\"Configuração anterior restaurada por cancelamento ou ausência de confirmação.\"}");
+            }, prompts, true, keep: false, deadlines: quick);
+            var chosenCard = ToolResultPresentation.Describe("Alterando DNS", chosen.Result.GetRawText());
+            check(Decision(chosen.Directory) == "rollback" && Flag(chosen.Result, "restoredByUser") && Flag(chosen.Result, "reverted") && AgentService.RestoredByUser(chosen.Result)
+                && chosenCard.State == "Restaurado a seu pedido" && !chosenCard.Warning && prompts.SequenceEqual(["Manter a configuração de rede?"]),
+                "Rede: restaurar escolhido na janela vem marcado como pedido do usuário e o cartão não mostra falha (#98)");
+            var chosenAnswer = AgentProtocol.Normalize(AgentService.RestoredByUserAnswer);
+            check(!chosenAnswer.Contains("nao foi concluida") && !chosenAnswer.Contains("nao foi confirmada") && !chosenAnswer.Contains("nao consegui") && chosenAnswer.Contains("restaurei"),
+                "Rede: resposta da restauração a pedido não usa os termos que a interface mostra como etapa não concluída (#98)");
+
+            prompts.Clear();
+            var chosenFailed = await Apply(store, trust, async (dir, stop) =>
+            {
+                await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}");
+                await WaitFor(Path.Combine(dir, "decision.txt"), stop);
+                await Write(Secured(protectedRoot, dir), "result.json", "{\"success\":false,\"reverted\":false,\"error\":\"Os servidores DNS anteriores não foram restaurados.\",\"backup\":\"b\"}");
+            }, prompts, true, keep: false, deadlines: quick);
+            check(!Flag(chosenFailed.Result, "restoredByUser") && ToolResultPresentation.Describe("Alterando DNS", chosenFailed.Result.GetRawText()).Warning,
+                "Rede: restauração a pedido que falha continua aparecendo como erro (#98)");
+            check(NetworkChange.MarkRestoreChosen("{\"success\":false,\"reverted\":true}", false) == "{\"success\":false,\"reverted\":true}"
+                && NetworkChange.MarkRestoreChosen("{\"success\":true}", true) == "{\"success\":true}" && NetworkChange.MarkRestoreChosen("<x>", true) == "<x>",
+                "Rede: prazo esgotado, cancelamento, sucesso e resultado inválido não ganham a marca de restauração a pedido (#98)");
+            var restoredFacts = new TurnFacts();
+            restoredFacts.Record("set_dns:4", "DNS manual “1.1.1.1” da interface 4", TurnFacts.Classify("set_dns", chosen.Result.GetRawText()));
+            check(restoredFacts.Line() == TurnFacts.Prefix + " nenhuma. Desfeitas a seu pedido: DNS manual “1.1.1.1” da interface 4.",
+                "Rede: linha de fatos lista a restauração a pedido como desfeita a seu pedido, não como não concluída (#98)");
+
             prompts.Clear();
             var restoringHung = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, keep: false, deadlines: quick);
             check(Text(restoringHung.Result, "phase") == "restoring" && Text(restoringHung.Result, "error").Contains("Não há confirmação de que a configuração anterior voltou") && !Flag(restoringHung.Result, "reverted"),

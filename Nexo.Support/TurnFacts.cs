@@ -7,7 +7,7 @@ namespace Nexo.Support;
 
 // Situação de uma alteração pedida no turno, da mais forte para a mais fraca: feita, sem confirmação do resultado,
 // concluída sem mudança, não concluída, recusada por você e barrada pelo Nexo.
-public enum ChangeState { Changed, Unconfirmed, Unchanged, NotCompleted, Denied, Refused }
+public enum ChangeState { Changed, Unconfirmed, Unchanged, NotCompleted, Denied, Refused, RestoredByUser }
 
 // Linha de fatos de cada resposta final do turno (#73, opção A): diz quais alterações o Nexo fez, a partir só dos
 // resultados do executor e das travas deste turno, nunca do texto do modelo. Ela vem sempre por último, separada do texto.
@@ -46,6 +46,7 @@ public sealed class TurnFacts
             if (root.ValueKind != JsonValueKind.Object) return ChangeState.Unconfirmed;
             bool Flag(JsonElement source, string key) => source.ValueKind == JsonValueKind.Object && source.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.True;
             if (Flag(root, "denied")) return ChangeState.Denied;
+            if (AgentService.RestoredByUser(root)) return ChangeState.RestoredByUser;
             var data = root.TryGetProperty("data", out var payload) ? payload : default;
             var verification = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("Verification", out var check) && check.ValueKind == JsonValueKind.String ? check.GetString() : null;
             if (Flag(root, "success"))
@@ -85,6 +86,7 @@ public sealed class TurnFacts
         Add("Concluídas sem mudança:", List(ChangeState.Unchanged));
         Add("Não concluídas:", List(ChangeState.NotCompleted));
         Add("Não executadas:", List(ChangeState.Denied, ChangeState.Refused));
+        Add("Desfeitas a seu pedido:", List(ChangeState.RestoredByUser));
         return line.ToString();
     }
 
