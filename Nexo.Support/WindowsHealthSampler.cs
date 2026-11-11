@@ -58,7 +58,8 @@ public sealed class WindowsHealthSampler : IHealthSampler
         {
             foreach (var drive in DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed))
             {
-                try { if (drive.IsReady) result.Disks.Add(new DiskHealth(drive.Name, drive.AvailableFreeSpace, drive.TotalSize)); }
+                // Um volume fixo que não está pronto fica registrado: sem o aviso, ele pareceria removido e encerraria o alerta dele.
+                try { if (drive.IsReady) result.Disks.Add(new DiskHealth(drive.Name, drive.AvailableFreeSpace, drive.TotalSize)); else result.Warnings.Add("Volume " + drive.Name + ": não está pronto"); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { result.Warnings.Add("Volume " + drive.Name + ": " + ex.Message); }
             }
         }

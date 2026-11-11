@@ -470,8 +470,9 @@ internal static class ValidationFollowUpChecks
         assert(summary.Contains("Informação do monitor de saúde, sem falha ativa: Processo mantém a memória num patamar estável") && summary.Contains("Navegador PID 20248")
             && !summary.Contains("Ocorrência ativa") && !summary.Contains("resolvid", StringComparison.OrdinalIgnoreCase) && !summary.Contains("Recomendação do monitor"),
             "Junção com a #71: o resumo mostra o patamar como informação, sem dizer que é problema ativo nem que foi resolvido");
-        assert(evidence.WithMemoryFigures("O Navegador PID 20248 está pesado.").EndsWith("Pelo monitor de saúde: “Navegador” (PID 20248) segue com 14000 MB; no alerta, subiu de 2000 MB para 16000 MB.", StringComparison.Ordinal),
-            "Junção com a #71: o processo em patamar estável recebe os MB na resposta");
+        // Desde a validação da 76d9028 (10/11), a linha do patamar estável diz que ele é informativo, em vez de "segue com".
+        assert(evidence.WithMemoryFigures("O Navegador PID 20248 está pesado.").EndsWith("Pelo monitor de saúde: “Navegador” (PID 20248) está estável em patamar alto, com cerca de 14000 MB (informativo, não é falha ativa); no alerta, subiu de 2000 MB para 16000 MB.", StringComparison.Ordinal),
+            "Junção com a #71: o processo em patamar estável recebe os MB na resposta, marcados como informativos");
         // Com uma ocorrência antiga e resolvida do mesmo processo, o patamar atual é que vale: a frase não é recusada.
         var withOld = new InvestigationEvidence();
         withOld.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(report.TrimEnd() + "\n" + HealthReportPresentation.OtherHeader + "\n"

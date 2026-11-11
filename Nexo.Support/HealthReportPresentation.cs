@@ -190,7 +190,9 @@ public static class HealthOccurrences
             var recent = ordered.Where(s => s.Time > finding.Time).TakeLast(criterion.Samples).ToArray();
             var proven = recent.Length == criterion.Samples && recent.All(criterion.Clear)
                 && recent.Zip(recent.Skip(1)).All(pair => pair.Second.Time - pair.First.Time <= criterion.MaxGap);
-            if (proven) return new(OccurrenceState.Resolved, $"Resolvida: {recent.Length} leituras seguidas sem a condição");
+            if (proven) return new(OccurrenceState.Resolved, id.StartsWith("disk-low:", StringComparison.Ordinal) && recent.All(s => VolumeGone(s, id["disk-low:".Length..]))
+                ? $"Resolvida: o volume não está mais presente em {recent.Length} leituras seguidas"
+                : $"Resolvida: {recent.Length} leituras seguidas sem a condição");
             var unconfirmed = holders.FirstOrDefault(holder => HoldAt(holder, ordered[^1]).State == Hold.Unknown);
             return Unknown(unconfirmed != null ? $"sem leitura que confirme que {unconfirmed.Label} liberou a memória" : "leituras insuficientes para confirmar");
         }
@@ -314,6 +316,14 @@ public static class HealthOccurrences
         return median < thresholds.MaxSampleGap ? median : thresholds.MaxSampleGap;
     }
 
+    // Na validação da 76d9028 (10/11), o alerta do T: (um VHDX) ficou como "estado atual desconhecido" depois de o VHDX sair:
+    // sem o volume, nenhuma leitura mostrava espaço livre. O volume conta como ausente só quando a leitura listou outros
+    // volumes e não registrou falha da enumeração ("Discos: …") nem desse volume ("Volume T:\: …"); lista vazia continua
+    // não provando nada.
+    private static bool VolumeGone(HealthSnapshot sample, string volume) => sample.Disks.Count > 0
+        && !sample.Disks.Any(d => d.Name.Equals(volume, StringComparison.OrdinalIgnoreCase))
+        && !sample.Warnings.Any(w => w.StartsWith("Discos:", StringComparison.Ordinal) || w.StartsWith("Volume " + volume + ":", StringComparison.OrdinalIgnoreCase));
+
     private static string Megabytes(long bytes) => (bytes / (1024.0 * 1024)).ToString("F0", CultureInfo.InvariantCulture);
 
     private static Criterion? CriterionFor(string id, HealthFinding finding, HealthThresholds limits, Pointed[] holders)
@@ -332,7 +342,7 @@ public static class HealthOccurrences
                 => new(limits.NetworkSamples, limits.ExternalProbeMaxSampleGap, s => s.ExternalProbe?.State == "ok"
                     && SameProbe(finding, s.ExternalProbe.Target, s.ExternalProbe.ConfigurationId)),
             "disk-low" => new(limits.OtherSamples, limits.MaxSampleGap, s => s.Disks.FirstOrDefault(d => d.Name.Equals(subject, StringComparison.OrdinalIgnoreCase)) is { TotalBytes: > 0 } disk
-                && 100.0 * disk.FreeBytes / disk.TotalBytes >= limits.DiskLowFreePercent),
+                ? 100.0 * disk.FreeBytes / disk.TotalBytes >= limits.DiskLowFreePercent : VolumeGone(s, subject)),
             "service-stopped" => new(limits.OtherSamples, limits.MaxSampleGap, s => s.Services.FirstOrDefault(x => x.Name == subject) is { } service
                 && !HealthRules.UnexpectedlyStopped(service)),
             "adapter-disabled" => new(limits.OtherSamples, limits.MaxSampleGap, s => s.Adapters.FirstOrDefault(a => a.Id == subject) is { } adapter

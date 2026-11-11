@@ -62,7 +62,22 @@ internal static class HealthOccurrenceChecks
         check(State(alert, Series(s => s.Disks = [Volume("C:", 5)], 30, 0)).State == OccurrenceState.Persistent, "Volume ainda cheio persiste, mesmo com dois-pontos no identificador");
         check(State(alert, Series(s => s.Disks = [Volume("c:", 40)], 30, 0)).State == OccurrenceState.Resolved, "Espaço recuperado resolve a ocorrência sem diferenciar maiúsculas no nome");
         check(State(alert, Series(s => s.Disks = [], 30, 0)).State == OccurrenceState.Unknown, "Volume ausente da leitura não prova resolução");
-        check(State(alert, Series(s => s.Disks = [Volume("D:", 90)], 30, 0)).State == OccurrenceState.Unknown, "Espaço livre em outro volume não resolve a ocorrência");
+        // Desde a validação da 76d9028 (10/11), o volume que deixou de existir resolve a ocorrência; o que não foi lido, não.
+        check(State(alert, Series(s => { s.Disks = [Volume("D:", 90)]; s.Warnings = ["Volume C:: não está pronto"]; }, 30, 0)).State == OccurrenceState.Unknown,
+            "Espaço livre em outro volume não resolve a ocorrência de um volume que não foi lido");
+        var gone = State(Found("disk-low:T:\\"), Series(s => s.Disks = [Volume("C:\\", 87)], 30, 0));
+        check(gone.State == OccurrenceState.Resolved && gone.Label == "Resolvida: o volume não está mais presente em 2 leituras seguidas",
+            "Volume removido (VHDX desmontado) resolve a ocorrência, com o motivo, quando a leitura lista os outros volumes sem falha");
+        check(State(Found("disk-low:T:\\"), At(30, s => s.Disks = [Volume("C:\\", 87)])).State == OccurrenceState.Unknown,
+            "Volume ausente numa leitura só não basta para resolver");
+        check(State(Found("disk-low:T:\\"), Series(s => { s.Disks = [Volume("C:\\", 87)]; s.Warnings = ["Discos: acesso negado"]; }, 30, 0)).State == OccurrenceState.Unknown,
+            "Falha da leitura de volumes não prova que o volume saiu");
+        check(State(Found("disk-low:T:\\"), Series(s => { s.Disks = [Volume("C:\\", 87)]; s.Warnings = ["Volume T:\\: dispositivo não pronto"]; }, 30, 0)).State == OccurrenceState.Unknown,
+            "Falha na leitura do próprio volume não prova que ele saiu");
+        check(State(Found("disk-low:T:\\"), At(60, s => s.Disks = [Volume("C:\\", 87)]), At(30, s => s.Disks = [Volume("C:\\", 87), Volume("T:\\", 5)]), At(0, s => s.Disks = [Volume("C:\\", 87), Volume("T:\\", 5)])).State == OccurrenceState.Persistent,
+            "Volume que volta cheio faz a ocorrência persistir de novo");
+        var mixed = State(Found("disk-low:T:\\"), At(30, s => s.Disks = [Volume("C:\\", 87)]), At(0, s => s.Disks = [Volume("C:\\", 87), Volume("T:\\", 60)]));
+        check(mixed.State == OccurrenceState.Resolved && mixed.Label == "Resolvida: 2 leituras seguidas sem a condição", "Volume que some e volta com espaço resolve pelo motivo comum");
         check(State(alert, Series(s => s.Disks = [new DiskHealth("C:", 5, 0)], 30, 0)).State == OccurrenceState.Unknown, "Volume sem capacidade informada não prova resolução");
     }
 
