@@ -111,11 +111,9 @@ function Save-ProtectedRecord($phase) {
 # Remove só os arquivos conhecidos e a pasta vazia: nunca apaga recursivamente com elevação (um link poderia apontar
 # para outro lugar).
 function Remove-ProtectedFolder($path) {
-    # Lista fechada, sem curinga: os três arquivos e os temporários que uma gravação interrompida pode deixar.
-    foreach ($name in 'before.json', 'transaction.json', 'recovery-result.json', 'before.json.tmp', 'transaction.json.tmp', 'recovery-result.json.tmp') { $file = Join-Path $path $name; if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } }
+    foreach ($name in 'before.json', 'transaction.json', 'applied.json', 'result.json', 'recovery-result.json', 'before.json.tmp', 'transaction.json.tmp', 'applied.json.tmp', 'result.json.tmp', 'recovery-result.json.tmp') { $file = Join-Path $path $name; if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } }
     [IO.Directory]::Delete($path, $false)
 }
-function Remove-Protected { if ($protectedState.Opened) { try { Remove-ProtectedFolder $protectedDir } catch { } } }
 function Remove-StaleProtected {
     try {
         $limit = (Get-Date).ToUniversalTime().AddDays(-7)
@@ -133,12 +131,6 @@ function Set-AutomaticIP {
     $code = $LASTEXITCODE
     $dhcpTransition.method='netsh interface ipv4 set address source=dhcp'; $dhcpTransition.exitCode=$code; $dhcpTransition.output=($output -join "`n")
     if ($code -ne 0) { throw ('O Windows recusou a mudança para IP automático (código '+$code+'): '+($output -join ' ')) }
-}
-function Save-Result($filename, $value) {
-    $destination = Join-Path $operationDir $filename
-    $temporary = $destination + '.tmp'
-    $value | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $temporary -Encoding UTF8
-    Move-Item -LiteralPath $temporary -Destination $destination -Force
 }
 function Snapshot {
     $adapter = Get-NetAdapter -InterfaceIndex $interfaceIndex -ErrorAction Stop
@@ -244,17 +236,16 @@ if ($recoveryMode) {
 }
 try {
     Assert-OperationId
+    Open-ProtectedDir
     $adapter = Get-NetAdapter -InterfaceIndex $interfaceIndex
     if ([string]::IsNullOrWhiteSpace($request.ExpectedGuid) -or [guid]$adapter.InterfaceGuid -ne [guid]$request.ExpectedGuid) { throw 'A identidade da interface mudou desde a consulta. Consulte a rede novamente.' }
     $hostHyperV = [string]$adapter.InterfaceDescription -match '^Hyper-V Virtual Ethernet Adapter( #\d+)?$'
     $managedSwitch = [string]$adapter.Name -match '(Default Switch|Comutador Padrão|Switch Padrão)'
     if ($managedSwitch -or (($adapter.Virtual -or -not $adapter.HardwareInterface) -and -not $hostHyperV)) { throw 'Esta interface é gerenciada pelo Windows ou por VPN. Reconfiguração de IP/DNS não permitida.' }
     $before = Snapshot
-    Open-ProtectedDir
     $protectedState.Created = (Get-Date).ToUniversalTime().ToString('o')
     Save-ProtectedRecord 'applying'
     Save-Protected 'before.json' $before
-    Save-Result 'before.json' $before
     $changed = $true
     if ($request.Action -eq 'set_dns') {
         if ($request.Mode -eq 'automatic') {
@@ -297,18 +288,18 @@ try {
         $match = @($after.Addresses | Where-Object {$_.IPAddress -eq $request.Address -and $_.PrefixLength -eq $request.Prefix})
         if ($match.Count -ne 1 -or [string]$match[0].AddressState -in 'Duplicate','2') { throw 'IP estático não confirmado ou duplicado.' }
     }
-    Save-Result 'applied.json' $after
+    Save-Protected 'applied.json' $after
     Save-ProtectedRecord 'confirming'
     $deadline = (Get-Date).AddSeconds(60)
     $decisionPath = Join-Path $operationDir 'decision.txt'
     while (-not (Test-Path -LiteralPath $decisionPath) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
     $keep = (Get-Date) -lt $deadline -and (Test-Path -LiteralPath $decisionPath) -and (Get-Content -LiteralPath $decisionPath -Raw).Trim() -eq 'keep'
     if ($keep) {
-        Save-Result 'result.json' @{success=$true;message='Configuração aplicada, estado consultado e permanência confirmada pelo usuário.';before=$before;after=(Snapshot);dhcpTransition=$dhcpTransition}
+        Save-Protected 'result.json' @{success=$true;message='Configuração aplicada, estado consultado e permanência confirmada pelo usuário.';before=$before;after=(Snapshot);dhcpTransition=$dhcpTransition}
     } else {
         Save-ProtectedRecord 'restoring'
         Restore-Network
-        Save-Result 'result.json' @{success=$false;reverted=$true;message='Configuração anterior restaurada por cancelamento ou ausência de confirmação.';after=(Snapshot)}
+        Save-Protected 'result.json' @{success=$false;reverted=$true;message='Configuração anterior restaurada por cancelamento ou ausência de confirmação.';after=(Snapshot)}
     }
 } catch {
     $failure = $_.Exception.Message
@@ -316,6 +307,5 @@ try {
     $reverted = $false
     $rollbackError = $null
     if ($changed -and $before) { try { Save-ProtectedRecord 'restoring'; Restore-Network; $reverted=$true } catch { $rollbackError=$_.Exception.Message } }
-    Save-Result 'result.json' @{success=$false;error=$failure;changed=$changed;reverted=$reverted;rollbackError=$rollbackError;dhcpTransition=$dhcpTransition;failureState=$failureState;backup=(Join-Path $operationDir 'before.json')}
+    if ($protectedState.Opened) { Save-Protected 'result.json' @{success=$false;error=$failure;changed=$changed;reverted=$reverted;rollbackError=$rollbackError;dhcpTransition=$dhcpTransition;failureState=$failureState;backup=(Join-Path $protectedDir 'before.json')} }
 }
-Remove-Protected

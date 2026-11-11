@@ -54,12 +54,12 @@ internal static class NetworkRecoveryChecks
             await CompactRuns(check, root);
 
             prompts.Clear();
-            var restoring = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(dir, "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); }, prompts, true, keep: false);
+            var restoring = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); }, prompts, true, keep: false);
             check(prompts.SequenceEqual(["Manter a configuração de rede?", "Restaurar configuração de rede anterior?"]) && Flag(restoring.Result, "reverted"),
                 "Rede: executor encerrado durante a restauração própria tem a restauração oferecida novamente");
 
             prompts.Clear();
-            var kept = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(dir, "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); }, prompts, true, keep: true);
+            var kept = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); }, prompts, true, keep: true);
             check(prompts.SequenceEqual(["Manter a configuração de rede?"]) && kept.RecoveryStarts == 0 && !Flag(kept.Result, "reverted")
                 && Text(kept.Result.GetProperty("recovery"), "message").Contains("não foi conferida") && File.Exists(Path.Combine(kept.Directory, NetworkRecovery.ResultFile)),
                 "Rede: executor encerrado após confirmação de manter registra a incerteza sem desfazer a escolha");
@@ -147,7 +147,7 @@ internal static class NetworkRecoveryChecks
                 {
                     await Backup(dir, protectedRoot, Before);
                     await WaitFor(Path.Combine(dir, "decision.txt"), stop);
-                    if (Decision(dir) == "rollback") await Write(dir, "result.json", "{\"success\":false,\"reverted\":true,\"message\":\"Configuração anterior restaurada por cancelamento ou ausência de confirmação.\"}");
+                    if (Decision(dir) == "rollback") await Write(Secured(protectedRoot, dir), "result.json", "{\"success\":false,\"reverted\":true,\"message\":\"Configuração anterior restaurada por cancelamento ou ausência de confirmação.\"}");
                 }, prompts, true, deadlines: quick, token: cancel.Token);
                 check(Flag(honoured.Result, "reverted") && !honoured.Result.TryGetProperty("state", out _) && prompts.Count == 0,
                     "Rede: cancelamento atendido pelo executor devolve a restauração registrada por ele");
@@ -163,8 +163,8 @@ internal static class NetworkRecoveryChecks
                 {
                     await Backup(dir, protectedRoot, Before);
                     await Task.Delay(TimeSpan.FromSeconds(3), stop);
-                    await Write(dir, "applied.json", "{}");
-                    if (Decision(dir) == "rollback") await Write(dir, "result.json", "{\"success\":false,\"reverted\":true,\"message\":\"Configuração anterior restaurada por cancelamento ou ausência de confirmação.\"}");
+                    await Write(Secured(protectedRoot, dir), "applied.json", "{}");
+                    if (Decision(dir) == "rollback") await Write(Secured(protectedRoot, dir), "result.json", "{\"success\":false,\"reverted\":true,\"message\":\"Configuração anterior restaurada por cancelamento ou ausência de confirmação.\"}");
                 }, prompts, true, deadlines: slow, token: cancel.Token);
                 check(Flag(late.Result, "reverted") && !late.Result.TryGetProperty("state", out _) && prompts.Count == 0 && Decision(late.Directory) == "rollback",
                     "Rede: cancelamento antes da aplicação estende o prazo e aceita a restauração que o executor registra depois do prazo simples");
@@ -178,22 +178,22 @@ internal static class NetworkRecoveryChecks
                 clock.Restart();
                 var open = await Apply(store, trust, async (dir, stop) =>
                 {
-                    await Backup(dir, protectedRoot, Before); await Write(dir, "applied.json", "{}");
+                    await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}");
                     cancel.CancelAfter(TimeSpan.FromMilliseconds(500));
                     await WaitFor(Path.Combine(dir, "decision.txt"), stop);
-                    await Write(dir, "result.json", Decision(dir) == "keep" ? "{\"success\":true}" : "{\"success\":false,\"reverted\":true}");
+                    await Write(Secured(protectedRoot, dir), "result.json", Decision(dir) == "keep" ? "{\"success\":true}" : "{\"success\":false,\"reverted\":true}");
                 }, prompts, true, deadlines: patient, token: cancel.Token, unanswered: true);
                 check(clock.Elapsed < TimeSpan.FromSeconds(10) && Decision(open.Directory) == "rollback" && Flag(open.Result, "reverted") && prompts.SequenceEqual(["Manter a configuração de rede?"]),
                     "Rede: cancelamento com a janela de confirmação aberta grava a restauração sem esperar o prazo da janela");
             }
 
             prompts.Clear();
-            var keptHung = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(dir, "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, keep: true, deadlines: quick);
+            var keptHung = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, keep: true, deadlines: quick);
             check(Text(keptHung.Result, "phase") == "keeping" && Decision(keptHung.Directory) == "keep" && Text(keptHung.Result, "error").Contains("não foi conferida") && !Flag(keptHung.Result, "reverted"),
                 "Rede: executor travado após confirmar manter preserva a escolha e informa que o estado não foi conferido");
 
             prompts.Clear();
-            var restoringHung = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(dir, "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, keep: false, deadlines: quick);
+            var restoringHung = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, keep: false, deadlines: quick);
             check(Text(restoringHung.Result, "phase") == "restoring" && Text(restoringHung.Result, "error").Contains("Não há confirmação de que a configuração anterior voltou") && !Flag(restoringHung.Result, "reverted"),
                 "Rede: restauração do executor que não termina no prazo fica como estado desconhecido");
 
@@ -201,9 +201,9 @@ internal static class NetworkRecoveryChecks
             clock.Restart();
             var unanswered = await Apply(store, trust, async (dir, stop) =>
             {
-                await Backup(dir, protectedRoot, Before); await Write(dir, "applied.json", "{}");
+                await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}");
                 await WaitFor(Path.Combine(dir, "decision.txt"), stop);
-                await Write(dir, "result.json", Decision(dir) == "keep" ? "{\"success\":true}" : "{\"success\":false,\"reverted\":true}");
+                await Write(Secured(protectedRoot, dir), "result.json", Decision(dir) == "keep" ? "{\"success\":true}" : "{\"success\":false,\"reverted\":true}");
             }, prompts, true, deadlines: quick, unanswered: true);
             check(clock.Elapsed < TimeSpan.FromSeconds(10) && Decision(unanswered.Directory) == "rollback" && Flag(unanswered.Result, "reverted") && prompts.SequenceEqual(["Manter a configuração de rede?"]),
                 "Rede: confirmação sem resposta no prazo grava a restauração em vez de esperar indefinidamente");
@@ -213,7 +213,7 @@ internal static class NetworkRecoveryChecks
             var forgedItem = NetworkRecovery.Inspect(forged, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
             var forgedAsked = false; var forgedStarted = false;
             var forgedOutcome = await NetworkRecovery.Recover(forgedItem, _ => { forgedAsked = true; return Task.FromResult(true); }, _ => { forgedStarted = true; throw new InvalidOperationException("não deveria iniciar"); }, TimeSpan.FromSeconds(1), CancellationToken.None);
-            check(forgedItem.Before == null && forgedItem.Resolution != null && !forgedAsked && !forgedStarted && NetworkRecovery.Explain(forgedOutcome).Contains("cópia protegida") && !forgedOutcome.Contains("203.0.113.66"),
+            check(forgedItem.Before == null && forgedItem.Resolution != null && !forgedAsked && !forgedStarted && NetworkRecovery.Explain(forgedOutcome).Contains("não chegou a alterar") && !forgedOutcome.Contains("203.0.113.66"),
                 "Rede: transação forjada sem cópia protegida não gera oferta nem UAC");
 
             // A cópia do usuário adulterada não muda o que é mostrado: vale a protegida.
@@ -243,6 +243,13 @@ internal static class NetworkRecoveryChecks
             var recentItem = NetworkRecovery.Inspect(recent, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
             check(staleItem.Before == null && staleItem.Resolution != null && NetworkRecovery.Explain(staleItem.Resolution).Contains("mais de 7 dias") && recentItem.Resolution == null && recentItem.Before != null,
                 "Rede: transação interrompida há mais de 7 dias não tem a restauração oferecida");
+
+            // Mais de 7 dias e a pasta protegida já apagada pela limpeza: não se afirma que a rede ficou como estava.
+            var cleaned = Transaction(startup, protectedRoot, 1, created: DateTimeOffset.UtcNow.AddDays(-8), secure: false);
+            var cleanedItem = NetworkRecovery.Inspect(cleaned, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
+            check(cleanedItem.Before == null && cleanedItem.Resolution != null && NetworkRecovery.Explain(cleanedItem.Resolution).Contains("mais de 7 dias")
+                && NetworkRecovery.Explain(cleanedItem.Resolution).Contains("confira a rede") && !NetworkRecovery.Explain(cleanedItem.Resolution).Contains("não chegou a alterar"),
+                "Rede: transação com mais de 7 dias sem a pasta protegida pede para conferir a rede, sem afirmar que nada mudou");
 
             // Pasta que não é id de operação, ou caminho com "..": ignorada, sem gravar nada.
             var named = Path.Combine(startup, "operations", "nao-e-guid");
@@ -287,6 +294,10 @@ internal static class NetworkRecoveryChecks
             File.WriteAllText(Path.Combine(protectedRoot, Path.GetFileName(copied), NetworkRecovery.ResultFile), "{\"success\":true,\"restored\":true,\"message\":\"Configuração anterior restaurada e conferida.\"}");
             check(NetworkRecovery.Inspect(copied, DateTimeOffset.UtcNow, _ => false, trust: trust) == null && File.Exists(Path.Combine(copied, NetworkRecovery.ResultFile)),
                 "Rede: resultado elevado pendente na pasta protegida é copiado e encerra a transação");
+
+            await CheckResultsInProtectedFolder(check, store, trust, protectedRoot, startup, untrusted);
+            CheckUserCreatedFolderOnWindows(check, root);
+            CheckWritesOnInterfaceThread(check, trust, protectedRoot, startup);
 
             // O executor tira o caminho protegido da API do Windows e nunca reescreve uma ACL.
             using (var resource = typeof(NetworkRecovery).Assembly.GetManifestResourceStream("Nexo.NetworkTransaction.ps1")!)
@@ -382,12 +393,13 @@ internal static class NetworkRecoveryChecks
                 + "foreach($function in 'Get-UntrustedReason','New-ProtectedSecurity','New-ProtectedDirectory','Assert-Trusted','Use-ProtectedDirectory','New-ProtectedFileSecurity','Write-ProtectedFile'){ $definitions+=$ast.Find({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $function},$true).Extent.Text }\n"
                 + ". ([scriptblock]::Create($definitions -join \"`n\"))\n"
                 + "foreach($path in @('" + nexo.Replace("'", "''") + "','" + Path.Combine(nexo, "operations").Replace("'", "''") + "','" + operation.Replace("'", "''") + "')){ Use-ProtectedDirectory $path }\n"
-                + "foreach($name in 'before.json','transaction.json'){ Write-ProtectedFile (Join-Path '" + operation.Replace("'", "''") + "' $name) '{}' }\n", new UTF8Encoding(true));
+                + "foreach($name in 'before.json','transaction.json','result.json'){ Write-ProtectedFile (Join-Path '" + operation.Replace("'", "''") + "' $name) '{}' }\n", new UTF8Encoding(true));
             using var process = Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + wrapperPath + "\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true })!;
             var error = process.StandardError.ReadToEnd();
             process.WaitForExit(60000);
             var reason = process.ExitCode == 0 ? NetworkRecovery.UntrustedReasonOnWindows(operation) : "executor saiu com " + process.ExitCode;
             check(reason == null, "Rede: pasta criada pelas funções reais do executor é aceita pela conferência de ACL do aplicativo" + (reason == null ? "" : " (" + reason + "; " + error.Trim() + ")"));
+            check(NetworkRecovery.TrustedFileOnWindows(operation, "result.json"), "Rede: resultado gravado pelas funções reais do executor é aceito pela conferência por arquivo");
             var file = new FileInfo(Path.Combine(operation, "before.json"));
             var security = file.GetAccessControl();
             security.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(WellKnownSidType.BuiltinUsersSid, null), FileSystemRights.Modify, AccessControlType.Allow));
@@ -399,6 +411,102 @@ internal static class NetworkRecoveryChecks
         {
             try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
+    }
+
+    private static async Task CheckResultsInProtectedFolder(Action<bool, string> check, Store store, NetworkRecoveryTrust trust, string protectedRoot, string startup, HashSet<string> untrusted)
+    {
+        var prompts = new List<string>();
+        var plantedInUserFolder = await Apply(store, trust, async (dir, _) =>
+        {
+            await Write(dir, "result.json", "{\"success\":true,\"message\":\"PLANTADO\"}");
+            await Backup(dir, protectedRoot, Before);
+            await Write(Secured(protectedRoot, dir), "result.json", "{\"success\":false,\"reverted\":true,\"message\":\"Configuração anterior restaurada por cancelamento ou ausência de confirmação.\"}");
+        }, prompts, true);
+        check(Flag(plantedInUserFolder.Result, "reverted") && !plantedInUserFolder.Result.ToString().Contains("PLANTADO")
+            && File.ReadAllText(Path.Combine(plantedInUserFolder.Directory, "result.json")).Contains("restaurada por cancelamento"),
+            "Rede: resultado plantado na pasta do usuário é ignorado; vale o da pasta protegida, copiado pelo aplicativo sem elevação");
+
+        var distrusted = await Apply(store, trust, async (dir, _) =>
+        {
+            untrusted.Add(Path.GetFileName(dir));
+            await Backup(dir, protectedRoot, Before);
+            await Write(Secured(protectedRoot, dir), "result.json", "{\"success\":true,\"message\":\"PLANTADO\"}");
+        }, prompts, true);
+        check(!Flag(distrusted.Result, "success") && Text(distrusted.Result, "state") == "unknown" && Text(distrusted.Result, "error").Contains("permissões inesperados")
+            && Text(distrusted.Result, "backup").EndsWith("before.json") && !File.Exists(Path.Combine(distrusted.Directory, "result.json")),
+            "Rede: resultado em pasta protegida com dono ou permissões inesperados é ignorado e fica como estado desconhecido");
+
+        // applied.json numa pasta protegida não confiável não abre "Manter a configuração de rede?": a espera termina no
+        // prazo com estado desconhecido e a restauração é pedida ao executor.
+        prompts.Clear();
+        var quick = new NetworkDeadlines(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+        var distrustedApplied = await Apply(store, trust, async (dir, stop) =>
+        {
+            untrusted.Add(Path.GetFileName(dir));
+            await Backup(dir, protectedRoot, Before);
+            await Write(Secured(protectedRoot, dir), "applied.json", "{\"Dns\":\"203.0.113.66\"}");
+            await WaitFor(Path.Combine(dir, "decision.txt"), stop);
+            await Task.Delay(Timeout.Infinite, stop);
+        }, prompts, true, keep: true, deadlines: quick);
+        check(prompts.Count == 0 && !Flag(distrustedApplied.Result, "success") && Text(distrustedApplied.Result, "state") == "unknown" && Decision(distrustedApplied.Directory) == "rollback",
+            "Rede: estado aplicado em pasta protegida não confiável não abre a confirmação e termina como estado desconhecido");
+
+        var finished = Transaction(startup, protectedRoot, 1);
+        File.WriteAllText(Path.Combine(Secured(protectedRoot, finished), "result.json"), "{\"success\":true,\"message\":\"Configuração aplicada, estado consultado e permanência confirmada pelo usuário.\"}");
+        check(NetworkRecovery.Inspect(finished, DateTimeOffset.UtcNow, _ => false, trust: trust) == null
+            && File.ReadAllText(Path.Combine(finished, "result.json")).Contains("permanência confirmada"),
+            "Rede: resultado que ficou só na pasta protegida é copiado na abertura e não gera oferta de restauração");
+
+        var distrustedPending = Transaction(startup, protectedRoot, 1);
+        File.WriteAllText(Path.Combine(Secured(protectedRoot, distrustedPending), "result.json"), "{\"success\":true,\"message\":\"PLANTADO\"}");
+        untrusted.Add(Path.GetFileName(distrustedPending));
+        var distrustedItem = NetworkRecovery.Inspect(distrustedPending, DateTimeOffset.UtcNow, _ => false, trust: trust);
+        check(distrustedItem?.Resolution != null && !File.Exists(Path.Combine(distrustedPending, "result.json")) && !distrustedItem.Resolution.Contains("PLANTADO"),
+            "Rede: resultado pendente em pasta protegida não confiável não é copiado na abertura");
+    }
+
+    private static void CheckUserCreatedFolderOnWindows(Action<bool, string> check, string root)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var userCreated = Path.Combine(root, "user-created", "NexoSupport", "operations", System.Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(userCreated);
+        File.WriteAllText(Path.Combine(userCreated, "result.json"), "{\"success\":true}");
+        var reason = NetworkRecovery.UntrustedReasonOnWindows(userCreated, ["result.json"]);
+        check(reason != null && !NetworkRecovery.TrustedFileOnWindows(userCreated, "result.json"),
+            "Rede: resultado numa pasta criada sem elevação é recusado pela conferência real de ACL (" + reason + ")");
+    }
+
+    private static void CheckWritesOnInterfaceThread(Action<bool, string> check, NetworkRecoveryTrust trust, string protectedRoot, string startup)
+    {
+        var recorded = Path.Combine(startup, "operations", System.Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(recorded);
+        var recordWritten = CompletesOnInterfaceThread(() => NetworkRecovery.WriteRecord(recorded, new NetworkTransactionRecord("set_dns", 7, Guid, DateTimeOffset.UtcNow)));
+        check(recordWritten && File.Exists(Path.Combine(recorded, NetworkRecovery.RecordFile)),
+            "Rede: registro da transação é gravado na thread da interface sem esperar por ela (sem travar depois da autorização)");
+
+        var pending = Transaction(startup, protectedRoot, 1);
+        File.WriteAllText(Path.Combine(Secured(protectedRoot, pending), "result.json"), "{\"success\":false,\"reverted\":true}");
+        var copied = CompletesOnInterfaceThread(() => NetworkRecovery.Inspect(pending, DateTimeOffset.UtcNow, _ => false, trust: trust));
+        check(copied && File.Exists(Path.Combine(pending, "result.json")),
+            "Rede: cópia do resultado protegido na abertura do Nexo roda na thread da interface sem travar");
+    }
+
+    private static bool CompletesOnInterfaceThread(Action action)
+    {
+        var completed = false;
+        var thread = new Thread(() =>
+        {
+            SynchronizationContext.SetSynchronizationContext(new UnpumpedContext());
+            action();
+            completed = true;
+        }) { IsBackground = true };
+        thread.Start();
+        return thread.Join(TimeSpan.FromSeconds(10)) && completed;
+    }
+
+    private sealed class UnpumpedContext : SynchronizationContext
+    {
+        public override void Post(SendOrPostCallback callback, object? state) { }
     }
 
     private sealed record Outcome(JsonElement Result, string Directory, int RecoveryStarts, string RecoveryScript, string ForwardScript = "", bool Killed = false);
@@ -439,12 +547,12 @@ internal static class NetworkRecoveryChecks
             var secured = Path.Combine(protectedRoot, Path.GetFileName(dir));
             Directory.CreateDirectory(secured);
             File.WriteAllText(Path.Combine(secured, NetworkRecovery.RecordFile), Record(DateTimeOffset.UtcNow));
-            var child = "Set-Content -LiteralPath '" + Path.Combine(secured, "before.json").Replace("'", "''") + "' -Value '" + Before.Replace("'", "''") + "'; Set-Content -LiteralPath '" + Path.Combine(dir, "before.json").Replace("'", "''") + "' -Value '" + Before.Replace("'", "''") + "'; Start-Sleep -Seconds 60";
+            var child = "Set-Content -LiteralPath '" + Path.Combine(secured, "before.json").Replace("'", "''") + "' -Value '" + Before.Replace("'", "''") + "'; Start-Sleep -Seconds 60";
             var process = Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile -NonInteractive -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(child))) { UseShellExecute = false, CreateNoWindow = true })!;
             _ = Task.Run(async () =>
             {
                 var clock = Stopwatch.StartNew();
-                while (!File.Exists(Path.Combine(dir, "before.json")) && clock.Elapsed < TimeSpan.FromSeconds(30)) await Task.Delay(50);
+                while (!File.Exists(Path.Combine(secured, "before.json")) && clock.Elapsed < TimeSpan.FromSeconds(30)) await Task.Delay(50);
                 process.Kill(true); killed = true;
             });
             return new RealProcess(process);
@@ -455,15 +563,15 @@ internal static class NetworkRecoveryChecks
         return new Outcome(document.RootElement.Clone(), directory, 0, "", "", killed);
     }
 
-    // O que o executor elevado grava: a cópia protegida primeiro, depois o backup em %LOCALAPPDATA%.
     private static async Task Backup(string dir, string protectedRoot, string before)
     {
-        var secured = Path.Combine(protectedRoot, Path.GetFileName(dir));
+        var secured = Secured(protectedRoot, dir);
         Directory.CreateDirectory(secured);
         await Write(secured, NetworkRecovery.RecordFile, Record(DateTimeOffset.UtcNow));
         await Write(secured, "before.json", before);
-        await Write(dir, "before.json", before);
     }
+
+    private static string Secured(string protectedRoot, string dir) => Path.Combine(protectedRoot, Path.GetFileName(dir));
 
     private static string Record(DateTimeOffset created) => JsonSerializer.Serialize(new { Action = "set_ipv4", Index = 7, ExpectedGuid = Guid, Created = created.ToString("o") });
 

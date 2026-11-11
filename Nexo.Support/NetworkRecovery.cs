@@ -25,7 +25,14 @@ public sealed record NetworkRecoveryTrust(string ProtectedRoot, Func<string, boo
 {
     public static NetworkRecoveryTrust Default { get; } = new(
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexoSupport", "operations"),
-        directory => OperatingSystem.IsWindows() && NetworkRecovery.TrustedOnWindows(directory));
+        directory => OperatingSystem.IsWindows() && NetworkRecovery.TrustedOnWindows(directory))
+    {
+        TrustedFile = (directory, file) => OperatingSystem.IsWindows() && NetworkRecovery.TrustedFileOnWindows(directory, file)
+    };
+
+    public Func<string, string, bool>? TrustedFile { get; init; }
+
+    public bool TrustsFile(string directory, string file) => TrustedFile?.Invoke(directory, file) ?? Trusted(directory);
 }
 
 public interface IElevatedProcess : IDisposable
@@ -113,9 +120,12 @@ public static class NetworkRecovery
         // O resultado da restauração elevada fica na pasta protegida (#10); se o aplicativo fechou antes de copiá-lo, a
         // cópia é feita aqui, sem elevação, e a transação não é oferecida de novo.
         // Só de pasta protegida confiável: um resultado plantado numa pasta qualquer não encerra a transação.
-        if (!File.Exists(Path.Combine(directory, ResultFile)) && File.Exists(Path.Combine(protectedDirectory, ResultFile)) && trust.Trusted(protectedDirectory))
+        // Vale para o resultado da transação (result.json) e o da restauração (recovery-result.json), conferindo o
+        // próprio arquivo copiado.
+        foreach (var name in new[] { ResultFile, "result.json" })
         {
-            try { WriteTextAtomic(Path.Combine(directory, ResultFile), File.ReadAllText(Path.Combine(protectedDirectory, ResultFile))).GetAwaiter().GetResult(); }
+            if (File.Exists(Path.Combine(directory, name)) || !File.Exists(Path.Combine(protectedDirectory, name)) || !trust.TrustsFile(protectedDirectory, name)) continue;
+            try { WriteTextAtomic(Path.Combine(directory, name), File.ReadAllText(Path.Combine(protectedDirectory, name))).GetAwaiter().GetResult(); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
             return null;
         }
@@ -131,9 +141,13 @@ public static class NetworkRecovery
         if (!exited && (record.ProcessId is { } pid && isRunning(pid) || record.RecoveryProcessId is { } recovery && isRunning(recovery))) return null;
         if (!exited && record.ProcessId == null && now - record.Created < StartGrace) return null;
         var decision = ReadDecision(directory);
-        var applied = File.Exists(Path.Combine(directory, "applied.json"));
+        var applied = File.Exists(Path.Combine(protectedDirectory, "applied.json"));
         var phase = !applied ? "applying" : decision == "rollback" ? "restoring" : "confirming";
-        var beforePath = Path.Combine(directory, "before.json");
+        var beforePath = Path.Combine(protectedDirectory, "before.json");
+        // Sem a cópia protegida, uma transação antiga pode ter tido a pasta apagada pela limpeza de 7 dias depois de
+        // alterar a rede: não se afirma que nada mudou.
+        if (!File.Exists(beforePath) && now - record.Created > MaxAge)
+            return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = TooOldMessage(record.Created), backup = beforePath });
         if (!File.Exists(beforePath))
             return Resolved(directory, record, "before-backup", new { success = true, restored = false, unchanged = true, message = "A transação de rede foi interrompida antes de salvar o estado anterior; o executor não chegou a alterar a rede. Nenhuma restauração é necessária." });
         // A cópia em %LOCALAPPDATA% pode ser forjada por qualquer processo do usuário (#10): o que é mostrado e restaurado
@@ -153,10 +167,9 @@ public static class NetworkRecovery
         if (secured.Action != record.Action || secured.Index != record.Index || !SameGuid(secured.ExpectedGuid, record.ExpectedGuid))
             return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "O registro da transação de rede não corresponde à cópia protegida. A restauração automática não foi oferecida; confira a rede manualmente.", backup = beforePath });
         record = secured with { ProcessId = record.ProcessId, RecoveryProcessId = record.RecoveryProcessId };
-        // A fase mostrada vem do registro protegido; applied.json e decision.txt de %LOCALAPPDATA% só valem sem ela.
         if (secured.Phase is "applying" or "confirming" or "restoring") phase = secured.Phase;
         if (now - secured.Created > MaxAge)
-            return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "A alteração de rede interrompida foi iniciada há mais de " + MaxAge.TotalDays.ToString("F0", System.Globalization.CultureInfo.InvariantCulture) + " dias (" + secured.Created.ToLocalTime().ToString("dd/MM/yyyy HH:mm", System.Globalization.CultureInfo.InvariantCulture) + "). A restauração automática não é oferecida para uma configuração tão antiga; confira a rede antes de outra alteração.", backup = beforePath });
+            return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = TooOldMessage(secured.Created), backup = beforePath });
         if (decision == "keep")
             return Resolved(directory, record, "keeping", new { success = false, restored = false, uncertain = true, message = "Você confirmou manter a nova configuração de rede, mas o executor terminou antes de registrar o resultado. A configuração atual não foi conferida; consulte a rede antes de outra alteração.", backup = beforePath });
         try { return new InterruptedNetworkTransaction(directory, record, phase, Validate(File.ReadAllText(protectedBefore), record), null, protectedDirectory); }
@@ -165,6 +178,9 @@ public static class NetworkRecovery
             return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "O backup da configuração anterior não pôde ser validado (" + ex.Message + "). A restauração automática não foi oferecida; confira a rede manualmente.", backup = beforePath });
         }
     }
+
+    private static string TooOldMessage(DateTimeOffset created)
+        => "A alteração de rede interrompida foi iniciada há mais de " + MaxAge.TotalDays.ToString("F0", System.Globalization.CultureInfo.InvariantCulture) + " dias (" + created.ToLocalTime().ToString("dd/MM/yyyy HH:mm", System.Globalization.CultureInfo.InvariantCulture) + "). A restauração automática não é oferecida para uma configuração tão antiga; confira a rede antes de outra alteração.";
 
     public static string Validate(string beforeJson, NetworkTransactionRecord record)
     {
@@ -224,7 +240,7 @@ public static class NetworkRecovery
         if (item.Resolution != null) return item.Resolution;
         if (item.Before == null) throw new InvalidOperationException("Transação sem backup validado.");
         var resultPath = Path.Combine(item.Directory, ResultFile);
-        var backup = Path.Combine(item.Directory, "before.json");
+        var backup = Path.Combine(item.ProtectedDirectory ?? item.Directory, "before.json");
         bool accepted;
         try { accepted = await confirm(new ChangeRequest("Restaurar configuração de rede anterior?", Describe(item))); }
         catch (Exception ex) { return Serialize(new { success = false, restored = false, uncertain = true, error = "Confirmação indisponível: " + ex.Message + ". Nada foi alterado; a restauração será oferecida novamente.", backup }); }
@@ -299,12 +315,19 @@ public static class NetworkRecovery
 
     /// <summary>Motivo da recusa da cópia protegida (caminho, regra, dono e ACE), ou null quando ela é confiável.</summary>
     [SupportedOSPlatform("windows")]
-    internal static string? UntrustedReasonOnWindows(string directory)
+    internal static string? UntrustedReasonOnWindows(string directory) => UntrustedReasonOnWindows(directory, ["before.json", RecordFile]);
+
+    [SupportedOSPlatform("windows")]
+    internal static bool TrustedFileOnWindows(string directory, string file) => UntrustedReasonOnWindows(directory, [file]) == null;
+
+    [SupportedOSPlatform("windows")]
+    internal static string? UntrustedReasonOnWindows(string directory, string[] files)
     {
         try
         {
             var operations = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(directory))!;
-            var items = new FileSystemInfo[] { new DirectoryInfo(Path.GetDirectoryName(operations)!), new DirectoryInfo(operations), new DirectoryInfo(directory), new FileInfo(Path.Combine(directory, "before.json")), new FileInfo(Path.Combine(directory, RecordFile)) };
+            var folders = new FileSystemInfo[] { new DirectoryInfo(Path.GetDirectoryName(operations)!), new DirectoryInfo(operations), new DirectoryInfo(directory) };
+            var items = folders.Concat(files.Select(file => new FileInfo(Path.Combine(directory, file))));
             foreach (var item in items)
             {
                 if (!item.Exists) return item.FullName + ": não existe";
@@ -376,10 +399,10 @@ public static class NetworkRecovery
     private static string Decode(string json) => "[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + Convert.ToBase64String(Encoding.UTF8.GetBytes(json)) + "'))";
     private static string Serialize(object value) => JsonSerializer.Serialize(value);
     private static void WriteJson(string path, object value) => WriteTextAtomic(path, Serialize(value)).GetAwaiter().GetResult();
-    private static async Task WriteTextAtomic(string path, string text)
+    internal static async Task WriteTextAtomic(string path, string text)
     {
         var temporary = path + ".tmp";
-        await File.WriteAllTextAsync(temporary, text, CancellationToken.None);
+        await File.WriteAllTextAsync(temporary, text, CancellationToken.None).ConfigureAwait(false);
         File.Move(temporary, path, true);
     }
 
