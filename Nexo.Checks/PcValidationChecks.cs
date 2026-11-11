@@ -48,6 +48,12 @@ internal static class PcValidationChecks
                 "O T: está quase sem espaço.",
                 "O espaço livre está reduzido no T:.",
                 "O disco T: está sem espaço.",
+                // @qa: cortesia no fim da oração, letra da unidade como sujeito e "armazenamento acabando".
+                "Libere espaço no disco, se possível.",
+                "Recomendo liberar espaço no disco, se for o caso.",
+                "Libere espaço no T: quando puder.",
+                "O T: está praticamente lotado.",
+                "O armazenamento está acabando.",
             ];
             string[] accepted =
             [
@@ -56,6 +62,8 @@ internal static class PcValidationChecks
                 "O alerta de pouco espaço no T: foi resolvido.",
                 "O T: tinha pouquíssimo espaço antes.",
                 "O C: está com 87% livre.",
+                "O C: está com 87% livre, sem espaço para preocupação.",
+                "Quando puder, me diga se o C: continua lento.",
             ];
             var wrong = refused.Where(text => evidence.ValidateStatement(text, false) != InvestigationEvidence.ClosedDiskReason)
                 .Concat(accepted.Where(text => evidence.ValidateStatement(text, false) != null)).ToArray();
@@ -130,6 +138,13 @@ internal static class PcValidationChecks
             "O NexoMemTeste-toca pode estar causando a lentidão.",
             "O processo NexoMemTeste-toca é o responsável pela lentidão.",
             "A lentidão é causada pelo NexoMemTeste-toca, que usa 7198 MB.",
+            // @qa: outros verbos de culpa.
+            "O NexoMemTeste-toca está usando 7198 MB. Isso explica a lentidão.",
+            "O NexoMemTeste-toca pode estar tornando o PC mais lento.",
+            "O NexoMemTeste-toca pode ser a razão da lentidão.",
+            "O NexoMemTeste-toca está pesando no desempenho do computador.",
+            // A retomada que culpa o processo estável junto com outro continua recusada.
+            "O NexoMemTeste-toca está estável em 7198 MB. Isso e o chrome.exe podem estar causando a lentidão.",
         ];
         string[] accepted =
         [
@@ -137,6 +152,11 @@ internal static class PcValidationChecks
             "O NexoMemTeste-toca está estável em 7198 MB. O que está lento e desde quando?",
             "Isso pode estar causando a lentidão?",
             "A memória do PC está em 57%. Algum programa específico está lento?",
+            // @qa: o "ele" retoma o chrome, não o processo estável.
+            "O processo chrome está usando 95% da CPU. Ele pode estar causando a lentidão. O NexoMemTeste-toca está estável em 7198 MB.",
+            "O NexoMemTeste-toca está estável em 7198 MB, e o chrome.exe usa 95% da CPU. Ele pode estar causando a lentidão.",
+            "O NexoMemTeste-toca está estável em 7198 MB; explico abaixo o que isso significa.",
+            "O desempenho do disco está bom e o NexoMemTeste-toca está estável.",
         ];
         var wrong = refused.Where(text => evidence.ValidateStatement(text, false) != InvestigationEvidence.StablePlateauReason)
             .Concat(accepted.Where(text => evidence.ValidateStatement(text, false) != null)).ToArray();
@@ -153,6 +173,21 @@ internal static class PcValidationChecks
         assert(high.ValidateStatement(Blamed, false) == null && persisting.ValidateStatement(Blamed, false) == null
             && asked.ValidateStatement(Blamed, false) == null && unknown.ValidateStatement(Blamed, false) == null && other.ValidateStatement(Blamed, false) == null,
             "#71 patamar estável: com a RAM no limite, com o alerta persistindo, com outra ocorrência de memória ativa, com o processo citado pelo usuário ou sem a leitura de memória, nada é recusado");
+        // @qa: um começo de nome só vale até um separador do nome e não vale para prefixos de fabricante ou do sistema.
+        string Plateau(string name, int pid) => Label + ": " + name + " PID " + pid + " segue com 900 MB. Patamar de referência: cerca de 900 MB, o primeiro medido depois do alerta. Volta a persistir se chegar a 990 MB";
+        var terminal = Observed(MemoryReport(Plateau("WindowsTerminal", 900), 57).Replace("NexoMemTeste-toca PID 1732", "WindowsTerminal PID 900"));
+        var photos = Observed(MemoryReport(Plateau("Microsoft.Photos", 901), 57).Replace("NexoMemTeste-toca PID 1732", "Microsoft.Photos PID 901"));
+        assert(terminal.ValidateStatement("O Windows pode estar lento por causa das atualizações.", false) == null
+            && terminal.ValidateStatement("O Windows Update pode estar deixando o PC lento.", false) == null
+            && photos.ValidateStatement("O Microsoft Edge pode estar causando a lentidão.", false) == null
+            && !terminal.WithMemoryFigures("O Windows está usando bastante recurso.").Contains("Pelo monitor")
+            && !photos.WithMemoryFigures("O Microsoft Edge está aberto.").Contains("Pelo monitor")
+            && terminal.ValidateStatement("O WindowsTerminal pode estar causando a lentidão.", false) == InvestigationEvidence.StablePlateauReason,
+            "#71/#88 nome parcial: \"Windows\" não é o WindowsTerminal e \"Microsoft\" não é o Microsoft.Photos, na trava e na linha dos MB");
+        // Sem separador logo depois do trecho, o começo do nome não conta, mesmo fora da lista de prefixos genéricos.
+        var plural = Observed(MemoryReport(Plateau("NexoMemTestes", 902), 57).Replace("NexoMemTeste-toca PID 1732", "NexoMemTestes PID 902"));
+        assert(!plural.WithMemoryFigures("O NexoMemTeste está aberto.").Contains("Pelo monitor") && plural.ValidateStatement("O NexoMemTeste pode estar causando a lentidão.", false) == null,
+            "#71/#88 nome parcial: \"NexoMemTeste\" não é o começo de \"NexoMemTestes\", porque falta o separador");
         var repeated = evidence.RepeatedGuidance(InvestigationEvidence.StablePlateauReason, Blamed);
         assert(repeated.Contains("“Isso pode estar contribuindo para a lentidão.”") && !repeated.Contains("Recomendo salvar"),
             "#71 patamar estável: na 2ª recusa o controle cita só a frase que culpa o processo");

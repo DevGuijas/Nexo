@@ -318,10 +318,11 @@ public static class HealthOccurrences
 
     // Na validação da 76d9028 (10/11), o alerta do T: (um VHDX) ficou como "estado atual desconhecido" depois de o VHDX sair:
     // sem o volume, nenhuma leitura mostrava espaço livre. O volume conta como ausente só quando a leitura listou outros
-    // volumes e não registrou falha da enumeração ("Discos: …") nem desse volume ("Volume T:\: …"); lista vazia continua
-    // não provando nada.
+    // volumes e não registrou falha da enumeração ("Discos: …") nem desse volume ("Volume T:\: …"), nem o listou como não
+    // pronto (UnreadyVolumes); lista vazia continua não provando nada.
     private static bool VolumeGone(HealthSnapshot sample, string volume) => sample.Disks.Count > 0
         && !sample.Disks.Any(d => d.Name.Equals(volume, StringComparison.OrdinalIgnoreCase))
+        && !(sample.UnreadyVolumes ?? []).Any(name => name.Equals(volume, StringComparison.OrdinalIgnoreCase))
         && !sample.Warnings.Any(w => w.StartsWith("Discos:", StringComparison.Ordinal) || w.StartsWith("Volume " + volume + ":", StringComparison.OrdinalIgnoreCase));
 
     private static string Megabytes(long bytes) => (bytes / (1024.0 * 1024)).ToString("F0", CultureInfo.InvariantCulture);

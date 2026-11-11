@@ -26,6 +26,12 @@ public sealed class HealthSnapshot
     public List<ServiceHealth> Services { get; set; } = [];
     public List<AdapterHealth> Adapters { get; set; } = [];
     public List<string> Warnings { get; set; } = [];
+    /// <summary>
+    /// Volumes fixos que o Windows listou sem estarem prontos (por exemplo, BitLocker bloqueado). Não é falha da coleta: não
+    /// deixa a amostra parcial nem vira limitação; só impede que o alerta de pouco espaço desse volume seja dado como
+    /// resolvido por ele ter saído (#88).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public List<string>? UnreadyVolumes { get; set; }
 }
 
 public sealed record DiskHealth(string Name, long FreeBytes, long TotalBytes, string Health = "unavailable");

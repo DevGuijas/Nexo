@@ -257,12 +257,13 @@ public sealed class InvestigationEvidence
             FileSearchReason => OffersFileSearch,
             ClosedDiskReason => PresentsClosedDisk,
             MalwareReason => SuggestsMalware,
-            StablePlateauReason => BlamesStableSentence,
             AgentProtocol.PendingActionReason => part => AgentProtocol.PendingActionPhrase(part) != null,
             _ => null
         };
-        var passages = refuses == null ? Array.Empty<string>() : Regex.Split(message, @"(?<=[!?;\n])|(?<=\.)(?=\s|$)").Select(part => part.Trim())
-            .Where(part => part.Length > 0 && refuses(AgentProtocol.Normalize(part))).Take(2).ToArray();
+        var parts = Regex.Split(message, @"(?<=[!?;\n])|(?<=\.)(?=\s|$)").Select(part => part.Trim()).Where(part => part.Length > 0).ToArray();
+        // A frase que culpa o processo estável depende da anterior ("isso…"): ela é escolhida no contexto da resposta.
+        var passages = reason == StablePlateauReason ? BlamedSentences(parts.Select(AgentProtocol.Normalize).ToArray()).Take(2).Select(i => parts[i]).ToArray()
+            : refuses == null ? Array.Empty<string>() : parts.Where(part => refuses(AgentProtocol.Normalize(part))).Take(2).ToArray();
         var text = "Esta é a mesma recusa da tentativa anterior: não reenvie o mesmo texto.";
         if (passages.Length == 0) return text + " Escreva a resposta de novo, do zero, sem o ponto indicado no motivo.";
         text += (passages.Length == 1 ? " Remova ou reescreva este trecho: " : " Remova ou reescreva estes trechos: ") + string.Join(" ", passages.Select(part => Quoted(part, 240))) + ".";
@@ -327,7 +328,11 @@ public sealed class InvestigationEvidence
     // pela retomada ("isso", "esse processo", "o consumo") numa resposta que o cita. Passam a pergunta, a negação colada ao
     // verbo ("não deve estar causando a lentidão") e o turno em que o próprio usuário citou o processo. Sem a leitura de
     // memória do PC, nada é recusado.
-    private static readonly Regex Blame = new(@"\b(?:contribu\w*|caus\w*|provoc\w*|ger(?:a|am|ando|ar)|deix(?:a|am|ando|ar)|responsave(?:l|is)|culpad[oa]s?|motivo|origem)\b[^.;!?]*?\b(?:lentid\w*|lent[oa]s?|travament\w*|travando|devagar|demor\w*)\b|\b(?:lentid\w*|lent[oa]s?|travament\w*|travando|devagar)\b[^.;!?]*?\b(?:por causa d|causad[oa]s? p(?:or|el[oa])|devid[oa]s? a)");
+    // "Explica", "tornando… mais lento", "a razão da lentidão" e "pesando/afetando o desempenho" também culpam (@qa); "explico
+    // abaixo" e "o desempenho do disco está bom" não, porque falta o verbo ou o sintoma.
+    private static readonly Regex Blame = new(@"\b(?:contribu\w*|caus\w*|provoc\w*|ger(?:a|am|ando|ar)|deix(?:a|am|ando|ar)|torn(?:a|am|ando|ar)|explic(?:a|am|ando|aria|ariam)|responsave(?:l|is)|culpad[oa]s?|motivo|razao|razoes|origem)\b[^.;!?]*?\b(?:lentid\w*|lent[oa]s?|travament\w*|travando|devagar|demor\w*)\b"
+        + @"|\b(?:lentid\w*|lent[oa]s?|travament\w*|travando|devagar)\b[^.;!?]*?\b(?:por causa d|causad[oa]s? p(?:or|el[oa])|devid[oa]s? a)"
+        + @"|\b(?:pes(?:a|am|ando|ar)|afet(?:a|am|ando|ar)|prejudic(?:a|am|ando|ar)|compromet(?:e|em|endo|er))\b[^.;!?]*?\b(?:desempenho|performance)\b");
     private static readonly Regex Anaphor = new(@"^\W*(?:\w+\W+){0,2}?(?:isso|isto|esse|este|esses|estes|ele|eles|o processo|esse processo|este processo|o consumo|esse consumo|o uso de memoria|essa memoria|a memoria)\b");
     private (string Name, int Pid, long From, long To, long? Now, bool Stable)[] BlamableStable()
     {
@@ -336,16 +341,33 @@ public sealed class InvestigationEvidence
         var asked = AgentProtocol.Normalize(UserRequest);
         return stable.Any(holder => CitesHolder(asked, holder)) ? [] : stable;
     }
-    private bool BlamesStablePlateau(string normalized)
+    private bool BlamesStablePlateau(string normalized) => BlamedSentences(Sentences(normalized)).Any();
+    // Índices das frases que culpam o processo estável. A retomada ("isso", "ele", "esse processo") só conta quando a frase
+    // anterior cita o processo estável e nenhum outro processo (@qa): em "O processo chrome está
+    // usando 95% da CPU. Ele pode estar causando a lentidão.", o "ele" é o chrome.
+    private IEnumerable<int> BlamedSentences(string[] normalized)
     {
         var stable = BlamableStable();
-        return stable.Any(holder => CitesHolder(normalized, holder)) && Sentences(normalized).Any(sentence => BlamesInSentence(sentence, stable));
+        if (stable.Length == 0) yield break;
+        for (var i = 0; i < normalized.Length; i++)
+        {
+            var sentence = normalized[i];
+            if (sentence.Contains('?') || !Blame.Matches(sentence).Any(match => !Negated(sentence, match))) continue;
+            var direct = stable.Any(holder => CitesHolder(sentence, holder));
+            var resumed = !direct && Anaphor.IsMatch(sentence)
+                && Enumerable.Range(0, i).Reverse().Select(j => normalized[j]).FirstOrDefault(previous => previous.Trim().Length > 0) is { } prior
+                && stable.Any(holder => CitesHolder(prior, holder)) && !CitesOtherProcess(prior, stable);
+            if (direct || resumed) yield return i;
+        }
     }
-    // A frase que culpa o processo, para a 2ª recusa citar só ela (a retomada "isso…" vale sozinha).
-    private bool BlamesStableSentence(string normalized) => BlamableStable() is { Length: > 0 } stable && Sentences(normalized).Any(sentence => BlamesInSentence(sentence, stable));
-    private bool BlamesInSentence(string sentence, (string Name, int Pid, long From, long To, long? Now, bool Stable)[] stable) => !sentence.Contains('?')
-        && (stable.Any(holder => CitesHolder(sentence, holder)) || Anaphor.IsMatch(sentence))
-        && Blame.Matches(sentence).Any(match => !Negated(sentence, match));
+    // Outro processo na frase: um nome conhecido do turno que não é do processo estável, ou "processo <nome>" / "<nome>.exe".
+    private bool CitesOtherProcess(string sentence, (string Name, int Pid, long From, long To, long? Now, bool Stable)[] stable)
+    {
+        var mine = stable.Select(holder => AgentProtocol.Normalize(holder.Name)).ToHashSet();
+        if (ProcessNames().Select(AgentProtocol.Normalize).Where(name => !mine.Contains(name)).Any(name => Cites(sentence, name))) return true;
+        return Regex.Matches(sentence, @"\bprocessos?\s+(?:chamad[oa]\s+)?[“""'«]?(?<name>[\p{L}\p{N}_-][\p{L}\p{N}._-]*?)(?:\.exe)?[”""'»]?(?=[\s,;:.!?)]|$)|(?<name>[\p{L}\p{N}_-]+)\.exe\b")
+            .Any(match => !stable.Any(holder => CitesHolder(match.Groups["name"].Value, holder)));
+    }
 
     internal const string FileSearchReason = "O Nexo não lista nem procura arquivos ou pastas: não ofereça identificar os maiores arquivos nem o que ocupa espaço. No lugar, diga o espaço livre medido e indique que o usuário vê o que ocupa espaço em Configurações > Sistema > Armazenamento no Windows.";
     internal const string ClosedDiskReason = "A resposta apresenta como atual a falta de espaço em disco, mas o relatório de saúde só mostra essa ocorrência encerrada (resolvida ou com estado atual desconhecido) e nenhuma leitura atual tem pouco espaço. Cite o espaço livre atual por volume, ou diga que essa ocorrência não está ativa.";
@@ -394,8 +416,14 @@ public sealed class InvestigationEvidence
     // reconhecido, e o "caso" isentava a frase inteira. Agora valem pouco/pouca/pouquíssimo/pouquinho, "quase sem espaço",
     // "sem espaço" e "espaço reduzido/limitado/escasso"; e "caso necessário", "se necessário" ou "se precisar" no fim da
     // oração não são condição sobre o disco: a condição real ("se o disco encher", "caso precise liberar…") continua isentando.
-    private static readonly Regex LowSpace = new(@"\b(?:liber\w*|abr\w*|desocup\w*) (?:\w+ ){0,2}espaco\b|\b(?:disco|unidade|volume|armazenamento|hd|ssd)\b(?: \S+){0,3} (?:cheio|cheia|lotad[oa]|sem espaco)\b|\b(?:pouc[oa]s?|pouquissim[oa]s?|pouquinho(?: de)?|quase sem|sem) espaco\b|\bfalta de espaco\b|\bespaco (?:\w+ ){0,2}(?:insuficiente|baixo|acabando|reduzido|limitado|escasso)\b");
-    private static readonly Regex PoliteCondition = new(@"\b(?:se|caso) (?:(?:for|seja|achar|julgar) )?(?:necessari\w*|precis(?:o|ar|e))(?= *(?:[,.;:!)]|$))");
+    // "Sem espaço para preocupação/dúvidas" não é falta de espaço; a letra da unidade conta como sujeito ("o T: está
+    // praticamente lotado"), e "o armazenamento está acabando" conta. "Se possível", "se for o caso" e "quando puder" no
+    // fim da oração também são cortesia, não condição (@qa).
+    private const string NoRoom = @"sem espaco(?! (?:para|pra) (?:\w+ )?(?:preocupa\w*|duvidas?|reclama\w*|questiona\w*|erros?|falhas?|mais nada a)\b)";
+    private static readonly Regex LowSpace = new(@"\b(?:liber\w*|abr\w*|desocup\w*) (?:\w+ ){0,2}espaco\b|(?:\b(?:disco|unidade|volume|armazenamento|hd|ssd)\b|(?<![\w:])[a-z]:)(?: \S+){0,3} (?:cheio|cheia|lotad[oa]|" + NoRoom + @")"
+        + @"|\b(?:pouc[oa]s?|pouquissim[oa]s?|pouquinho(?: de)?|quase) " + NoRoom.Replace("sem espaco", "(?:sem )?espaco") + @"|\b" + NoRoom + @"|\bfalta de espaco\b"
+        + @"|\b(?:espaco|armazenamento) (?:\w+ ){0,2}(?:insuficiente|baixo|acabando|esgotad[oa]|reduzido|limitado|escasso)\b");
+    private static readonly Regex PoliteCondition = new(@"\b(?:(?:se|caso) (?:(?:for|seja|achar|julgar) )?(?:necessari\w*|precis(?:o|ar|e)|possivel)|se for o caso|(?:se|quando) (?:voce )?puder)(?= *(?:[,.;:!)]|$))");
     private bool PresentsClosedDisk(string normalized)
     {
         if (!diskClosed || diskActive || lowestFreePercent < LowFreePercent) return false;
@@ -470,9 +498,18 @@ public sealed class InvestigationEvidence
         if (Regex.IsMatch(normalized, @"(?<![\w.-])" + Regex.Escape(key) + @"(?![\w-])")) return true;
         if (Regex.IsMatch(normalized, @"(?<!\d)" + holder.Pid.ToString(CultureInfo.InvariantCulture) + @"(?!\d)")) return true;
         var others = topProcesses.Select(p => p.Name).Concat(currentProcesses).Select(AgentProtocol.Normalize).Where(other => other != key).ToHashSet();
+        // O começo só vale até um separador do nome ("nexomemteste" + "-toca"), nunca no meio de uma palavra ("windows" de
+        // "windowsterminal"), e não vale para prefixos de fabricante ou do sistema ("microsoft" de "Microsoft.Photos") (@qa).
         return Regex.Matches(normalized, @"(?<![\w.-])[\p{L}\p{N}._-]{6,}").Select(match => Regex.Replace(match.Value, @"(?:\.exe)?[._-]*$", ""))
-            .Any(word => word.Length >= 6 && word.Length < key.Length && key.StartsWith(word, StringComparison.Ordinal) && !others.Contains(word));
+            .Any(word => word.Length >= 6 && word.Length < key.Length && key.StartsWith(word, StringComparison.Ordinal) && key[word.Length] is '-' or '_' or '.' or ' '
+                && !GenericPrefixes.Contains(word) && !others.Contains(word));
     }
+    private static readonly HashSet<string> GenericPrefixes = new(StringComparer.Ordinal)
+    {
+        "windows", "microsoft", "google", "nvidia", "intel", "adobe", "service", "services", "system", "realtek", "apple", "mozilla", "oracle",
+        "update", "updater", "runtime", "driver", "drivers", "helper", "client", "server", "launcher", "installer", "setup", "steam", "lenovo",
+        "dell", "asus", "acer", "samsung", "logitech", "office", "teams", "java", "python", "chrome", "edge", "firefox", "process", "processo"
+    };
     public string WithMemoryFigures(string answer)
     {
         if (memoryHolders.Count == 0 || string.IsNullOrWhiteSpace(answer)) return answer;

@@ -63,8 +63,14 @@ internal static class HealthOccurrenceChecks
         check(State(alert, Series(s => s.Disks = [Volume("c:", 40)], 30, 0)).State == OccurrenceState.Resolved, "Espaço recuperado resolve a ocorrência sem diferenciar maiúsculas no nome");
         check(State(alert, Series(s => s.Disks = [], 30, 0)).State == OccurrenceState.Unknown, "Volume ausente da leitura não prova resolução");
         // Desde a validação da 76d9028 (10/11), o volume que deixou de existir resolve a ocorrência; o que não foi lido, não.
-        check(State(alert, Series(s => { s.Disks = [Volume("D:", 90)]; s.Warnings = ["Volume C:: não está pronto"]; }, 30, 0)).State == OccurrenceState.Unknown,
-            "Espaço livre em outro volume não resolve a ocorrência de um volume que não foi lido");
+        check(State(alert, Series(s => { s.Disks = [Volume("D:", 90)]; s.UnreadyVolumes = ["c:"]; }, 30, 0)).State == OccurrenceState.Unknown,
+            "Espaço livre em outro volume não resolve a ocorrência de um volume listado como não pronto (BitLocker bloqueado)");
+        var locked = At(0, s => { s.Disks = [Volume("D:", 90)]; s.UnreadyVolumes = ["C:"]; });
+        WindowsHealthSampler.ApplyCollectionStatus(locked);
+        var stored = System.Text.Json.JsonSerializer.Deserialize<HealthSnapshot>(System.Text.Json.JsonSerializer.Serialize(locked))!;
+        check(locked.CollectionStatus == "complete" && locked.Warnings.Count == 0 && stored.UnreadyVolumes is ["C:"]
+            && !System.Text.Json.JsonSerializer.Serialize(At(0)).Contains("UnreadyVolumes"),
+            "Volume não pronto não deixa a coleta parcial nem vira aviso, e é gravado com a amostra só quando existe");
         var gone = State(Found("disk-low:T:\\"), Series(s => s.Disks = [Volume("C:\\", 87)], 30, 0));
         check(gone.State == OccurrenceState.Resolved && gone.Label == "Resolvida: o volume não está mais presente em 2 leituras seguidas",
             "Volume removido (VHDX desmontado) resolve a ocorrência, com o motivo, quando a leitura lista os outros volumes sem falha");
@@ -76,6 +82,18 @@ internal static class HealthOccurrenceChecks
             "Falha na leitura do próprio volume não prova que ele saiu");
         check(State(Found("disk-low:T:\\"), At(60, s => s.Disks = [Volume("C:\\", 87)]), At(30, s => s.Disks = [Volume("C:\\", 87), Volume("T:\\", 5)]), At(0, s => s.Disks = [Volume("C:\\", 87), Volume("T:\\", 5)])).State == OccurrenceState.Persistent,
             "Volume que volta cheio faz a ocorrência persistir de novo");
+        // O volume sai (VHDX desmontado), o alerta é resolvido; o volume volta cheio, a nova ocorrência persiste e a antiga
+        // fica como anterior a ela, pelo padrão das ocorrências repetidas.
+        var removedThenBack = new[] { At(120, s => s.Disks = [Volume("C:\\", 87)]), At(90, s => s.Disks = [Volume("C:\\", 87)]) };
+        var old = Found("disk-low:T:\\", 150);
+        var afterRemoval = HealthOccurrences.Classify([old], removedThenBack, Limits, Now.AddSeconds(-90))[0].Status;
+        var returned = removedThenBack.Concat([At(30, s => s.Disks = [Volume("C:\\", 87), Volume("T:\\", 5)]), At(0, s => s.Disks = [Volume("C:\\", 87), Volume("T:\\", 5)])]).ToArray();
+        var reopened = new HealthFinding { Id = "disk-low:T:\\:s9", Time = Now, Source = "rules" };
+        var both = HealthOccurrences.Classify([old, reopened], returned, Limits, Now);
+        check(afterRemoval.State == OccurrenceState.Resolved && afterRemoval.Label.Contains("não está mais presente")
+            && both.Single(o => o.Finding == reopened).Status.State == OccurrenceState.Persistent
+            && both.Single(o => o.Finding == old).Status.Label.Contains("há ocorrência mais recente"),
+            "Volume removido resolve o alerta; quando volta cheio, a nova ocorrência persiste e a antiga fica como anterior");
         var mixed = State(Found("disk-low:T:\\"), At(30, s => s.Disks = [Volume("C:\\", 87)]), At(0, s => s.Disks = [Volume("C:\\", 87), Volume("T:\\", 60)]));
         check(mixed.State == OccurrenceState.Resolved && mixed.Label == "Resolvida: 2 leituras seguidas sem a condição", "Volume que some e volta com espaço resolve pelo motivo comum");
         check(State(alert, Series(s => s.Disks = [new DiskHealth("C:", 5, 0)], 30, 0)).State == OccurrenceState.Unknown, "Volume sem capacidade informada não prova resolução");

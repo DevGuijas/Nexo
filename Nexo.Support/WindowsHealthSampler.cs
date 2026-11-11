@@ -58,8 +58,9 @@ public sealed class WindowsHealthSampler : IHealthSampler
         {
             foreach (var drive in DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed))
             {
-                // Um volume fixo que não está pronto fica registrado: sem o aviso, ele pareceria removido e encerraria o alerta dele.
-                try { if (drive.IsReady) result.Disks.Add(new DiskHealth(drive.Name, drive.AvailableFreeSpace, drive.TotalSize)); else result.Warnings.Add("Volume " + drive.Name + ": não está pronto"); }
+                // Um volume fixo que não está pronto (BitLocker bloqueado, por exemplo) fica registrado à parte: sem isso, ele
+                // pareceria removido e encerraria o alerta dele; como aviso, deixaria toda amostra parcial para sempre.
+                try { if (drive.IsReady) result.Disks.Add(new DiskHealth(drive.Name, drive.AvailableFreeSpace, drive.TotalSize)); else (result.UnreadyVolumes ??= []).Add(drive.Name); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { result.Warnings.Add("Volume " + drive.Name + ": " + ex.Message); }
             }
         }

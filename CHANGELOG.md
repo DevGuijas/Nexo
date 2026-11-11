@@ -22,7 +22,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 
 - Página **Saúde do PC** com CPU, memória, volumes, serviços automáticos, adaptadores e eventos do Windows coletados enquanto a janela está aberta.
 - Histórico operacional em SQLite (`operations.db`), separado das conversas, com retenção configurável.
-- Ocorrências persistentes com estado atual: persiste, resolvida ou desconhecida. Resolver exige leituras seguidas sem a condição. O alerta de pouco espaço de um volume que deixou de existir (um VHDX desmontado) é resolvido quando as leituras listam os outros volumes sem falha e não o encontram ("Resolvida: o volume não está mais presente…"); um volume que não está pronto fica registrado como aviso da coleta e não conta como removido (#88).
+- Ocorrências persistentes com estado atual: persiste, resolvida ou desconhecida. Resolver exige leituras seguidas sem a condição. O alerta de pouco espaço de um volume que deixou de existir (um VHDX desmontado) é resolvido quando as leituras listam os outros volumes sem falha e não o encontram ("Resolvida: o volume não está mais presente…"); um volume fixo que não está pronto (BitLocker bloqueado) não conta como removido nem deixa a coleta parcial (#88).
 - Crescimento de memória por processo, identificado por PID e horário de início. Um processo que se estabiliza num patamar alto por 30 minutos passa a "Estável em patamar alto", informativo; volta a "Persiste" se subir 10% sobre a referência gravada na ocorrência (#71).
 - Sondagens opcionais de gateway, DNS e destino HTTP(S), desligadas por padrão.
 - Serviços automáticos que o Windows deixa parados de propósito (início atrasado ou por gatilho com código 0) não geram alerta.
