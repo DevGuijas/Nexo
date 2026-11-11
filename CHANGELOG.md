@@ -14,14 +14,15 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - [ ] Investigar com o log do Ollama ativo as etapas expiradas na 1ª chamada ao modelo, antes de mudar o limite de 3 minutos (#93, item 4).
 - [ ] Validar as sete falhas controladas em VM Windows (#8).
 - [ ] Autenticar a decisão de manter uma mudança de rede elevada (#11) e alinhar o prazo da instalação NVIDIA ao supervisor (#12).
-- [ ] Validar no PC: a recuperação e o prazo da rede com ACL e UAC reais (#9, #10); o custo da coleta de sensores, com e sem o Libre Hardware Monitor, e os discos atrás do AMD-RAID (#19); o patamar estável de memória com o NexoMemTeste-toca (#71); o disco e a memória na resposta (#88); e as respostas da #93 (recusa repetida, processo desconhecido e a letra da unidade com um VHDX e um pendrive ao mesmo tempo).
+- [x] Validar no PC o patamar estável de memória com o NexoMemTeste-toca (#71): "Persiste", "Estável em patamar alto" depois de 31 min, volta a "Persiste" com +15% e "Resolvida" com o processo encerrado, na 76d9028 em 10/11/2026.
+- [ ] Validar no PC: a recuperação e o prazo da rede com ACL e UAC reais (#9, #10); o custo da coleta de sensores, com e sem o Libre Hardware Monitor, e os discos atrás do AMD-RAID (#19); de novo, depois dos ajustes da validação de 10/11, o disco e a memória na resposta (#88: loop do disco, "pouca espaço", linha dos MB e alerta do volume removido) e as respostas da #93 (letra de unidade perguntada como "o que é o D:?", descrição de processo sem evidência); e o patamar estável na resposta (#71: não culpar o processo pela lentidão).
 - [ ] Trocar "não publicada" pela data de publicação, gerar os pacotes e registrar abaixo o commit e os hashes impressos pelo script.
 
 ### Saúde do computador
 
 - Página **Saúde do PC** com CPU, memória, volumes, serviços automáticos, adaptadores e eventos do Windows coletados enquanto a janela está aberta.
 - Histórico operacional em SQLite (`operations.db`), separado das conversas, com retenção configurável.
-- Ocorrências persistentes com estado atual: persiste, resolvida ou desconhecida. Resolver exige leituras seguidas sem a condição.
+- Ocorrências persistentes com estado atual: persiste, resolvida ou desconhecida. Resolver exige leituras seguidas sem a condição. O alerta de pouco espaço de um volume que deixou de existir (um VHDX desmontado) é resolvido quando as leituras listam os outros volumes sem falha e não o encontram ("Resolvida: o volume não está mais presente…"); um volume que não está pronto fica registrado como aviso da coleta e não conta como removido (#88).
 - Crescimento de memória por processo, identificado por PID e horário de início. Um processo que se estabiliza num patamar alto por 30 minutos passa a "Estável em patamar alto", informativo; volta a "Persiste" se subir 10% sobre a referência gravada na ocorrência (#71).
 - Sondagens opcionais de gateway, DNS e destino HTTP(S), desligadas por padrão.
 - Serviços automáticos que o Windows deixa parados de propósito (início atrasado ou por gatilho com código 0) não geram alerta.
@@ -44,6 +45,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - Ocorrência encerrada (resolvida ou histórica) não é apresentada como problema atual; ocorrências estáveis e informativas vão ao modelo marcadas como tal (#88).
 - Os MB do processo que segura memória e, com alerta de pouco espaço ativo, a indicação de Configurações > Sistema > Armazenamento entram na resposta pelo próprio Nexo; a oferta de achar os maiores arquivos é recusada, e um alerta de disco já encerrado não vira pedido para liberar espaço (#88, PR #94).
 - Rótulos de progresso para todas as ferramentas, e "ferramenta inexistente pedida pelo modelo" quando ele pede uma que não existe (#84, #88).
+- Ajustes da validação de 10/11 (#88, #71, #93): "pouca", "pouquíssimo", "quase sem" e "sem espaço" também contam como falta de espaço num alerta de disco encerrado, e "caso necessário" não isenta a frase; a promessa de liberar espaço ou remover arquivos é recusada com a instrução de que o Nexo não tem essa ferramenta, e o turno que esgota as tentativas sem evidência num incidente do sistema consulta o relatório de saúde e termina com ele, em vez de "A IA não conseguiu selecionar a próxima etapa"; a linha dos MB entra também quando o processo é citado por um começo do nome e, no patamar estável, diz que é informativo; a resposta que apresenta um processo em patamar estável como causa da lentidão, com a memória do PC abaixo de 80%, é recusada.
 - Na 2ª recusa da resposta pelo mesmo motivo, o Nexo diz ao modelo qual frase remover e, quando houver, qual processo não citar; a resposta que sugere que um processo é malicioso sem evidência é recusada; e o inventário de armazenamento liga cada letra de unidade ao disco que a contém, com o VHD/VHDX marcado como disco virtual (#93).
 
 ### Recuperação e drivers
