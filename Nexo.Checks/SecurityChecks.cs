@@ -34,6 +34,11 @@ public static class SecurityChecks
         using (var duplicate = JsonDocument.Parse("{\"service\":\"Spooler\",\"service\":\"Audiosrv\"}"))
             RejectSync(() => WindowsTools.ValidateArguments("restart_service", duplicate.RootElement), "Chave JSON repetida rejeitada");
         assert(WindowsTools.Quote("x'; Invoke-Expression 'whoami") == "'x''; Invoke-Expression ''whoami'", "Texto em script PowerShell permanece literal");
+        // Nome de impressora com aspas tipográficas: sem o escape, ’ fechava a string e o resto virava comando no script elevado.
+        const string TypographicName = "HP\u2019; Write-Output injetado; \u2018\u201A\u201B";
+        assert(WindowsTools.Quote(TypographicName) == "'HP\u2019\u2019; Write-Output injetado; \u2018\u2018\u201A\u201A\u201B\u201B'", "Aspas tipográficas são dobradas no texto do script PowerShell");
+        var typographicRead = (await SupportService.Powershell("$p=" + WindowsTools.Quote(TypographicName) + "; [Console]::Out.Write($p)", CancellationToken.None)).Trim();
+        assert(typographicRead == TypographicName, "PowerShell lê o nome com aspas tipográficas como texto literal, sem executar o resto");
 
         var denied = JsonDocument.Parse(await tools.Execute("flush_dns", Args(new { }), CancellationToken.None));
         using (denied) assert(denied.RootElement.GetProperty("denied").GetBoolean() && !denied.RootElement.GetProperty("success").GetBoolean() && confirmationCount == 1, "Recusa impede limpeza de DNS");

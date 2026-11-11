@@ -308,9 +308,21 @@ public static class Installer
         shortcut.Save();
     }
 
+    // Mesmo escape do WindowsTools.Quote: o PowerShell também fecha a string simples com ‘ ’ ‚ ‛.
+    internal static string Quote(string value)
+    {
+        var quoted = new StringBuilder(value.Length + 2).Append('\'');
+        foreach (var character in value)
+        {
+            quoted.Append(character);
+            if (character is '\'' or '\u2018' or '\u2019' or '\u201A' or '\u201B') quoted.Append(character);
+        }
+        return quoted.Append('\'').ToString();
+    }
+
     private static async Task<bool> VerifyOllamaSignature(string path)
     {
-        var script = "$s=Get-AuthenticodeSignature -LiteralPath '" + path.Replace("'", "''") + "'; [pscustomobject]@{Status=[string]$s.Status;Subject=[string]$s.SignerCertificate.Subject} | ConvertTo-Json -Compress";
+        var script = "$s=Get-AuthenticodeSignature -LiteralPath " + Quote(path) + "; [pscustomobject]@{Status=[string]$s.Status;Subject=[string]$s.SignerCertificate.Subject} | ConvertTo-Json -Compress";
         var command = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
         using var process = Process.Start(new ProcessStartInfo("powershell.exe")
         {
