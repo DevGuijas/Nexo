@@ -39,9 +39,20 @@ public static class AgentProtocol
     // auditoria: na validação no PC, o qwen3:8b repetiu "Vamos verificar…" seis vezes sem saber qual parte era recusada.
     public static string? PendingActionPhrase(string message) => PendingAction.Match(Normalize(message)) is { Success: true } match ? match.Value : null;
 
+    // Na validação da 76d9028 (10/11), "Vamos verificar se há algo que possa ser removido ou se há uma forma de liberar mais
+    // espaço" foi recusado 13 vezes em 3 turnos: o motivo mandava chamar a ferramenta, e não existe ferramenta que procure ou
+    // remova arquivos. Quando a mensagem recusada fala de liberar espaço, limpar o disco ou remover arquivos, a instrução diz
+    // isso e manda orientar o caminho do Windows.
+    internal const string NoCleanupTool = "O Nexo não tem ferramenta para procurar, remover ou apagar arquivos nem para liberar espaço: não anuncie nem ofereça essa verificação. Diga o espaço livre medido e oriente o usuário a abrir Configurações > Sistema > Armazenamento no Windows para ver o que ocupa espaço.";
+    // Liberar espaço; ou remover, apagar ou limpar numa mensagem que fala de disco, espaço, arquivos ou pastas ("vou limpar o
+    // cache DNS" fica com a instrução geral, porque flush_dns existe).
+    private static bool Cleanup(string text) => Regex.IsMatch(text, @"\b(?:liber\w*|abr\w*|desocup\w*) (?:\w+ ){0,2}espaco\b")
+        || Regex.IsMatch(text, @"\b(?:remov|apag|exclu|delet|limp)\w*") && Regex.IsMatch(text, @"\b(?:espaco|disco|discos|arquivos?|pastas?|armazenamento)\b") && !Regex.IsMatch(text, @"\bcache\b");
+
     // Instrução que acompanha a recusa: o motivo fixo e, para a ação anunciada, o trecho e a saída quando não há ferramenta.
     public static string Guidance(string reason, string message) => reason == PendingActionReason && PendingActionPhrase(message) is { } phrase
-        ? reason + " Trecho recusado: “" + phrase + "”. Se nenhuma ferramenta disponível faz essa ação, não a anuncie nem a ofereça: diga o que as consultas mostraram, explique que o Nexo não faz isso e indique o que o usuário pode fazer por conta própria."
+        ? reason + " Trecho recusado: “" + phrase + "”. " + (Cleanup(Normalize(message)) ? NoCleanupTool
+            : "Se nenhuma ferramenta disponível faz essa ação, não a anuncie nem a ofereça: diga o que as consultas mostraram, explique que o Nexo não faz isso e indique o que o usuário pode fazer por conta própria.")
         : reason;
 
     public static string? Validate(string name, JsonElement args, string message, bool readOnly = false)

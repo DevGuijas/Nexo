@@ -22,13 +22,16 @@ public sealed class InvestigationEvidence
     private readonly List<(string Name, long Megabytes, bool Responding)> topProcesses = [];
     // Processos das ocorrências de memória do relatório de saúde (#88): os que persistem, com os MB do alerta e da leitura
     // atual, e os nomes que só aparecem em ocorrência que não é atual (resolvida, histórica ou informativa).
-    private readonly List<(string Name, int Pid, long From, long To, long? Now)> memoryHolders = [];
+    private readonly List<(string Name, int Pid, long From, long To, long? Now, bool Stable)> memoryHolders = [];
     private readonly HashSet<string> staleProcesses = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> currentProcesses = new(StringComparer.OrdinalIgnoreCase);
     // Ocorrências de disco do último relatório de saúde do turno (validação da 11fa078): alguma atual, alguma encerrada,
     // e o menor espaço livre por volume lido nele (null quando o relatório não traz volume).
     private bool diskActive;
     private bool diskClosed;
+    // Memória em uso do PC na amostra do relatório de saúde, e se há ocorrência de memória atual que não é só informativa (#71).
+    private double? memoryPercent;
+    private bool memoryProblemActive;
     private double? lowestFreePercent;
     private readonly List<(string Name, ControlBlock Kind, string? Topic)> blocks = [];
     private readonly Dictionary<string, (string Host, bool Dns, bool Tcp)> connections = [];
@@ -239,6 +242,7 @@ public sealed class InvestigationEvidence
         if (OffersFileSearch(text)) return FileSearchReason;
         if (PresentsClosedDisk(text)) return ClosedDiskReason;
         if (SuggestsMalware(text)) return MalwareReason;
+        if (BlamesStablePlateau(text)) return StablePlateauReason;
         return null;
     }
 
@@ -253,10 +257,13 @@ public sealed class InvestigationEvidence
             FileSearchReason => OffersFileSearch,
             ClosedDiskReason => PresentsClosedDisk,
             MalwareReason => SuggestsMalware,
+            AgentProtocol.PendingActionReason => part => AgentProtocol.PendingActionPhrase(part) != null,
             _ => null
         };
-        var passages = refuses == null ? Array.Empty<string>() : Regex.Split(message, @"(?<=[!?;\n])|(?<=\.)(?=\s|$)").Select(part => part.Trim())
-            .Where(part => part.Length > 0 && refuses(AgentProtocol.Normalize(part))).Take(2).ToArray();
+        var parts = Regex.Split(message, @"(?<=[!?;\n])|(?<=\.)(?=\s|$)").Select(part => part.Trim()).Where(part => part.Length > 0).ToArray();
+        // A frase que culpa o processo estável depende da anterior ("isso…"): ela é escolhida no contexto da resposta.
+        var passages = reason == StablePlateauReason ? BlamedSentences(parts.Select(AgentProtocol.Normalize).ToArray()).Take(2).Select(i => parts[i]).ToArray()
+            : refuses == null ? Array.Empty<string>() : parts.Where(part => refuses(AgentProtocol.Normalize(part))).Take(2).ToArray();
         var text = "Esta é a mesma recusa da tentativa anterior: não reenvie o mesmo texto.";
         if (passages.Length == 0) return text + " Escreva a resposta de novo, do zero, sem o ponto indicado no motivo.";
         text += (passages.Length == 1 ? " Remova ou reescreva este trecho: " : " Remova ou reescreva estes trechos: ") + string.Join(" ", passages.Select(part => Quoted(part, 240))) + ".";
@@ -308,6 +315,60 @@ public sealed class InvestigationEvidence
             && !(DeniesTerm(sentence, term) && !Verification.IsMatch(sentence))));
     }
 
+    internal const string StablePlateauReason = "A resposta apresenta como causa da lentidão um processo cujo alerta de memória está estável em patamar alto, que é informativo e não é falha ativa, com a memória em uso do PC abaixo do limite de alerta. Diga quanto ele usa sem apresentá-lo como causa da lentidão; pergunte o que está lento e desde quando, ou cite outra evidência atual.";
+    // Pedido do usuário neste turno: o processo que ele mesmo citou pode ser discutido como possível causa (#71).
+    public string UserRequest { get; set; } = "";
+    // Abaixo deste uso de memória do PC, o patamar estável não é motivo de lentidão (padrão de HealthThresholds.MemoryGrowthFinalPercent).
+    private const double MemoryHighPercent = 80;
+
+    // Na validação da 76d9028 (10/11, passo 2.5), com o NexoMemTeste-toca em "Estável em patamar alto (informativo, não é
+    // falha ativa)" e a RAM do PC a 57%, a resposta disse que ele "está utilizando uma quantidade significativa de memória.
+    // Isso pode estar contribuindo para a lentidão". Com o processo só em patamar estável, nenhuma outra ocorrência de memória
+    // atual e a memória em uso abaixo de 80%, a frase que atribui a lentidão a ele é recusada: a que o cita, ou a que começa
+    // pela retomada ("isso", "esse processo", "o consumo") numa resposta que o cita. Passam a pergunta, a negação colada ao
+    // verbo ("não deve estar causando a lentidão") e o turno em que o próprio usuário citou o processo. Sem a leitura de
+    // memória do PC, nada é recusado.
+    // "Explica", "tornando… mais lento", "a razão da lentidão" e "pesando/afetando o desempenho" também culpam (@qa); "explico
+    // abaixo" e "o desempenho do disco está bom" não, porque falta o verbo ou o sintoma.
+    private static readonly Regex Blame = new(@"\b(?:contribu\w*|caus\w*|provoc\w*|ger(?:a|am|ando|ar)|deix(?:a|am|ando|ar)|torn(?:a|am|ando|ar)|explic(?:a|am|ando|aria|ariam)|responsave(?:l|is)|culpad[oa]s?|motivo|razao|razoes|origem)\b[^.;!?]*?\b(?:lentid\w*|lent[oa]s?|travament\w*|travando|devagar|demor\w*)\b"
+        + @"|\b(?:lentid\w*|lent[oa]s?|travament\w*|travando|devagar)\b[^.;!?]*?\b(?:por causa d|causad[oa]s? p(?:or|el[oa])|devid[oa]s? a)"
+        + @"|\b(?:pes(?:a|am|ando|ar)|afet(?:a|am|ando|ar)|prejudic(?:a|am|ando|ar)|compromet(?:e|em|endo|er))\b[^.;!?]*?\b(?:desempenho|performance)\b");
+    private static readonly Regex Anaphor = new(@"^\W*(?:\w+\W+){0,2}?(?:isso|isto|esse|este|esses|estes|ele|eles|o processo|esse processo|este processo|o consumo|esse consumo|o uso de memoria|essa memoria|a memoria)\b");
+    private (string Name, int Pid, long From, long To, long? Now, bool Stable)[] BlamableStable()
+    {
+        if (memoryPercent is not { } used || used >= MemoryHighPercent || memoryProblemActive) return [];
+        var stable = memoryHolders.Where(holder => holder.Stable).ToArray();
+        var asked = AgentProtocol.Normalize(UserRequest);
+        return stable.Any(holder => CitesHolder(asked, holder)) ? [] : stable;
+    }
+    private bool BlamesStablePlateau(string normalized) => BlamedSentences(Sentences(normalized)).Any();
+    // Índices das frases que culpam o processo estável. A retomada ("isso", "ele", "esse processo") só conta quando a frase
+    // anterior cita o processo estável e nenhum outro processo (@qa): em "O processo chrome está
+    // usando 95% da CPU. Ele pode estar causando a lentidão.", o "ele" é o chrome.
+    private IEnumerable<int> BlamedSentences(string[] normalized)
+    {
+        var stable = BlamableStable();
+        if (stable.Length == 0) yield break;
+        for (var i = 0; i < normalized.Length; i++)
+        {
+            var sentence = normalized[i];
+            if (sentence.Contains('?') || !Blame.Matches(sentence).Any(match => !Negated(sentence, match))) continue;
+            var direct = stable.Any(holder => CitesHolder(sentence, holder));
+            var resumed = !direct && Anaphor.IsMatch(sentence)
+                && Enumerable.Range(0, i).Reverse().Select(j => normalized[j]).FirstOrDefault(previous => previous.Trim().Length > 0) is { } prior
+                && stable.Any(holder => CitesHolder(prior, holder)) && !CitesOtherProcess(prior, stable);
+            if (direct || resumed) yield return i;
+        }
+    }
+    // Outro processo na frase: um nome conhecido do turno que não é do processo estável, ou "processo <nome>" / "<nome>.exe".
+    private bool CitesOtherProcess(string sentence, (string Name, int Pid, long From, long To, long? Now, bool Stable)[] stable)
+    {
+        var mine = stable.Select(holder => AgentProtocol.Normalize(holder.Name)).ToHashSet();
+        if (ProcessNames().Select(AgentProtocol.Normalize).Where(name => !mine.Contains(name)).Any(name => Cites(sentence, name))) return true;
+        return Regex.Matches(sentence, @"\bprocessos?\s+(?:chamad[oa]\s+)?[“""'«]?(?<name>[\p{L}\p{N}_-][\p{L}\p{N}._-]*?)(?:\.exe)?[”""'»]?(?=[\s,;:.!?)]|$)|(?<name>[\p{L}\p{N}_-]+)\.exe\b")
+            .Any(match => !stable.Any(holder => CitesHolder(match.Groups["name"].Value, holder)));
+    }
+
     internal const string FileSearchReason = "O Nexo não lista nem procura arquivos ou pastas: não ofereça identificar os maiores arquivos nem o que ocupa espaço. No lugar, diga o espaço livre medido e indique que o usuário vê o que ocupa espaço em Configurações > Sistema > Armazenamento no Windows.";
     internal const string ClosedDiskReason = "A resposta apresenta como atual a falta de espaço em disco, mas o relatório de saúde só mostra essa ocorrência encerrada (resolvida ou com estado atual desconhecido) e nenhuma leitura atual tem pouco espaço. Cite o espaço livre atual por volume, ou diga que essa ocorrência não está ativa.";
     // Caminho real para ver o uso do disco (#88): o Nexo não lista arquivos nem pastas.
@@ -350,7 +411,19 @@ public sealed class InvestigationEvidence
     // relatório") e a negação logo depois do trecho ("liberar espaço não é necessário", "não deve ajudar"), e a frase com
     // "não há necessidade" ou "não existe motivo". Depois de "mas" ou "porém", cada trecho é avaliado sozinho: "o alerta não
     // está ativo, mas libere espaço no disco" é recusada (@qa).
-    private static readonly Regex LowSpace = new(@"\b(?:liber\w*|abr\w*|desocup\w*) (?:\w+ ){0,2}espaco\b|\b(?:disco|unidade|volume|armazenamento|hd|ssd)\b(?: \S+){0,3} (?:cheio|cheia|lotad[oa]|sem espaco)\b|\bpouco espaco\b|\bfalta de espaco\b|\bespaco (?:\w+ ){0,2}(?:insuficiente|baixo|acabando)\b");
+    // Na validação da 76d9028 (10/11), "há uma observação de pouca espaço em outro volume (T:)" e "o disco T: está com
+    // pouquíssimo espaço livre… liberar espaço, caso necessário" (com o T: novo 99% livre) passaram: só "pouco espaço" era
+    // reconhecido, e o "caso" isentava a frase inteira. Agora valem pouco/pouca/pouquíssimo/pouquinho, "quase sem espaço",
+    // "sem espaço" e "espaço reduzido/limitado/escasso"; e "caso necessário", "se necessário" ou "se precisar" no fim da
+    // oração não são condição sobre o disco: a condição real ("se o disco encher", "caso precise liberar…") continua isentando.
+    // "Sem espaço para preocupação/dúvidas" não é falta de espaço; a letra da unidade conta como sujeito ("o T: está
+    // praticamente lotado"), e "o armazenamento está acabando" conta. "Se possível", "se for o caso" e "quando puder" no
+    // fim da oração também são cortesia, não condição (@qa).
+    private const string NoRoom = @"sem espaco(?! (?:para|pra) (?:\w+ )?(?:preocupa\w*|duvidas?|reclama\w*|questiona\w*|erros?|falhas?|mais nada a)\b)";
+    private static readonly Regex LowSpace = new(@"\b(?:liber\w*|abr\w*|desocup\w*) (?:\w+ ){0,2}espaco\b|(?:\b(?:disco|unidade|volume|armazenamento|hd|ssd)\b|(?<![\w:])[a-z]:)(?: \S+){0,3} (?:cheio|cheia|lotad[oa]|" + NoRoom + @")"
+        + @"|\b(?:pouc[oa]s?|pouquissim[oa]s?|pouquinho(?: de)?|quase) " + NoRoom.Replace("sem espaco", "(?:sem )?espaco") + @"|\b" + NoRoom + @"|\bfalta de espaco\b"
+        + @"|\b(?:espaco|armazenamento) (?:\w+ ){0,2}(?:insuficiente|baixo|acabando|esgotad[oa]|reduzido|limitado|escasso)\b");
+    private static readonly Regex PoliteCondition = new(@"\b(?:(?:se|caso) (?:(?:for|seja|achar|julgar) )?(?:necessari\w*|precis(?:o|ar|e)|possivel)|se for o caso|(?:se|quando) (?:voce )?puder)(?= *(?:[,.;:!)]|$))");
     private bool PresentsClosedDisk(string normalized)
     {
         if (!diskClosed || diskActive || lowestFreePercent < LowFreePercent) return false;
@@ -361,7 +434,7 @@ public sealed class InvestigationEvidence
             var parts = Contrast.Split(sentence);
             return parts.Where((part, index) => !parts.Skip(index + 1).Any(StateExempt));
         }).Any(sentence =>
-            !sentence.Contains('?') && !Regex.IsMatch(sentence, @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve|teve|tinha|tiveram)\b|\bnormal|\bja foi\b|\bantes\b")
+            !sentence.Contains('?') && !Regex.IsMatch(PoliteCondition.Replace(sentence, " "), @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve|teve|tinha|tiveram)\b|\bnormal|\bja foi\b|\bantes\b")
             && !StateExempt(sentence) && !NoNeed.IsMatch(sentence)
             && LowSpace.Matches(sentence).Any(match => !Negated(sentence, match) && !NotNeeded.IsMatch(sentence[(match.Index + match.Length)..])));
     }
@@ -402,7 +475,7 @@ public sealed class InvestigationEvidence
     // "Livre", "total"... só contam ligados ao número: na mesma oração (sem "," ";" ":" ou parênteses no meio), até seis
     // palavras antes ou duas depois. "Usa 10.806 MB, e a memória livre é de 4,7 GB": o 10.806 é do processo (@qa).
     private static readonly Regex SystemMemory = new(@"\b(livres?|disponive(l|is)|total|instalad[oa]s?)\b");
-    private static bool CitesFigure(string sentence, (string Name, int Pid, long From, long To, long? Now) holder) => Amount.Matches(sentence).Any(match =>
+    private static bool CitesFigure(string sentence, (string Name, int Pid, long From, long To, long? Now, bool Stable) holder) => Amount.Matches(sentence).Any(match =>
     {
         var before = Regex.Split(sentence[..match.Index], @"[,;:()]")[^1];
         var after = Regex.Split(sentence[(match.Index + match.Length)..], @"[,;:()]")[0];
@@ -414,22 +487,45 @@ public sealed class InvestigationEvidence
         var megabytes = match.Groups["unit"].Value.StartsWith('g') ? value * 1024 : value;
         return new[] { holder.Now, holder.To }.Any(reading => reading is > 0 && Math.Abs(megabytes - reading.Value) <= 0.10 * reading.Value);
     });
+    // Na validação da 76d9028 (10/11, passo 1.3), a resposta citou "NexoMemTeste", sem o "-toca", sem PID e sem "memória",
+    // e a linha não entrou. O processo também conta como citado por um começo do nome com pelo menos 6 caracteres
+    // ("NexoMemTeste" para "NexoMemTeste-toca"), desde que esse começo não seja o nome de outro processo atual da consulta
+    // ("chrome" de "chrome" não é "chromedriver"). Um nome igual ao de um processo de ocorrência encerrada conta: a linha só
+    // acrescenta a leitura atual, e a trava do processo encerrado (PresentsStaleProcess) continua comparando o nome inteiro.
+    private bool CitesHolder(string normalized, (string Name, int Pid, long From, long To, long? Now, bool Stable) holder)
+    {
+        var key = AgentProtocol.Normalize(holder.Name);
+        if (Regex.IsMatch(normalized, @"(?<![\w.-])" + Regex.Escape(key) + @"(?![\w-])")) return true;
+        if (Regex.IsMatch(normalized, @"(?<!\d)" + holder.Pid.ToString(CultureInfo.InvariantCulture) + @"(?!\d)")) return true;
+        var others = topProcesses.Select(p => p.Name).Concat(currentProcesses).Select(AgentProtocol.Normalize).Where(other => other != key).ToHashSet();
+        // O começo só vale até um separador do nome ("nexomemteste" + "-toca"), nunca no meio de uma palavra ("windows" de
+        // "windowsterminal"), e não vale para prefixos de fabricante ou do sistema ("microsoft" de "Microsoft.Photos") (@qa).
+        return Regex.Matches(normalized, @"(?<![\w.-])[\p{L}\p{N}._-]{6,}").Select(match => Regex.Replace(match.Value, @"(?:\.exe)?[._-]*$", ""))
+            .Any(word => word.Length >= 6 && word.Length < key.Length && key.StartsWith(word, StringComparison.Ordinal) && key[word.Length] is '-' or '_' or '.' or ' '
+                && !GenericPrefixes.Contains(word) && !others.Contains(word));
+    }
+    private static readonly HashSet<string> GenericPrefixes = new(StringComparer.Ordinal)
+    {
+        "windows", "microsoft", "google", "nvidia", "intel", "adobe", "service", "services", "system", "realtek", "apple", "mozilla", "oracle",
+        "update", "updater", "runtime", "driver", "drivers", "helper", "client", "server", "launcher", "installer", "setup", "steam", "lenovo",
+        "dell", "asus", "acer", "samsung", "logitech", "office", "teams", "java", "python", "chrome", "edge", "firefox", "process", "processo"
+    };
     public string WithMemoryFigures(string answer)
     {
         if (memoryHolders.Count == 0 || string.IsNullOrWhiteSpace(answer)) return answer;
         var text = AgentProtocol.Normalize(answer);
-        var name = (string holderName) => @"(?<![\w.-])" + Regex.Escape(AgentProtocol.Normalize(holderName)) + @"(?![\w-])";
-        var pid = (int holderPid) => @"(?<!\d)" + holderPid.ToString(CultureInfo.InvariantCulture) + @"(?!\d)";
         var sentences = Sentences(text);
-        var cited = memoryHolders.Where(holder => Regex.IsMatch(text, name(holder.Name)) || Regex.IsMatch(text, pid(holder.Pid))).ToArray();
+        var cited = memoryHolders.Where(holder => CitesHolder(text, holder)).ToArray();
         if (cited.Length == 0 && !text.Contains("memoria", StringComparison.Ordinal)) return answer;
         // Sem processo citado, a resposta fala de memória em geral: nenhum valor dela é dos processos, e a linha entra.
         var missing = (cited.Length > 0 ? cited : memoryHolders.ToArray()).Where(holder => cited.Length == 0
-            || !sentences.Any(sentence => (Regex.IsMatch(sentence, name(holder.Name)) || Regex.IsMatch(sentence, pid(holder.Pid))) && CitesFigure(sentence, holder))).ToArray();
+            || !sentences.Any(sentence => CitesHolder(sentence, holder) && CitesFigure(sentence, holder))).ToArray();
         if (missing.Length == 0) return answer;
+        // O patamar estável da #71 é informativo: a linha diz isso, em vez de "segue com", que soa como problema atual.
         var figures = missing.Take(2).Select(holder =>
             Quoted(holder.Name) + " (PID " + holder.Pid.ToString(CultureInfo.InvariantCulture) + ")"
-            + (holder.Now is { } now ? " segue com " + now.ToString(CultureInfo.InvariantCulture) + " MB; no alerta, subiu" : " subiu")
+            + (holder.Stable && holder.Now is { } plateau ? " está estável em patamar alto, com cerca de " + plateau.ToString(CultureInfo.InvariantCulture) + " MB (informativo, não é falha ativa); no alerta, subiu"
+                : holder.Now is { } now ? " segue com " + now.ToString(CultureInfo.InvariantCulture) + " MB; no alerta, subiu" : " subiu")
             + " de " + holder.From.ToString(CultureInfo.InvariantCulture) + " MB para " + holder.To.ToString(CultureInfo.InvariantCulture) + " MB");
         return BeforeQuestions(answer, "Pelo monitor de saúde: " + string.Join("; ", figures) + ".");
     }
@@ -725,7 +821,7 @@ public sealed class InvestigationEvidence
     // Assunto do pedido do usuário ("space" ou "slowness"): a recomendação ligada a ele vem primeiro no limite de duas.
     public string? Focus { get; set; }
 
-    private void ForgetFindings() { findings.Clear(); topProcesses.Clear(); memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear(); diskActive = diskClosed = false; lowestFreePercent = null; }
+    private void ForgetFindings() { findings.Clear(); topProcesses.Clear(); memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear(); diskActive = diskClosed = false; lowestFreePercent = null; memoryPercent = null; memoryProblemActive = false; }
 
     // Só a evidência é encurtada; a orientação de segurança que acompanha a linha nunca é cortada.
     private void Finding(string key, string text, string guidance = "")
@@ -829,7 +925,7 @@ public sealed class InvestigationEvidence
         // Cada relatório substitui as três linhas do anterior; uma parte ausente agora não pode sobrar da leitura velha.
         findings.RemoveAll(f => f.Key is "health" or "health:unknown" or "health:informative" or "health:volumes");
         memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear();
-        diskActive = diskClosed = false; lowestFreePercent = null;
+        diskActive = diskClosed = false; lowestFreePercent = null; memoryPercent = null; memoryProblemActive = false;
         if (report.StartsWith("Nenhuma amostra", StringComparison.Ordinal)) { Finding("health", "O relatório de saúde não tem leituras das últimas 24 horas."); return; }
         // O relatório marca a amostra velha na linha de coleta, pelo mesmo critério de HealthOccurrences.CollectionNotice.
         var stale = Regex.IsMatch(report, @"^Última coleta: [^\n]*Sem leitura recente: o estado atual das ocorrências é desconhecido\.", RegexOptions.Multiline);
@@ -851,6 +947,9 @@ public sealed class InvestigationEvidence
                 Active: !Closed(match.Groups["status"].Value)))
             .ToArray();
         diskActive = lines.Any(line => line.Category == "disk" && line.Active);
+        memoryProblemActive = lines.Any(line => line.Category == "memory" && line.Active && !Informative(line.Status));
+        if (!stale && Regex.Match(report, @"^CPU: [^;\n]*; memória: (?<used>\d{1,3})%", RegexOptions.Multiline) is { Success: true } used)
+            memoryPercent = double.Parse(used.Groups["used"].Value, CultureInfo.InvariantCulture);
         diskClosed = lines.Any(line => line.Category == "disk" && !line.Active);
         foreach (var line in lines.Where(line => line.Category == "memory"))
         {
@@ -861,7 +960,8 @@ public sealed class InvestigationEvidence
             if (Regex.Match(line.Evidence, @": de (?<from>\d{1,9}) MB para (?<to>\d{1,9}) MB") is { Success: true } growth
                 && int.TryParse(who.Groups["pid"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var pid))
                 memoryHolders.Add((name, pid, long.Parse(growth.Groups["from"].Value, CultureInfo.InvariantCulture), long.Parse(growth.Groups["to"].Value, CultureInfo.InvariantCulture),
-                    Regex.Match(line.Status, @" segue com (?<now>\d{1,9}) MB\b") is { Success: true } now ? long.Parse(now.Groups["now"].Value, CultureInfo.InvariantCulture) : null));
+                    Regex.Match(line.Status, @" segue com (?<now>\d{1,9}) MB\b") is { Success: true } now ? long.Parse(now.Groups["now"].Value, CultureInfo.InvariantCulture) : null,
+                    Informative(line.Status)));
         }
         var occurrences = lines
             .Where(line => !line.Status.StartsWith("resolvida", StringComparison.Ordinal) && !line.Status.Contains("(há ocorrência mais recente do mesmo alerta)", StringComparison.Ordinal))
