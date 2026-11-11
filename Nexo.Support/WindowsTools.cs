@@ -106,12 +106,16 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         _ => throw new InvalidOperationException("Categoria de hardware não permitida.")
     };
     // Letra de unidade → disco que a contém (#93). Na validação da 11fa078, o T: era um VHDX montado e o modelo o atribuiu
-    // ao "USB DISK 2.0", porque o inventário listava os discos sem as letras. Get-Partition dá a letra e o número do disco;
-    // Get-Disk dá nome, barramento e, para VHD/VHDX, o arquivo (Location). Roda no mesmo processo do inventário, só na
-    // categoria storage; uma falha aqui não derruba o inventário, só deixa a ligação indisponível.
-    internal const string StorageVolumesScript = "$volumes=@(); $volumesError=''; try{ $disks=@{}; @(Get-Disk -ErrorAction Stop) | ForEach-Object {$disks[[int]$_.Number]=$_}; " +
-        "$volumes=@(Get-Partition -ErrorAction Stop | Where-Object {[string]$_.DriveLetter -match '^[A-Za-z]$'} | Sort-Object DriveLetter | Select-Object -First 26 | ForEach-Object {$k=$disks[[int]$_.DiskNumber]; " +
-        "[pscustomobject]@{Letter=([string]$_.DriveLetter+':');DiskNumber=[int]$_.DiskNumber;Disk=[string]$k.FriendlyName;BusType=[string]$k.BusType;Location=[string]$k.Location}}) }catch{ $volumesError=[string]$_.Exception.Message }; ";
+    // ao "USB DISK 2.0", porque o inventário listava os discos sem as letras. MSFT_Partition dá a letra e o número do disco;
+    // MSFT_Disk dá nome, barramento e, para VHD/VHDX, o arquivo (Location). Roda no mesmo processo do inventário, só na
+    // categoria storage, e cada consulta ao provedor do Storage tem prazo próprio de 10 s: um provedor travado (RAID, USB)
+    // não segura o inventário até os 90 s dele (@qa). Uma falha ou o prazo esgotado deixam só a ligação indisponível.
+    internal const int VolumesTimeoutSeconds = 10;
+    internal const string StorageVolumesScript = "$volumes=@(); $volumesError=''; $volumesClock=[Diagnostics.Stopwatch]::StartNew(); " +
+        "try{ $disks=@{}; @(Get-CimInstance -Namespace 'root/Microsoft/Windows/Storage' -ClassName 'MSFT_Disk' -OperationTimeoutSec 10 -ErrorAction Stop) | ForEach-Object {$disks[[int]$_.Number]=$_}; " +
+        "$volumes=@(Get-CimInstance -Namespace 'root/Microsoft/Windows/Storage' -ClassName 'MSFT_Partition' -OperationTimeoutSec 10 -ErrorAction Stop | Where-Object {[string]$_.DriveLetter -match '^[A-Za-z]$'} | Sort-Object {[string]$_.DriveLetter} | Select-Object -First 26 | ForEach-Object {$k=$disks[[int]$_.DiskNumber]; " +
+        "[pscustomobject]@{Letter=([string]$_.DriveLetter+':');DiskNumber=[int]$_.DiskNumber;Disk=[string]$k.FriendlyName;BusType=[string]$k.BusType;Location=[string]$k.Location}}) }" +
+        "catch{ $volumes=@(); $volumesError=if($volumesClock.Elapsed.TotalSeconds -ge 9.5 -or [string]$_.Exception.Message -match 'timed? ?out|OperationTimeout|tempo limite|0x80338029'){'prazo esgotado (10 s)'}else{[string]$_.Exception.Message} }; ";
     internal const string VolumesNote = "Volumes liga cada letra de unidade ao disco que a contém. Disco virtual é um arquivo VHD/VHDX montado, não um dispositivo: não atribua a letra dele a um disco da lista Devices. Não associe a um disco uma letra que não esteja em Volumes.";
 
     // Resultado do inventário de armazenamento com a ligação letra → disco já interpretada: o modelo recebe o tipo do disco
@@ -130,7 +134,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                     Letter = Field(item, "Letter").ToUpperInvariant(),
                     Disk = InvestigationEvidence.Clean(Field(item, "Disk")),
                     BusType = bus,
-                    Kind = virtualDisk ? "disco virtual (VHD/VHDX montado de arquivo)" : bus.Equals("USB", StringComparison.OrdinalIgnoreCase) ? "disco USB (removível)" : "disco interno",
+                    Kind = virtualDisk ? "disco virtual (VHD/VHDX montado de arquivo)" : DiskKind(bus),
                     File = virtualDisk ? InvestigationEvidence.Clean(location) : null
                 };
             }).ToArray();
@@ -146,6 +150,14 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 : VolumesNote
         });
     }
+    // Barramento vazio ou Unknown não vira "disco interno" (@qa); SD, MMC, iSCSI... aparecem pelo nome.
+    internal static string DiskKind(string bus) => bus.ToUpperInvariant() switch
+    {
+        "USB" => "disco USB (removível)",
+        "" or "UNKNOWN" => "tipo não identificado",
+        "NVME" or "SATA" or "SAS" or "ATA" or "ATAPI" or "SCSI" or "RAID" or "SCM" or "UFS" or "STORAGE SPACES" => "disco interno",
+        _ => "disco " + bus
+    };
     // MSFT_Disk.BusType pode chegar como número quando a formatação do módulo Storage não se aplica.
     internal static string BusName(string bus) => bus switch
     {

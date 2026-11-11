@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -33,6 +34,7 @@ internal static class ValidationAnswerChecks
             MalwareSentences(assert);
             await MalwareFlow(store, actor, assert);
             StorageVolumes(assert);
+            VolumesScript(assert);
         }
         finally { store.Data.AiEnabled = previousAi; }
     }
@@ -91,6 +93,13 @@ internal static class ValidationAnswerChecks
             "Esse programa pode estar infectado.",
             "Verifique se o NexoMemTeste não é malicioso.",
             "Pode ser um malware: o processo NexoMemTeste usa 13 GB.",
+            // A negação de outra oração não isenta (@qa).
+            "Se você não reconhece o NexoMemTeste, ele pode ser um malware.",
+            "Sem mais dados, o NexoMemTeste pode ser um vírus.",
+            "O NexoMemTeste parece suspeito.",
+            "Esse é um processo suspeito.",
+            "Não há registro disso no relatório, mas o NexoMemTeste pode ser um malware.",
+            "Quem não conhece o NexoMemTeste pode achar que ele é um malware.",
         ];
         string[] accepted =
         [
@@ -99,6 +108,14 @@ internal static class ValidationAnswerChecks
             "O NexoMemTeste está usando 13591 MB; feche-o se não estiver em uso.",
             "Abra Segurança do Windows > Proteção contra vírus e ameaças.",
             "O antivírus do Windows está ativo.",
+            "O NexoMemTeste não parece suspeito.",
+            "Suspeito que o NexoMemTeste esteja deixando o computador lento.",
+            "A suspeita principal é o NexoMemTeste, que segura 13 GB.",
+            "O NexoMemTeste é suspeito de deixar o computador lento.",
+            // Nomes do próprio Windows não são suspeita sobre um processo (@qa).
+            "Abra o aplicativo Segurança do Windows e vá em Proteção contra vírus e ameaças.",
+            "O processo MsMpEng.exe é o anti-malware do Windows Defender e está usando 300 MB.",
+            "A falta de memória é uma ameaça ao desempenho do programa.",
         ];
         var wrong = refused.Where(text => evidence.ValidateStatement(text, false) != InvestigationEvidence.MalwareReason)
             .Concat(accepted.Where(text => evidence.ValidateStatement(text, false) != null)).ToArray();
@@ -119,9 +136,10 @@ internal static class ValidationAnswerChecks
             "#93 processo desconhecido e memória alta: a resposta que manda verificar se o NexoMemTeste é malicioso é recusada, e a correção vira a resposta");
 
         const string reply = "Não dá para afirmar se o NexoMemTeste é malicioso: o Nexo não verifica segurança. Verifique o programa no Microsoft Defender.";
-        var asked = new CapturingModel([Text(reply)]);
-        var answered = await Ask(store, actor, "meu pc ta lento, o NexoMemTeste é vírus", Tools(ActiveReport), asked);
-        assert(answered.StartsWith(reply, StringComparison.Ordinal),
+        // A 2ª resposta só é pedida se a 1ª for recusada: o teste falha com FAIL limpo, sem estourar o roteiro.
+        var asked = new CapturingModel([Text(reply), Text(MemoryHonest)]);
+        var answered = await Ask(store, actor, "meu pc ta lento, o NexoMemTeste é vírus", Tools(ActiveReport), asked, consumeAll: false);
+        assert(answered.StartsWith(reply, StringComparison.Ordinal) && asked.Calls == 1,
             "#93 processo desconhecido: o usuário perguntou se é vírus, e a resposta sobre isso não é recusada");
     }
 
@@ -154,15 +172,80 @@ internal static class ValidationAnswerChecks
             && numericVolumes[1].GetProperty("Kind").GetString()!.StartsWith("disco USB"),
             "#93 letra da unidade: o barramento numérico do Get-Disk (15, 7) é lido como disco virtual e USB");
 
+        using var kinds = JsonDocument.Parse("""{"Total":1,"Truncated":false,"Devices":[],"Volumes":[{"Letter":"E:","Disk":"x","BusType":"","Location":""},{"Letter":"F:","Disk":"x","BusType":"0","Location":""},{"Letter":"G:","Disk":"x","BusType":"12","Location":""},{"Letter":"H:","Disk":"x","BusType":"MMC","Location":""},{"Letter":"I:","Disk":"x","BusType":"17","Location":""}],"VolumesError":""}""");
+        using var kindsResult = JsonDocument.Parse(WindowsTools.StorageInventoryResult(kinds.RootElement));
+        var kindNames = kindsResult.RootElement.GetProperty("data").GetProperty("Volumes").EnumerateArray().Select(v => v.GetProperty("Kind").GetString()).ToArray();
+        assert(kindNames.SequenceEqual(["tipo não identificado", "tipo não identificado", "disco SD", "disco MMC", "disco interno"]),
+            "#93 letra da unidade: barramento vazio ou Unknown fica como tipo não identificado, SD e MMC aparecem pelo nome, e só o barramento interno vira disco interno (" + string.Join(", ", kindNames) + ")");
+
         using var failed = JsonDocument.Parse("""{"Total":1,"Truncated":false,"Devices":[],"Volumes":[],"VolumesError":"Acesso negado"}""");
         using var failedResult = JsonDocument.Parse(WindowsTools.StorageInventoryResult(failed.RootElement));
         var note = failedResult.RootElement.GetProperty("data").GetProperty("VolumesNote").GetString() ?? "";
         assert(failedResult.RootElement.GetProperty("success").GetBoolean() && note.StartsWith("O Windows não informou a ligação entre letras de unidade e discos (Acesso negado)")
             && note.Contains("Não associe uma letra a um disco pelo nome"),
             "#93 letra da unidade: sem a ligação, o inventário continua e avisa que a letra não pode ser deduzida do nome");
-        assert(WindowsTools.StorageVolumesScript.Contains("Get-Partition") && WindowsTools.StorageVolumesScript.Contains("Get-Disk") && !WindowsTools.StorageVolumesScript.Contains("Start-Process")
+        var timeouts = System.Text.RegularExpressions.Regex.Matches(WindowsTools.StorageVolumesScript, "Get-CimInstance [^|;]*-OperationTimeoutSec " + WindowsTools.VolumesTimeoutSeconds + " ").Count;
+        assert(WindowsTools.StorageVolumesScript.Contains("'MSFT_Partition'") && WindowsTools.StorageVolumesScript.Contains("'MSFT_Disk'") && timeouts == 2
+            && !WindowsTools.StorageVolumesScript.Contains("Get-Partition") && !WindowsTools.StorageVolumesScript.Contains("Start-Process")
             && HealthReportPresentation.PhysicalDiskScope.Contains("get_hardware_inventory(storage)"),
-            "#93 letra da unidade: a ligação sai de Get-Partition e Get-Disk no processo do inventário, e o relatório de saúde aponta para ela");
+            "#93 letra da unidade: a ligação sai de MSFT_Partition e MSFT_Disk no processo do inventário, cada consulta com prazo de 10 s, e o relatório de saúde aponta para ela");
+    }
+
+    // O script real da ligação letra → disco, com Get-CimInstance falso na frente. No Windows usa powershell.exe, como no CI;
+    // fora dele, só com NEXO_CHECKS_PWSH. O falso recusa a chamada sem o namespace do Storage ou sem o prazo de 10 s.
+    private const string FakeCim = """
+        function Get-CimInstance { param([string]$Namespace, [string]$ClassName, [int]$OperationTimeoutSec, $ErrorAction)
+            if ($Namespace -ne 'root/Microsoft/Windows/Storage' -or $OperationTimeoutSec -ne 10) { throw "chamada sem prazo: $Namespace $OperationTimeoutSec" }
+            switch ($volumesScenario) {
+                'timeout' { throw 'The WS-Management service cannot complete the operation within the time specified in OperationTimeout.' }
+                'slow' { Start-Sleep -Milliseconds 10200; throw 'falha generica' }
+                'error' { throw 'Acesso negado ao provedor do Storage' }
+            }
+            if ($ClassName -eq 'MSFT_Disk') {
+                [pscustomobject]@{Number=0;FriendlyName='Samsung SSD 980';BusType=[uint16]17;Location='PCIROOT(0)'}
+                [pscustomobject]@{Number=1;FriendlyName='USB DISK 2.0';BusType=[uint16]7;Location='Integrated : Adapter 0'}
+                [pscustomobject]@{Number=2;FriendlyName='Msft Virtual Disk';BusType=[uint16]15;Location='C:\nexo\teste.vhdx'}
+            } else {
+                [pscustomobject]@{DriveLetter=[char]'T';DiskNumber=2}
+                [pscustomobject]@{DriveLetter=[char]0;DiskNumber=0}
+                [pscustomobject]@{DriveLetter=[char]'C';DiskNumber=0}
+                [pscustomobject]@{DriveLetter=[char]'D';DiskNumber=1}
+            }
+        }
+        """;
+
+    private static void VolumesScript(Action<bool, string> assert)
+    {
+        var shell = OperatingSystem.IsWindows() ? "powershell.exe" : Environment.GetEnvironmentVariable("NEXO_CHECKS_PWSH") is { Length: > 0 } pwsh ? pwsh : null;
+        if (shell == null) { Console.WriteLine("SKIP: #93 script da ligação letra → disco (sem PowerShell)"); return; }
+        JsonElement Run(string scenario)
+        {
+            var script = "$volumesScenario='" + scenario + "'\n" + FakeCim + "\n" + WindowsTools.StorageVolumesScript
+                + "[pscustomobject]@{Total=0;Truncated=$false;Devices=@();Volumes=$volumes;VolumesError=$volumesError} | ConvertTo-Json -Depth 5 -Compress";
+            var start = new ProcessStartInfo(shell) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = Encoding.UTF8 };
+            foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(SupportService.PowershellCommand(script))) })
+                start.ArgumentList.Add(argument);
+            using var process = Process.Start(start)!;
+            var stdout = process.StandardOutput.ReadToEndAsync();
+            var stderr = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(60_000)) { process.Kill(true); throw new Exception("FAIL: #93 script da ligação letra → disco não terminou em 60 s"); }
+            if (process.ExitCode != 0) throw new Exception("FAIL: #93 script da ligação letra → disco falhou: " + stderr.Result.Trim());
+            using var raw = JsonDocument.Parse(stdout.Result);
+            using var result = JsonDocument.Parse(WindowsTools.StorageInventoryResult(raw.RootElement));
+            return result.RootElement.GetProperty("data").Clone();
+        }
+        var ok = Run("ok");
+        var letters = ok.GetProperty("Volumes").EnumerateArray().Select(v => v.GetProperty("Letter").GetString() + "=" + v.GetProperty("Kind").GetString()).ToArray();
+        assert(letters.SequenceEqual(["C:=disco interno", "D:=disco USB (removível)", "T:=disco virtual (VHD/VHDX montado de arquivo)"]) && ok.GetProperty("VolumesNote").GetString() == WindowsTools.VolumesNote,
+            "#93 script da ligação letra → disco executado: C: no NVMe, D: no USB, T: no VHDX, e a partição sem letra sai (" + string.Join(", ", letters) + ")");
+        var error = Run("error");
+        var timeout = Run("timeout");
+        var watch = Stopwatch.StartNew();
+        var slow = Run("slow");
+        string Note(JsonElement data) => data.GetProperty("VolumesNote").GetString() ?? "";
+        assert(error.GetProperty("Volumes").GetArrayLength() == 0 && Note(error).Contains("(Acesso negado ao provedor do Storage)")
+            && Note(timeout).Contains("(prazo esgotado (10 s))") && Note(slow).Contains("(prazo esgotado (10 s))") && watch.Elapsed < TimeSpan.FromSeconds(45),
+            "#93 script da ligação letra → disco executado: erro e prazo esgotado do provedor do Storage deixam só a ligação indisponível, e o inventário segue");
     }
 
     private static InvestigationEvidence Observed(string report)
@@ -172,12 +255,12 @@ internal static class ValidationAnswerChecks
         return evidence;
     }
 
-    private static async Task<string> Ask(Store store, Account actor, string request, IAgentTools tools, CapturingModel model)
+    private static async Task<string> Ask(Store store, Account actor, string request, IAgentTools tools, CapturingModel model, bool consumeAll = true)
     {
         using var http = new HttpClient(model);
         var conversation = new Conversation { UserId = actor.Id, Entries = [new Entry { Role = "user", Text = request }] };
         var answer = await new AgentService(store, tools, http).Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None);
-        if (!model.Consumed) throw new Exception("FAIL: o roteiro do modelo não foi consumido em: " + request);
+        if (consumeAll && !model.Consumed) throw new Exception("FAIL: o roteiro do modelo não foi consumido em: " + request);
         return answer.ReplaceLineEndings("\n");
     }
 
@@ -198,6 +281,7 @@ internal static class ValidationAnswerChecks
         private readonly List<JsonElement> requests = [];
         private int calls;
         internal bool Consumed => calls == responses.Length;
+        internal int Calls => calls;
         internal IEnumerable<string> SystemMessages(int call) => requests[call].GetProperty("messages").EnumerateArray()
             .Where(m => m.GetProperty("role").GetString() == "system").Select(m => m.GetProperty("content").GetString() ?? "");
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
