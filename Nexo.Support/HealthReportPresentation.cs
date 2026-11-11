@@ -420,7 +420,7 @@ public static class HealthReportPresentation
     private static string Percent(double? value) => value.HasValue ? value.Value.ToString("F0") + "%" : "indisponível";
     public const string StorageScope = "O estado dos discos é o informado pelo Windows Storage (HealthStatus e OperationalStatus); não é uma leitura SMART completa nem inclui contadores de confiabilidade.";
     // Discos físicos e volumes vêm de consultas diferentes (#19/#93): no PC, o modelo chamou o T: (um VHDX) de "USB DISK 2.0".
-    public const string PhysicalDiskScope = "Esta leitura não liga os discos físicos às letras de unidade (C:, D:...); não associe uma letra a um disco pelo nome, pelo tipo ou pelo tamanho.";
+    public const string PhysicalDiskScope = "Esta leitura não liga os discos físicos às letras de unidade (C:, D:...); a ligação entre letra e disco vem de get_hardware_inventory(storage), em Volumes. Sem ela, não associe uma letra a um disco pelo nome, pelo tipo ou pelo tamanho.";
     // Horário da leitura; com a data quando a leitura não é do dia de hoje, para uma amostra antiga não parecer atual.
     private static string ReadAt(DateTimeOffset time, string verb, DateTimeOffset? now)
     {
