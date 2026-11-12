@@ -93,9 +93,11 @@ public static class NetworkChange
                 {
                     if (!token.IsCancellationRequested)
                     {
-                        var answer = confirm(new ChangeRequest("Manter a configuração de rede?", request.Description + "\n\nEstado obtido após a mudança:\n" + state + "\n\nTeste a conexão. Se não confirmar em até 45 segundos, a configuração anterior será restaurada.", true));
+                        var explicitRestoreSelected = false;
+                        var answer = confirm(new ChangeRequest("Manter a configuração de rede?", request.Description + "\n\nEstado obtido após a mudança:\n" + state + "\n\nTeste a conexão. Se não confirmar em até 45 segundos, a configuração anterior será restaurada.", true)
+                        { OnExplicitRestore = () => explicitRestoreSelected = true });
                         // O cancelamento do atendimento também encerra a espera pela janela: a decisão vira "rollback".
-                        if (await Task.WhenAny(answer, Task.Delay(deadlines.Confirming, token)) == answer) { keep = await answer; restoreChosen = !keep && !token.IsCancellationRequested; }
+                        if (await Task.WhenAny(answer, Task.Delay(deadlines.Confirming, token)) == answer) { keep = await answer; restoreChosen = !keep && explicitRestoreSelected && !token.IsCancellationRequested; }
                         else progress.Report(token.IsCancellationRequested ? "Cancelamento solicitado; restaurando a configuração anterior." : "A confirmação não respondeu no prazo; restaurando a configuração anterior.");
                     }
                 }
@@ -126,7 +128,8 @@ public static class NetworkChange
         try
         {
             if (JsonNode.Parse(result) is not JsonObject root) return result;
-            if (root["success"]?.GetValueKind() != JsonValueKind.False || root["reverted"]?.GetValueKind() != JsonValueKind.True) return result;
+            if (root["success"]?.GetValueKind() != JsonValueKind.False || root["reverted"]?.GetValueKind() != JsonValueKind.True
+                || root.ContainsKey("error") || root.ContainsKey("failureState")) return result;
             root["restoredByUser"] = true;
             return root.ToJsonString();
         }

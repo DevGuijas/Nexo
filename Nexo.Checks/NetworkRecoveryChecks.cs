@@ -217,6 +217,18 @@ internal static class NetworkRecoveryChecks
             }, prompts, true, keep: false, deadlines: quick);
             check(!Flag(chosenFailed.Result, "restoredByUser") && ToolResultPresentation.Describe("Alterando DNS", chosenFailed.Result.GetRawText()).Warning,
                 "Rede: restauração a pedido que falha continua aparecendo como erro (#98)");
+            prompts.Clear();
+            var automatic = await Apply(store, trust, async (dir, stop) =>
+            {
+                await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}");
+                await WaitFor(Path.Combine(dir, "decision.txt"), stop);
+                await Write(Secured(protectedRoot, dir), "result.json", "{\"success\":false,\"reverted\":true}");
+            }, prompts, true, keep: false, deadlines: quick, explicitRestore: false);
+            check(!Flag(automatic.Result, "restoredByUser") && ToolResultPresentation.Describe("Alterando DNS", automatic.Result.GetRawText()).Warning,
+                "Rede: prazo da janela não aparece como restauração a pedido (#98)");
+            check(NetworkChange.MarkRestoreChosen("{\"success\":false,\"reverted\":true,\"error\":\"falha no executor\"}", true)
+                == "{\"success\":false,\"reverted\":true,\"error\":\"falha no executor\"}",
+                "Rede: falha do executor restaurada não esconde o erro (#98)");
             check(NetworkChange.MarkRestoreChosen("{\"success\":false,\"reverted\":true}", false) == "{\"success\":false,\"reverted\":true}"
                 && NetworkChange.MarkRestoreChosen("{\"success\":true}", true) == "{\"success\":true}" && NetworkChange.MarkRestoreChosen("<x>", true) == "<x>",
                 "Rede: prazo esgotado, cancelamento, sucesso e resultado inválido não ganham a marca de restauração a pedido (#98)");
@@ -544,7 +556,7 @@ internal static class NetworkRecoveryChecks
 
     private sealed record Outcome(JsonElement Result, string Directory, int RecoveryStarts, string RecoveryScript, string ForwardScript = "", bool Killed = false);
 
-    private static async Task<Outcome> Apply(Store store, NetworkRecoveryTrust trust, Func<string, CancellationToken, Task> executor, List<string> prompts, bool restore, bool keep = false, bool recoveryWrites = true, NetworkDeadlines? deadlines = null, CancellationToken token = default, bool unanswered = false)
+    private static async Task<Outcome> Apply(Store store, NetworkRecoveryTrust trust, Func<string, CancellationToken, Task> executor, List<string> prompts, bool restore, bool keep = false, bool recoveryWrites = true, NetworkDeadlines? deadlines = null, CancellationToken token = default, bool unanswered = false, bool explicitRestore = true)
     {
         string directory = "";
         var starts = 0;
@@ -562,7 +574,7 @@ internal static class NetworkRecoveryChecks
             directory = dir; forwardScript = script;
             return new SimulatedProcess(stop => executor(dir, stop));
         };
-        Func<ChangeRequest, Task<bool>> confirm = request => { prompts.Add(request.Title); return unanswered && request.KeepNetwork ? new TaskCompletionSource<bool>().Task : Task.FromResult(request.KeepNetwork ? keep : restore); };
+        Func<ChangeRequest, Task<bool>> confirm = request => { prompts.Add(request.Title); if (request.KeepNetwork && !keep && !unanswered && explicitRestore) request.OnExplicitRestore?.Invoke(); return unanswered && request.KeepNetwork ? new TaskCompletionSource<bool>().Task : Task.FromResult(request.KeepNetwork ? keep : restore); };
         var output = await NetworkChange.Apply(Request, store, confirm, new Silent(), token, start, deadlines, trust);
         using var document = JsonDocument.Parse(output);
         return new Outcome(document.RootElement.Clone(), directory, starts, recoveryScript, forwardScript);
