@@ -354,8 +354,12 @@ public static class NetworkRecovery
         {
             foreach (var folder in new[] { Path.GetDirectoryName(operations)!, operations })
             {
+                FileAttributes attributes;
+                try { attributes = File.GetAttributes(folder); }
+                catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { return null; }
+                if (!attributes.HasFlag(FileAttributes.Directory)) return folder + ": não é pasta";
+                if (attributes.HasFlag(FileAttributes.ReparsePoint)) return folder + ": é link (reparse point)";
                 var item = new DirectoryInfo(folder);
-                if (!item.Exists) return null;
                 if (UntrustedItem(item) is { } reason) return reason;
             }
             return null;
@@ -379,12 +383,14 @@ public static class NetworkRecovery
         return null;
     }
 
-    /// <summary>Resposta da troca de rede recusada por causa da pasta protegida (#97): causa, rede intacta e como liberar.</summary>
+    /// <summary>Informa a condição atual da pasta sem atribuir a ela uma saída sem resultado do executor.</summary>
     internal static string HostileChainMessage(string reason) =>
-        "A troca de rede foi recusada porque a pasta %ProgramData%\\NexoSupport, onde o Nexo guarda o backup protegido, tem dono ou permissões inesperados, ou é um link (" + reason + "). "
-        + "A rede não foi alterada, e novas tentativas vão falhar do mesmo jeito enquanto a pasta estiver assim. "
-        + "Para liberar, siga o README do Nexo, seção \"Rede e recuperação\": num prompt como administrador, rode takeown /F \"%ProgramData%\\NexoSupport\" /A /R /D S (em Windows em inglês, /D Y), "
-        + "icacls \"%ProgramData%\\NexoSupport\" /reset /T e rmdir /S /Q \"%ProgramData%\\NexoSupport\". Se ela for um link (junção), use só rmdir \"%ProgramData%\\NexoSupport\", sem /S, para não apagar o destino.";
+        "O executor terminou sem resultado e a cadeia %ProgramData%\\NexoSupport, onde o Nexo guarda o backup protegido, tem uma condição que bloqueia esta operação (" + reason + "). "
+        + "Ela pode ter impedido a troca; não há confirmação do estado atual da rede. Confira a configuração antes de repetir. "
+        + (reason.Contains(": não é pasta", StringComparison.Ordinal)
+            ? "Há um arquivo no lugar de uma das pastas. Peça a um administrador para conferir e remover apenas o arquivo indicado; os comandos rmdir para pastas do README, seção \"Rede e recuperação\", não se aplicam a esse arquivo."
+            : "Para liberar, siga o README do Nexo, seção \"Rede e recuperação\": num prompt como administrador, rode takeown /F \"%ProgramData%\\NexoSupport\" /A /R /D S (em Windows em inglês, /D Y), "
+            + "icacls \"%ProgramData%\\NexoSupport\" /reset /T e rmdir /S /Q \"%ProgramData%\\NexoSupport\". Se ela for um link (junção), use só rmdir \"%ProgramData%\\NexoSupport\", sem /S, para não apagar o destino.");
 
     [SupportedOSPlatform("windows")]
     private static string Account(SecurityIdentifier? sid)

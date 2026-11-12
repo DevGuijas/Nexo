@@ -38,17 +38,19 @@ internal static class NetworkRecoveryChecks
             var hostileTrust = trust with { ChainProblem = _ => HostileReason };
             var hostile = await Apply(store, hostileTrust, async (dir, _) => await Task.Yield(), prompts, true);
             var hostileError = Text(hostile.Result, "error");
-            check(Flag(hostile.Result, "protectedFolderRefused") && Bool(hostile.Result, "changed") == false && prompts.Count == 0 && hostile.RecoveryStarts == 0
-                && hostileError.StartsWith("A troca de rede foi recusada porque a pasta %ProgramData%\\NexoSupport") && hostileError.Contains(HostileReason)
-                && hostileError.Contains("A rede não foi alterada") && hostileError.Contains("Rede e recuperação") && hostileError.Contains("takeown") && hostileError.Contains("icacls") && hostileError.Contains("rmdir"),
-                "Rede: pasta NexoSupport não confiável explica a recusa, diz que a rede não mudou e aponta os comandos do README (#97)");
+            check(Flag(hostile.Result, "protectedFolderProblem") && Bool(hostile.Result, "changed") == null && !hostile.Result.TryGetProperty("recovery", out _) && prompts.Count == 0 && hostile.RecoveryStarts == 0
+                && hostileError.Contains("%ProgramData%\\NexoSupport") && hostileError.Contains(HostileReason)
+                && hostileError.Contains("não há confirmação") && hostileError.Contains("Rede e recuperação") && hostileError.Contains("takeown") && hostileError.Contains("icacls") && hostileError.Contains("rmdir"),
+                "Rede: pasta NexoSupport hostil é diagnosticada sem atribuir causa ou estado da rede sem prova (#97)");
+            var precreated = await Apply(store, hostileTrust, async (dir, _) => { Directory.CreateDirectory(Secured(protectedRoot, dir)); await Task.Yield(); }, prompts, true);
+            check(Flag(precreated.Result, "protectedFolderProblem"), "Rede: pasta da operação pré-criada não esconde problema na cadeia protegida (#97)");
             prompts.Clear();
             var trustedChain = await Apply(store, trust with { ChainProblem = _ => null }, async (dir, _) => await Task.Yield(), prompts, true);
-            check(!Flag(trustedChain.Result, "protectedFolderRefused") && Text(trustedChain.Result, "error").StartsWith("Executor encerrado sem resultado."),
+            check(!Flag(trustedChain.Result, "protectedFolderProblem") && Text(trustedChain.Result, "error").StartsWith("Executor encerrado sem resultado."),
                 "Rede: com a pasta NexoSupport confiável, a mensagem de executor encerrado continua a mesma (#97)");
             prompts.Clear();
             var backedUp = await Apply(store, hostileTrust, async (dir, _) => await Backup(dir, protectedRoot, Before), prompts, true);
-            check(!Flag(backedUp.Result, "protectedFolderRefused") && !Text(backedUp.Result, "error").Contains("foi recusada porque a pasta") && backedUp.RecoveryStarts == 1,
+            check(!Flag(backedUp.Result, "protectedFolderProblem") && backedUp.RecoveryStarts == 1,
                 "Rede: executor que chegou a gravar o backup protegido não é explicado como pasta recusada (#97)");
             if (OperatingSystem.IsWindows()) await HostileChainOnWindows(check, root);
 
@@ -538,6 +540,14 @@ internal static class NetworkRecoveryChecks
         var chainRoot = Path.Combine(root, "chain-" + System.Guid.NewGuid().ToString("N"));
         var missing = Path.Combine(chainRoot, "ausente", "NexoSupport", "operations");
         check(NetworkRecovery.ProtectedChainProblemOnWindows(missing) == null, "Rede: cadeia NexoSupport ainda inexistente não é recusada; o executor a cria (#97)");
+        var fileParent = Path.Combine(chainRoot, "arquivo", "NexoSupport");
+        Directory.CreateDirectory(Path.GetDirectoryName(fileParent)!);
+        File.WriteAllText(fileParent, "ocupado");
+        check(NetworkRecovery.ProtectedChainProblemOnWindows(Path.Combine(fileParent, "operations"))?.Contains("não é pasta") == true,
+            "Rede: arquivo no lugar da pasta NexoSupport é diagnosticado (#97)");
+        check(NetworkRecovery.HostileChainMessage(fileParent + ": não é pasta").Contains("arquivo")
+            && !NetworkRecovery.HostileChainMessage(fileParent + ": não é pasta").Contains("rmdir /S"),
+            "Rede: arquivo no caminho recebe orientação própria, sem comando de remover pasta (#97)");
 
         var plain = Path.Combine(chainRoot, "comum", "NexoSupport", "operations");
         Directory.CreateDirectory(plain);

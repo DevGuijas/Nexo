@@ -113,10 +113,11 @@ public static class NetworkChange
         var recovery = await NetworkRecovery.Recover(interrupted, confirm, start, NetworkRecovery.DefaultTimeout, CancellationToken.None);
         using var recoveryResult = JsonDocument.Parse(recovery);
         var unchanged = recoveryResult.RootElement.TryGetProperty("unchanged", out var flag) && flag.ValueKind == JsonValueKind.True;
-        // #97: sem pasta protegida da operação, o executor pode ter recusado uma cadeia NexoSupport hostil, sem gravar o motivo.
-        var hostile = unchanged && !Directory.Exists(secured) ? trust.ChainProblem?.Invoke(trust.ProtectedRoot) : null;
+        // #97: a cadeia pode estar bloqueada mesmo se alguém criou a pasta da operação antes do executor.
+        var hostile = unchanged ? trust.ChainProblem?.Invoke(trust.ProtectedRoot) : null;
         var error = hostile != null ? NetworkRecovery.HostileChainMessage(hostile) : "Executor encerrado sem resultado. " + NetworkRecovery.Explain(recovery);
-        return JsonSerializer.Serialize(new { success = false, changed = !unchanged, reverted = NetworkRecovery.Restored(recovery), error, protectedFolderRefused = hostile != null, backup, recoveryFolder = dir, recovery = recoveryResult.RootElement.Clone() });
+        if (hostile != null) return JsonSerializer.Serialize(new { success = false, changed = (bool?)null, reverted = false, error, protectedFolderProblem = true, backup, recoveryFolder = dir });
+        return JsonSerializer.Serialize(new { success = false, changed = !unchanged, reverted = NetworkRecovery.Restored(recovery), error, backup, recoveryFolder = dir, recovery = recoveryResult.RootElement.Clone() });
     }
 
     private static async Task<string> ReadResult(string dir, string secured, NetworkRecoveryTrust trust)
