@@ -58,7 +58,18 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     private static readonly IReadOnlyDictionary<string, JsonElement> toolSchemas = ToolCatalog.ForScope(false)
         .Select(tool => JsonSerializer.SerializeToElement(tool))
         .ToDictionary(tool => tool.GetProperty("function").GetProperty("name").GetString()!, tool => tool.GetProperty("function").GetProperty("parameters").Clone(), StringComparer.Ordinal);
-    public static string Quote(string value) => "'" + value.Replace("'", "''") + "'";
+    // O PowerShell fecha a string de aspas simples também com ‘ ’ ‚ ‛ (aspas tipográficas), não só com '. Cada uma é
+    // dobrada, como a ', para nomes vindos do Windows (impressora, caminho do perfil) continuarem texto literal.
+    public static string Quote(string value)
+    {
+        var quoted = new StringBuilder(value.Length + 2).Append('\'');
+        foreach (var character in value)
+        {
+            quoted.Append(character);
+            if (character is '\'' or '\u2018' or '\u2019' or '\u201A' or '\u201B') quoted.Append(character);
+        }
+        return quoted.Append('\'').ToString();
+    }
     public static string Value(JsonElement args, string key) => args.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : throw new InvalidOperationException("Argumento de texto ausente: " + key);
     public static int Number(JsonElement args, string key) => args.TryGetProperty(key, out var value) && value.TryGetInt32(out var number) ? number : throw new InvalidOperationException("Número inteiro ausente: " + key);
     public static string Ipv4(string text)
