@@ -70,13 +70,13 @@ public static class NetworkRecovery
     public static IElevatedProcess StartElevated(string script) => new ElevatedProcess(WindowsTools.StartElevated(ElevatedArguments(script)));
 
     /// <summary>Argumentos que o executor de rede usa na elevação: sempre o carregador compactado.</summary>
-    public static string[] ElevatedArguments(string script) => WindowsTools.ElevatedArguments(Compact(script));
+    public static string[] ElevatedArguments(string script) => ["-NoProfile", "-NonInteractive", "-Command", Compact(script)];
 
     /// <summary>Tamanho da linha de comando elevada do executor de rede, como o Windows a recebe.</summary>
     public static int CommandLength(string script) => WindowsTools.CommandLength(ElevatedArguments(script));
 
     /// <summary>
-    /// O executor de rede inteiro em -EncodedCommand (UTF-16 em Base64) passa do limite de 32 767 caracteres da linha de
+    /// O executor de rede inteiro, sem compactar, passa do limite de 32 767 caracteres da linha de
     /// comando do Windows. Ele vai compactado (GZip) dentro de um carregador curto, que o descompacta na memória do
     /// processo elevado e o executa no mesmo escopo. Nada é gravado em disco no caminho até a elevação.
     /// </summary>
