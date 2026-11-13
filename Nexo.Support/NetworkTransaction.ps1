@@ -144,7 +144,7 @@ function Save-Protected($filename, $value) {
 # Registro protegido com a fase (applying, confirming, restoring): a janela de restauração usa esta fase, e não os
 # arquivos de %LOCALAPPDATA%.
 function Save-ProtectedRecord($phase) {
-    Save-Protected 'transaction.json' @{Action=[string]$request.Action;Index=$interfaceIndex;ExpectedGuid=[string]$request.ExpectedGuid;Created=$protectedState.Created;Phase=$phase}
+    Save-Protected 'transaction.json' @{Action=[string]$request.Action;Index=$interfaceIndex;ExpectedGuid=[string]$request.ExpectedGuid;Created=$protectedState.Created;Phase=$phase;ProcessId=$PID;LocalDirectory=[string]$operationDir}
 }
 # Remove só os arquivos conhecidos e a pasta vazia: nunca apaga recursivamente com elevação (um link poderia apontar
 # para outro lugar).
@@ -251,6 +251,8 @@ if ($recoveryMode) {
         $before = Get-Content -LiteralPath (Join-Path $protectedDir 'before.json') -Raw | ConvertFrom-Json
         if ([string]::IsNullOrWhiteSpace($request.ExpectedGuid) -or [string]$record.Action -ne [string]$request.Action -or [int]$record.Index -ne $interfaceIndex -or [guid]$record.ExpectedGuid -ne [guid]$request.ExpectedGuid -or [int]$before.Index -ne $interfaceIndex -or [guid]$before.Guid -ne [guid]$record.ExpectedGuid) { throw 'O pedido de restauração não corresponde ao registro protegido. Nenhuma alteração foi feita.' }
         $request = [pscustomobject]@{Action=[string]$record.Action;Index=[int]$record.Index;ExpectedGuid=[string]$record.ExpectedGuid}
+        $record | Add-Member -NotePropertyName RecoveryProcessId -NotePropertyValue $PID -Force
+        Save-Protected 'transaction.json' $record
         $adapter = Get-NetAdapter -InterfaceIndex $interfaceIndex -ErrorAction Stop
         if ([guid]$adapter.InterfaceGuid -ne [guid]$before.Guid -or [guid]$adapter.InterfaceGuid -ne [guid]$request.ExpectedGuid) { throw 'A interface neste índice não é a mesma da transação interrompida. Nenhuma alteração foi feita.' }
         $found = Snapshot

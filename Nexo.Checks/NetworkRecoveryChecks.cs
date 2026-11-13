@@ -101,8 +101,8 @@ internal static class NetworkRecoveryChecks
             prompts.Clear();
             var declined = await Apply(store, trust, async (dir, _) => await Backup(dir, protectedRoot, Before), prompts, false);
             check(declined.RecoveryStarts == 0 && !Flag(declined.Result, "reverted") && Flag(declined.Result.GetProperty("recovery"), "declined")
-                && NetworkRecovery.Scan(root, DateTimeOffset.UtcNow, _ => false, trust).All(i => i.Directory != declined.Directory),
-                "Rede: restauração recusada fica registrada e não é repetida");
+                && NetworkRecovery.Scan(root, DateTimeOffset.UtcNow, _ => false, trust).Any(i => i.Directory == declined.Directory && i.Resolution == null),
+                "Rede: recusa fica registrada, mas pede nova decisão após reabrir sem confiar no arquivo local (#106)");
 
             prompts.Clear();
             var silent = await Apply(store, trust, async (dir, _) => await Backup(dir, protectedRoot, Before), prompts, true, recoveryWrites: false);
@@ -129,6 +129,72 @@ internal static class NetworkRecoveryChecks
             var pending = NetworkRecovery.Scan(startup, DateTimeOffset.UtcNow, pid => pid == 4242, trust);
             check(pending.Select(p => p.Directory).OrderBy(d => d).SequenceEqual(new[] { dead, old }.OrderBy(d => d)) && pending.All(p => p.Resolution == null && p.Phase == "applying"),
                 "Rede: abertura do Nexo encontra transações interrompidas e ignora executor ainda ativo ou recém-iniciado");
+
+            var tamperRoot = Path.Combine(root, "tampered-local-index");
+            var tamperProtectedRoot = Path.Combine(root, "tampered-protected-index");
+            var tamperTrust = new NetworkRecoveryTrust(tamperProtectedRoot, _ => true);
+            var vanished = Transaction(tamperRoot, tamperProtectedRoot, 1);
+            File.WriteAllText(Path.Combine(tamperProtectedRoot, Path.GetFileName(vanished), NetworkRecovery.RecordFile),
+                JsonSerializer.Serialize(new { Action = "set_ipv4", Index = 7, ExpectedGuid = Guid, Created = DateTimeOffset.UtcNow, ProcessId = 1, Phase = "confirming", LocalDirectory = vanished }));
+            Directory.Delete(vanished, true);
+            check(NetworkRecovery.Scan(tamperRoot, DateTimeOffset.UtcNow, _ => false, tamperTrust).Any(i => i.Directory == vanished && i.Before != null),
+                "Rede: pasta local apagada não oculta backup protegido pendente (#106)");
+
+            var blocked = Transaction(tamperRoot, tamperProtectedRoot, 1);
+            Directory.Delete(blocked, true);
+            File.WriteAllText(blocked, "bloqueado");
+            var blockedItem = NetworkRecovery.Scan(tamperRoot, DateTimeOffset.UtcNow, _ => false, tamperTrust)
+                .FirstOrDefault(i => Path.GetFileName(i.Directory) == Path.GetFileName(blocked));
+            check(blockedItem?.Before != null && blockedItem.Directory != blocked && Directory.Exists(blockedItem.Directory),
+                "Rede: arquivo no lugar da pasta local não oculta o backup protegido (#106)");
+            var fallbackResult = await NetworkRecovery.Recover(blockedItem!, _ => Task.FromResult(true), script =>
+            {
+                if (OperationDir(script) != blockedItem!.Directory) throw new Exception("O executor não recebeu o caminho alternativo.");
+                return new SimulatedProcess(async _ => await Write(Secured(tamperProtectedRoot, blocked), NetworkRecovery.ResultFile,
+                    "{\"success\":true,\"restored\":true,\"message\":\"Configuração anterior restaurada e conferida.\"}"));
+            }, TimeSpan.FromSeconds(3), CancellationToken.None);
+            check(NetworkRecovery.Restored(fallbackResult) && !Directory.Exists(blockedItem!.Directory),
+                "Rede: restauração pelo caminho alternativo termina e limpa a pasta de trabalho (#106)");
+
+            var deniedRoot = Path.Combine(root, "denied-list-index");
+            var deniedTransaction = Transaction(deniedRoot, tamperProtectedRoot, 1);
+            var deniedOperations = new DirectoryInfo(Path.Combine(deniedRoot, "operations"));
+            var originalAcl = deniedOperations.GetAccessControl();
+            var deniedAcl = deniedOperations.GetAccessControl();
+            var deniedRule = new FileSystemAccessRule(WindowsIdentity.GetCurrent().User!, FileSystemRights.ListDirectory, AccessControlType.Deny);
+            deniedAcl.AddAccessRule(deniedRule);
+            deniedOperations.SetAccessControl(deniedAcl);
+            try
+            {
+                var listingDenied = false;
+                try { _ = Directory.EnumerateDirectories(deniedOperations.FullName).ToList(); }
+                catch (UnauthorizedAccessException) { listingDenied = true; }
+                var recovered = NetworkRecovery.Scan(deniedRoot, DateTimeOffset.UtcNow, _ => false, tamperTrust);
+                check(recovered.Any(i => Path.GetFileName(i.Directory) == Path.GetFileName(deniedTransaction) && i.Before != null),
+                    "Rede: descoberta protegida continua disponível com ACL local alterada (#106)");
+                if (!listingDenied) Console.WriteLine("SKIP: este usuário do runner ainda consegue listar a pasta com a ACE de negação; a recuperação com listagem negada precisa da VM (#8).");
+            }
+            finally { deniedOperations.SetAccessControl(originalAcl); }
+
+            var plantedResult = Transaction(tamperRoot, tamperProtectedRoot, 1);
+            File.WriteAllText(Path.Combine(plantedResult, "result.json"), "{\"success\":true}");
+            check(NetworkRecovery.Scan(tamperRoot, DateTimeOffset.UtcNow, _ => false, tamperTrust).Any(i => i.Directory == plantedResult && i.Before != null),
+                "Rede: resultado local plantado não encerra transação protegida pendente (#106)");
+
+            var plantedRecovery = Transaction(tamperRoot, tamperProtectedRoot, 1);
+            File.WriteAllText(Path.Combine(plantedRecovery, NetworkRecovery.ResultFile), "{\"restored\":true}");
+            check(NetworkRecovery.Scan(tamperRoot, DateTimeOffset.UtcNow, _ => false, tamperTrust).Any(i => i.Directory == plantedRecovery && i.Before != null),
+                "Rede: restauração local plantada não encerra transação protegida pendente (#106)");
+
+            var plantedPid = Transaction(tamperRoot, tamperProtectedRoot, 1);
+            NetworkRecovery.WriteRecord(plantedPid, new NetworkTransactionRecord("set_ipv4", 7, Guid, DateTimeOffset.UtcNow, 4242));
+            check(NetworkRecovery.Scan(tamperRoot, DateTimeOffset.UtcNow, pid => pid == 4242, tamperTrust).Any(i => i.Directory == plantedPid && i.Before != null),
+                "Rede: PID plantado no registro local não suspende a recuperação (#106)");
+
+            var protectedDone = Transaction(tamperRoot, tamperProtectedRoot, 1);
+            File.WriteAllText(Path.Combine(tamperProtectedRoot, Path.GetFileName(protectedDone), "result.json"), "{\"success\":true}");
+            check(NetworkRecovery.Scan(tamperRoot, DateTimeOffset.UtcNow, _ => false, tamperTrust).All(i => i.Directory != protectedDone),
+                "Rede: resultado protegido válido encerra a transação (#106)");
 
             var tampered = Transaction(startup, protectedRoot, 1, before: Before.Replace(Guid, "00000000-0000-0000-0000-000000000099"));
             var invalidIp = Transaction(startup, protectedRoot, 1, before: Before.Replace("10.0.0.10", "1"));
@@ -309,11 +375,11 @@ internal static class NetworkRecoveryChecks
             check(unsafeItem.Before == null && unsafeItem.Resolution != null && NetworkRecovery.Explain(unsafeItem.Resolution).Contains("permissões inesperados"),
                 "Rede: cópia protegida com dono ou permissões inesperados não gera oferta");
 
-            // Registro do usuário diferente do protegido.
+            // Registro do usuário diferente do protegido: o registro elevado continua sendo a fonte da operação.
             var mismatch = Transaction(startup, protectedRoot, 1, secureRecord: new NetworkTransactionRecord("set_dns", 7, Guid, DateTimeOffset.UtcNow));
-            var mismatchItem = NetworkRecovery.Inspect(mismatch, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
-            check(mismatchItem.Before == null && mismatchItem.Resolution != null && NetworkRecovery.Explain(mismatchItem.Resolution).Contains("não corresponde à cópia protegida"),
-                "Rede: registro do usuário diferente do protegido não gera oferta");
+            var mismatchItem = NetworkRecovery.Inspect(mismatch, DateTimeOffset.UtcNow, _ => false, exited: true, trust: trust)!;
+            check(mismatchItem.Before != null && mismatchItem.Resolution == null && mismatchItem.Record.Action == "set_dns",
+                "Rede: registro local divergente não substitui o registro protegido (#106)");
 
             // Limite de idade: 8 dias não oferece, 6 dias oferece.
             var stale = Transaction(startup, protectedRoot, 1, created: DateTimeOffset.UtcNow.AddDays(-8));
@@ -364,18 +430,18 @@ internal static class NetworkRecoveryChecks
             var phased = Transaction(startup, protectedRoot, 1, secureRecord: new NetworkTransactionRecord("set_ipv4", 7, Guid, DateTimeOffset.UtcNow, Phase: "applying"));
             File.WriteAllText(Path.Combine(phased, "applied.json"), "{}");
             File.WriteAllText(Path.Combine(phased, "decision.txt"), "rollback");
-            var phasedItem = NetworkRecovery.Inspect(phased, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
+            var phasedItem = NetworkRecovery.Inspect(phased, DateTimeOffset.UtcNow, _ => false, exited: true, trust: trust)!;
             check(phasedItem.Phase == "applying" && NetworkRecovery.Describe(phasedItem).Contains("durante a aplicação da mudança"),
                 "Rede: a fase mostrada na restauração vem do registro protegido");
 
             var forgedKeepAfterCrash = Transaction(startup, protectedRoot, 1, secureRecord: new NetworkTransactionRecord("set_ipv4", 7, Guid, DateTimeOffset.UtcNow, Phase: "confirming"));
             File.WriteAllText(Path.Combine(forgedKeepAfterCrash, "decision.txt"), "keep");
-            var forgedKeepItem = NetworkRecovery.Inspect(forgedKeepAfterCrash, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
+            var forgedKeepItem = NetworkRecovery.Inspect(forgedKeepAfterCrash, DateTimeOffset.UtcNow, _ => false, exited: true, trust: trust)!;
             check(forgedKeepItem.Resolution == null && forgedKeepItem.Before != null,
                 "Rede: keep forjado depois da queda não encerra a restauração oferecida (#11)");
 
             var authenticatedKeep = Transaction(startup, protectedRoot, 1, secureRecord: new NetworkTransactionRecord("set_ipv4", 7, Guid, DateTimeOffset.UtcNow, Phase: "keeping"));
-            var authenticatedKeepItem = NetworkRecovery.Inspect(authenticatedKeep, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
+            var authenticatedKeepItem = NetworkRecovery.Inspect(authenticatedKeep, DateTimeOffset.UtcNow, _ => false, exited: true, trust: trust)!;
             check(authenticatedKeepItem.Resolution != null && authenticatedKeepItem.Phase == "keeping",
                 "Rede: confirmação gravada pelo executor na pasta protegida preserva a escolha após queda (#11)");
 
@@ -695,7 +761,7 @@ internal static class NetworkRecoveryChecks
     {
         var secured = Secured(protectedRoot, dir);
         Directory.CreateDirectory(secured);
-        await Write(secured, NetworkRecovery.RecordFile, Record(DateTimeOffset.UtcNow));
+        await Write(secured, NetworkRecovery.RecordFile, JsonSerializer.Serialize(new NetworkTransactionRecord("set_ipv4", 7, Guid, DateTimeOffset.UtcNow, 999999, LocalDirectory: dir)));
         await Write(secured, "before.json", before);
     }
 
@@ -719,7 +785,7 @@ internal static class NetworkRecoveryChecks
         {
             var secured = Path.Combine(protectedRoot, id);
             Directory.CreateDirectory(secured);
-            File.WriteAllText(Path.Combine(secured, NetworkRecovery.RecordFile), secureRecord is { } record ? JsonSerializer.Serialize(record) : Record(when));
+            File.WriteAllText(Path.Combine(secured, NetworkRecovery.RecordFile), secureRecord is { } record ? JsonSerializer.Serialize(record) : JsonSerializer.Serialize(new NetworkTransactionRecord("set_ipv4", 7, Guid, when, pid, LocalDirectory: dir)));
             File.WriteAllText(Path.Combine(secured, "before.json"), before ?? Before);
         }
         return dir;
