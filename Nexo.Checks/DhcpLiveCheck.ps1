@@ -30,11 +30,31 @@ try {
         $operationId=[guid]::NewGuid().ToString('N')
         $operationDir=Join-Path $testRoot $operationId; New-Item -ItemType Directory -Path $operationDir | Out-Null
         Set-Content -LiteralPath (Join-Path $operationDir 'mode.txt') -Value $mode
-        # User authorizes both transitions before starting this opt-in test.
-        Set-Content -LiteralPath (Join-Path $operationDir 'decision.txt') -Value 'keep'
         $requestJson=@{Action='set_ipv4';Index=$InterfaceIndex;ExpectedGuid=[string]$ExpectedGuid;Mode=$mode;Address=$(if($mode -eq 'static'){$lease[0].IPAddress}else{''});Prefix=$(if($mode -eq 'static'){$lease[0].PrefixLength}else{0});Gateway=$(if($mode -eq 'static'){$routes[0].NextHop}else{''});Servers=@()} | ConvertTo-Json
-        & ([scriptblock]::Create($source))
-        $result=Get-Content -LiteralPath (Join-Path $operationDir 'result.json') -Raw | ConvertFrom-Json
+        $decisionPipeName='nexo-network-'+$operationId
+        $appProcessId=$PID
+        $pipe=New-Object System.IO.Pipes.NamedPipeServerStream($decisionPipeName, [System.IO.Pipes.PipeDirection]::Out, 1, [System.IO.Pipes.PipeTransmissionMode]::Byte, [System.IO.Pipes.PipeOptions]::Asynchronous)
+        $job=$null
+        try {
+            # The worker runs the actual elevated transaction; this process supplies the one-shot confirmation.
+            $job=Start-Job -ScriptBlock {
+                param($source,$requestJson,$operationId,$operationDir,$decisionPipeName,$appProcessId)
+                $ErrorActionPreference='Stop'
+                & ([scriptblock]::Create($source))
+            } -ArgumentList $source,$requestJson,$operationId,$operationDir,$decisionPipeName,$appProcessId
+            $connection=$pipe.WaitForConnectionAsync()
+            if(-not $connection.Wait(85000)){throw ($mode+': executor did not request confirmation within 85 seconds')}
+            $writer=New-Object System.IO.StreamWriter($pipe)
+            $writer.AutoFlush=$true
+            $writer.WriteLine('keep')
+            if(-not (Wait-Job -Job $job -Timeout 30)){throw ($mode+': executor did not finish after confirmation')}
+            Receive-Job -Job $job -ErrorAction Stop | Out-Null
+        } finally {
+            $pipe.Dispose()
+            if($job){if($job.State -eq 'Running'){Stop-Job -Job $job};Remove-Job -Job $job -Force}
+        }
+        $protectedDir=Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) ('NexoSupport\operations\'+$operationId)
+        $result=Get-Content -LiteralPath (Join-Path $protectedDir 'result.json') -Raw | ConvertFrom-Json
         if(-not $result.success){throw ($mode+': '+$result.error)}
     }
 } finally {

@@ -5,6 +5,44 @@ $before = $null
 $changed = $false
 $dhcpTransition = @{}
 $failureState = $null
+
+# decision.txt fica na pasta do usuário: ele pode pedir rollback, mas nunca autoriza manter a mudança (#11).
+# O pipe só é lido depois de applied.json; o PID do servidor vem do kernel, não do nome público do pipe.
+function Receive-Decision {
+    if ([int]$appProcessId -le 0 -or [string]$decisionPipeName -cnotmatch '^nexo-network-[0-9a-f]{32}$') { return 'rollback' }
+    if (-not ('NexoNetworkPipePeer' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class NexoNetworkPipePeer {
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool GetNamedPipeServerProcessId(IntPtr pipe, out uint processId);
+}
+'@
+    }
+    $decisionPath = Join-Path $operationDir 'decision.txt'
+    $deadline = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            if ((Test-Path -LiteralPath $decisionPath) -and (Get-Content -LiteralPath $decisionPath -Raw).Trim() -ceq 'rollback') { return 'rollback' }
+        } catch { return 'rollback' }
+        $pipe = New-Object System.IO.Pipes.NamedPipeClientStream('.', $decisionPipeName, [System.IO.Pipes.PipeDirection]::In, [System.IO.Pipes.PipeOptions]::Asynchronous)
+        try {
+            $pipe.Connect(250)
+            [uint32]$serverPid = 0
+            if (-not [NexoNetworkPipePeer]::GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(), [ref]$serverPid) -or $serverPid -ne [uint32]$appProcessId) { continue }
+            $reader = New-Object System.IO.StreamReader($pipe)
+            $remaining = [int][Math]::Max(1, ($deadline - (Get-Date)).TotalMilliseconds)
+            $line = $reader.ReadLineAsync()
+            if (-not $line.Wait($remaining)) { return 'rollback' }
+            if ($line.Result -ceq 'keep') { return 'keep' }
+            return 'rollback'
+        } catch [TimeoutException] { }
+        catch { return 'rollback' }
+        finally { $pipe.Dispose() }
+    }
+    return 'rollback'
+}
 # Cópia protegida (#10): o backup e o registro também ficam em %ProgramData%, numa pasta que só SYSTEM e
 # Administradores podem alterar. A restauração lê só de lá; os arquivos em %LOCALAPPDATA% podem ser forjados por
 # qualquer processo do usuário e nunca definem o que é aplicado com elevação. O caminho vem da API do Windows, não de
@@ -290,11 +328,9 @@ try {
     }
     Save-Protected 'applied.json' $after
     Save-ProtectedRecord 'confirming'
-    $deadline = (Get-Date).AddSeconds(60)
-    $decisionPath = Join-Path $operationDir 'decision.txt'
-    while (-not (Test-Path -LiteralPath $decisionPath) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
-    $keep = (Get-Date) -lt $deadline -and (Test-Path -LiteralPath $decisionPath) -and (Get-Content -LiteralPath $decisionPath -Raw).Trim() -eq 'keep'
+    $keep = (Receive-Decision) -ceq 'keep'
     if ($keep) {
+        Save-ProtectedRecord 'keeping'
         Save-Protected 'result.json' @{success=$true;message='Configuração aplicada, estado consultado e permanência confirmada pelo usuário.';before=$before;after=(Snapshot);dhcpTransition=$dhcpTransition}
     } else {
         Save-ProtectedRecord 'restoring'

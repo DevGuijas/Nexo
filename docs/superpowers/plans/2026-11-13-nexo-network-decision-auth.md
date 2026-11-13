@@ -38,32 +38,33 @@
 
 **Interfaces:**
 - Produces: `NetworkDecisionChannel.PipeName(string operationId)` and `SendAsync(string pipeName, int expectedClientPid, string decision, TimeSpan timeout, CancellationToken token)`.
-- Produces: `NetworkDecisionChannel.ServerProcessId(SafePipeHandle)` for the elevated PowerShell side to mirror through Win32.
+- The elevated PowerShell side verifies the pipe server PID through `GetNamedPipeServerProcessId`.
 
-- [ ] Write failing checks for genuine client PID, foreign client PID, absent PID and one-shot delivery.
-- [ ] Run `dotnet run --project Nexo.Checks -c Release`; confirm the new checks fail for the missing channel.
-- [ ] Implement the named-pipe server and kernel PID verification; bound every wait and close after one message.
-- [ ] Rerun `Nexo.Checks` and confirm the new checks pass.
-- [ ] Commit as `fix(rede): autentica o canal de decisão elevado`.
+- [x] Write checks for genuine client PID, foreign client PID, absent PID and one-shot delivery.
+- [x] Implement the named-pipe server and kernel PID verification; bound every wait and close after one message.
+- [x] Rerun `Nexo.Checks` and confirm the new checks pass.
+- [x] Commit as `fix(rede): prepara canal autenticado para decisão elevada` (`d658c98`).
 
 ### Task 2: Remove file-based keep authority
 
 **Files:**
 - Modify: `Nexo.Support/NetworkChange.cs`
 - Modify: `Nexo.Support/NetworkTransaction.ps1`
+- Modify: `Nexo.Support/NetworkRecovery.cs`
 - Modify: `Nexo.Checks/NetworkRecoveryChecks.cs`
 - Modify: `Nexo.Checks/NetworkScriptChecks.ps1`
+- Modify: `Nexo.Checks/DhcpLiveCheck.ps1`
 - Modify: `README.md`
 
 **Interfaces:**
 - Consumes: `NetworkDecisionChannel.SendAsync`, the operation-specific pipe name and both process PIDs.
 - Produces: a decision after a trusted `applied.json`, with rollback on missing or invalid peer.
 
-- [ ] Add failing tests for early forged `keep`, replayed/foreign pipe connections, legitimate keep, explicit restore, cancellation and timeout.
-- [ ] Run focused C# and script checks; confirm the security regression fails on current code.
-- [ ] Pass the pipe name/app PID into the elevated script, verify the pipe server PID in PowerShell 5.1, and remove `decision.txt` as keep authority.
-- [ ] Update C# to start the pipe only after the confirmation callback and verify the elevated client PID; keep rollback signaling and uncertain-state reporting.
-- [ ] Rerun focused checks, full `Nexo.Checks`, `Nexo.Setup.Checks`, `NetworkScriptChecks.ps1`, app/setup builds and `git diff --check`.
+- [x] Add failing tests for early forged `keep` and forged `keep` after executor exit; verify PID, one-shot, legitimate keep, restore and timeout.
+- [x] Run focused C# checks; confirm both security regressions fail before the fixes.
+- [x] Pass the pipe name/app PID into the elevated script, verify the pipe server PID in PowerShell 5.1, and remove `decision.txt` as keep authority.
+- [x] Update C# to start the pipe only after the confirmation callback and verify the elevated client PID; keep rollback signaling and uncertain-state reporting.
+- [x] Rerun focused checks, full `Nexo.Checks`, `Nexo.Setup.Checks`, `NetworkScriptChecks.ps1`, app/setup builds and `git diff --check`.
 - [ ] Commit as `fix(rede): recusa keep forjado em arquivo local`.
 
 ### Task 3: Integration and review
@@ -73,7 +74,7 @@
 - Review: all files above.
 
 - [ ] Review the whole diff for privilege boundaries, process lifetime, pipe races and altered user messages.
-- [ ] Request an independent code review and resolve all critical or important findings.
+- [x] Request an independent code review and resolve its two findings (recovery path and live DHCP test).
 - [ ] Run the full verification again on the final commit.
 - [ ] Open a PR to `development`, wait for CI, merge only if checks pass and no important finding remains.
 - [ ] Leave #11 open with the exact VM acceptance steps and link the PR.

@@ -13,7 +13,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - [x] **Prioridade alta:** o executor de rede elevado deixa de gravar resultados na pasta do usuário (`%LOCALAPPDATA%`) e passa a gravar só na pasta protegida em `%ProgramData%` (#95, PR #96, validado no PC com UAC real em 10/11/2026).
 - [ ] Investigar com o log do Ollama ativo as etapas expiradas na 1ª chamada ao modelo, antes de mudar o limite de 3 minutos (#93, item 4).
 - [ ] Validar as sete falhas controladas em VM Windows (#8).
-- [ ] Autenticar a decisão de manter uma mudança de rede elevada (#11) e alinhar o prazo da instalação NVIDIA ao supervisor (#12).
+- [ ] Validar em VM o canal autenticado que confirma manter a mudança de rede (#11) e a instalação NVIDIA real com o prazo alinhado ao supervisor (#12).
 - [x] Validar no PC o patamar estável de memória com o NexoMemTeste-toca (#71): "Persiste", "Estável em patamar alto" depois de 31 min, volta a "Persiste" com +15% e "Resolvida" com o processo encerrado, na 76d9028 em 10/11/2026.
 - [ ] Validar no PC: a recuperação com ACL e UAC reais (#10); na #9, o prazo, a recusa do UAC e o executor encerrado já passaram em 12/11/2026 (`docs/VALIDACAO-REDE-9-2026-11-12.md`) e falta conferir na janela do Nexo a abertura seguinte; o custo da coleta de sensores, com e sem o Libre Hardware Monitor, e os discos atrás do AMD-RAID (#19); de novo, depois dos ajustes da validação de 10/11, o disco e a memória na resposta (#88: loop do disco, "pouca espaço", linha dos MB e alerta do volume removido) e as respostas da #93 (letra de unidade perguntada como "o que é o D:?", descrição de processo sem evidência); e o patamar estável na resposta (#71: não culpar o processo pela lentidão).
 - [ ] Trocar "não publicada" pela data de publicação, gerar os pacotes e registrar abaixo o commit e os hashes impressos pelo script.
@@ -62,6 +62,8 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - Spooler parado é lido e informado na consulta de impressoras, sem falhar a consulta (#84).
 
 ### Rede
+
+- A confirmação para manter IP/DNS passa por um pipe local de uso único: aplicativo e executor elevado conferem os PIDs um do outro. Um `keep` plantado em `decision.txt` não confirma a mudança nem encerra a oferta de restauração após queda; a escolha aceita fica no registro protegido (#11). A validação na VM ainda está pendente.
 
 - DNS fixo com DHCP apontado, teste TCP por IP e preferência por DNS automático.
 - Transação de rede interrompida (executor elevado encerrado no meio) é detectada na hora ou na próxima abertura e, se a mudança ficou pendente, o Nexo oferece restaurar a configuração anterior, com autorização e UAC. O backup confiável fica numa cópia protegida em `%ProgramData%`, e o que vem da pasta do usuário não é aplicado (#10, PR #76).

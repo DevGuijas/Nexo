@@ -147,8 +147,13 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
     if($variant -eq 'existing-untrusted-root'){New-Item -ItemType Directory -Path $nexoRoot -Force | Out-Null; $d=ProtectedDescriptor; $d.Owner='S-1-5-21-1-2-3-1001'; $script:fakeAcl[$nexoRoot]=$d}
     if($variant -eq 'existing-trusted-root'){New-Item -ItemType Directory -Path $script:protectedTestRoot -Force | Out-Null}
     if($decision -ne 'timeout'){Set-Content -LiteralPath (Join-Path $operationDir 'decision.txt') -Value $decision}
+    $appProcessId=$PID; $decisionPipeName='nexo-network-'+$operationId
     $requestJson=@{Action=$action;Index=10;ExpectedGuid=$(if($variant -eq 'identity-changed'){'00000000-0000-0000-0000-000000000099'}else{'00000000-0000-0000-0000-000000000001'});Mode=$mode;Servers=@('1.1.1.1');Address='10.0.0.20';Prefix=24;Gateway='10.0.0.1'} | ConvertTo-Json
-    $testSource=(Isolated $source).Replace('"$env:WINDIR\System32\netsh.exe"','Invoke-TestNetsh').Replace('.AddSeconds(60)', '.AddMilliseconds(500)').Replace('Start-Sleep -Milliseconds 500','Start-Sleep -Milliseconds 10').Replace('Start-Sleep -Seconds 3','Start-Sleep -Milliseconds 1')
+    $testSource=(Isolated $source).Replace('"$env:WINDIR\System32\netsh.exe"','Invoke-TestNetsh').Replace('.AddSeconds(60)', '.AddMilliseconds(500)').Replace('Start-Sleep -Milliseconds 500','Start-Sleep -Milliseconds 10').Replace('Start-Sleep -Seconds 3','Start-Sleep -Milliseconds 1').Replace('Connect(250)','Connect(10)')
+    if($variant -ne 'forged-keep') {
+        # O simulador cobre os cmdlets de rede; o pipe real é exercitado pelas checagens C# e pelo caso forjado abaixo.
+        $testSource="function Receive-Decision { Note-Phase; return '$(if($decision -eq 'keep'){'keep'}else{'rollback'})' }`n" + $testSource.Replace('function Receive-Decision {','function Receive-Decision-Real {')
+    }
     if($testSource.Contains('netsh.exe')){throw 'Native command was not isolated by the simulator'}
     & ([scriptblock]::Create($testSource))
     $protectedResult=Join-Path $script:currentProtected 'result.json'
@@ -168,7 +173,7 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
         if($variant -eq 'existing-untrusted-root' -and ($null -ne $result -or $script:created.Count -ne 0 -or (Test-Path -LiteralPath $script:protectedTestRoot))){throw ($name+': untrusted pre-existing NexoSupport folder was adopted')}
         if($variant -eq 'bad-id' -and ($null -ne $result -or $script:created.Count -ne 0)){throw ($name+': invalid operation id was accepted')}
         if($variant -in 'default-switch','vpn','identity-changed' -and (-not $result -or -not $result.error -or $result.changed)){throw ($name+': refusal was not recorded in the protected folder')}
-    } elseif($decision -eq 'keep' -and -not $failure -and -not $script:noLease -and -not $script:nativeError -and -not $script:modeUnchanged) {
+    } elseif($decision -eq 'keep' -and $variant -ne 'forged-keep' -and -not $failure -and -not $script:noLease -and -not $script:nativeError -and -not $script:modeUnchanged) {
         if(-not $result.success){throw ($name+': '+($result | ConvertTo-Json -Depth 5))}
         if($action -eq 'set_dns' -and $script:state.Dns[0] -ne '1.1.1.1'){throw 'DNS was not applied'}
         if($action -eq 'set_ipv4' -and $mode -eq 'static' -and $script:state.Addresses[0].IPAddress -ne '10.0.0.20'){throw 'Static IP was not applied'}
@@ -249,6 +254,7 @@ try {
     Recover 'recovery-request-mismatch' 'set_ipv4' (StaticState '10.0.0.20' '1.1.1.1') 'failed' 'request-mismatch'
     Recover 'recovery-missing-protected' 'set_ipv4' (StaticState '10.0.0.20' '1.1.1.1') 'silent' 'missing-protected'
     Check 'dns-keep' 'set_dns' 'manual' 'keep'
+    Check 'forged-early-keep' 'set_dns' 'manual' 'keep' $false 'forged-keep'
     Check 'dns-rollback' 'set_dns' 'manual' 'rollback'
     Check 'dns-error-rollback' 'set_dns' 'manual' 'keep' $true
     Check 'static-keep' 'set_ipv4' 'static' 'keep'
