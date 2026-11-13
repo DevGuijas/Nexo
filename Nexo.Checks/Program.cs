@@ -5,6 +5,12 @@ var root = Path.Combine(Path.GetTempPath(), "NexoChecks-" + Guid.NewGuid().ToStr
 var count = 0;
 void Assert(bool condition, string title) { if (!condition) throw new Exception("FAIL: " + title); Console.WriteLine("PASS: " + title); count++; }
 void Reject(Action action, string title) { try { action(); } catch (InvalidOperationException) { Assert(true, title); return; } throw new Exception("FAIL: " + title); }
+if (args.Contains("--embedded-temperature"))
+{
+    EmbeddedTemperatureChecks.Run(Assert);
+    Console.WriteLine($"{count} verificações aprovadas.");
+    return;
+}
 if (args.Contains("--network-decision"))
 {
     await NetworkDecisionChecks.Run(Assert);
@@ -19,6 +25,7 @@ if (args.Contains("--network-recovery"))
 }
 try
 {
+    EmbeddedTemperatureChecks.Run(Assert);
     await NetworkDecisionChecks.Run(Assert);
     HealthDataChecks.Run(Path.Combine(root, "operational"), Assert);
     MonitoringChecks.Run(Assert);
