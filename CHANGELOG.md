@@ -64,6 +64,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 ### Rede
 
 - A confirmação para manter IP/DNS passa por um pipe local de uso único: aplicativo e executor elevado conferem os PIDs um do outro. Um `keep` plantado em `decision.txt` não confirma a mudança nem encerra a oferta de restauração após queda; a escolha aceita fica no registro protegido (#11). A validação na VM ainda está pendente.
+- A recuperação procura transações pendentes no registro protegido, mesmo com a pasta local apagada, bloqueada ou com resultados falsos. Uma recusa guardada só na pasta local volta a ser perguntada na próxima abertura; a validação elevada na VM ainda está pendente (#106).
 
 - DNS fixo com DHCP apontado, teste TCP por IP e preferência por DNS automático.
 - Transação de rede interrompida (executor elevado encerrado no meio) é detectada na hora ou na próxima abertura e, se a mudança ficou pendente, o Nexo oferece restaurar a configuração anterior, com autorização e UAC. O backup confiável fica numa cópia protegida em `%ProgramData%`, e o que vem da pasta do usuário não é aplicado (#10, PR #76).

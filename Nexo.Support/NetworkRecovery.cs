@@ -12,7 +12,7 @@ using System.Text.Json.Nodes;
 
 namespace Nexo.Support;
 
-public sealed record NetworkTransactionRecord(string Action, int Index, string ExpectedGuid, DateTimeOffset Created, int? ProcessId = null, int? RecoveryProcessId = null, string? Phase = null);
+public sealed record NetworkTransactionRecord(string Action, int Index, string ExpectedGuid, DateTimeOffset Created, int? ProcessId = null, int? RecoveryProcessId = null, string? Phase = null, string? LocalDirectory = null);
 
 public sealed record InterruptedNetworkTransaction(string Directory, NetworkTransactionRecord Record, string Phase, string? Before, string? Resolution, string? ProtectedDirectory = null);
 
@@ -105,10 +105,31 @@ public static class NetworkRecovery
 
     public static List<InterruptedNetworkTransaction> Scan(string root, DateTimeOffset now, Func<int, bool>? isRunning = null, NetworkRecoveryTrust? trust = null)
     {
+        trust ??= NetworkRecoveryTrust.Default;
         var found = new List<InterruptedNetworkTransaction>();
         var operations = Path.Combine(root, "operations");
-        if (!System.IO.Directory.Exists(operations)) return found;
-        foreach (var directory in System.IO.Directory.EnumerateDirectories(operations).Where(d => IsOperationId(Path.GetFileName(d))).OrderBy(d => System.IO.Directory.GetCreationTimeUtc(d)))
+        var directories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var defaultRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "NexoSupport");
+        var legacyDefault = ReferenceEquals(trust, NetworkRecoveryTrust.Default) && Path.GetFullPath(root).Equals(Path.GetFullPath(defaultRoot), StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            if (System.IO.Directory.Exists(operations))
+                foreach (var directory in System.IO.Directory.EnumerateDirectories(operations).Where(d => IsOperationId(Path.GetFileName(d)))) directories.Add(directory);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* A cópia protegida ainda será examinada. */ }
+        if (System.IO.Directory.Exists(trust.ProtectedRoot))
+            foreach (var protectedDirectory in System.IO.Directory.EnumerateDirectories(trust.ProtectedRoot).Where(d => IsOperationId(Path.GetFileName(d))))
+            {
+                if (!trust.Trusted(protectedDirectory)) continue;
+                try
+                {
+                    var record = JsonSerializer.Deserialize<NetworkTransactionRecord>(File.ReadAllText(Path.Combine(protectedDirectory, RecordFile)));
+                    var expected = Path.Combine(operations, Path.GetFileName(protectedDirectory));
+                    if (record != null && (record.LocalDirectory != null && Path.GetFullPath(record.LocalDirectory).Equals(Path.GetFullPath(expected), StringComparison.OrdinalIgnoreCase) || record.LocalDirectory == null && legacyDefault)) directories.Add(expected);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException) { }
+            }
+        foreach (var directory in directories.OrderBy(d => d, StringComparer.OrdinalIgnoreCase))
             if (Inspect(directory, now, isRunning, trust: trust) is { } item) found.Add(item);
         return found;
     }
@@ -121,6 +142,8 @@ public static class NetworkRecovery
         var id = Path.GetFileName(Path.TrimEndingDirectorySeparator(directory));
         if (!IsOperationId(id) || directory.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Contains("..")) return null;
         var protectedDirectory = Path.Combine(trust.ProtectedRoot, id);
+        var protectedRecord = Path.Combine(protectedDirectory, RecordFile);
+        var trustedProtected = File.Exists(protectedRecord) && trust.Trusted(protectedDirectory);
         // O resultado da restauração elevada fica na pasta protegida (#10); se o aplicativo fechou antes de copiá-lo, a
         // cópia é feita aqui, sem elevação, e a transação não é oferecida de novo.
         // Só de pasta protegida confiável: um resultado plantado numa pasta qualquer não encerra a transação.
@@ -128,15 +151,27 @@ public static class NetworkRecovery
         // próprio arquivo copiado.
         foreach (var name in new[] { ResultFile, "result.json" })
         {
-            if (File.Exists(Path.Combine(directory, name)) || !File.Exists(Path.Combine(protectedDirectory, name)) || !trust.TrustsFile(protectedDirectory, name)) continue;
-            try { WriteTextAtomic(Path.Combine(directory, name), File.ReadAllText(Path.Combine(protectedDirectory, name))).GetAwaiter().GetResult(); }
+            if (!File.Exists(Path.Combine(protectedDirectory, name)) || !trust.TrustsFile(protectedDirectory, name)) continue;
+            try { if (EnsureLocalDirectory(directory)) WriteTextAtomic(Path.Combine(directory, name), File.ReadAllText(Path.Combine(protectedDirectory, name))).GetAwaiter().GetResult(); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
             return null;
         }
+        if (trustedProtected && !EnsureLocalDirectory(directory))
+        {
+            var localRoot = Path.GetDirectoryName(Path.GetDirectoryName(directory)!)!;
+            var fallback = Path.Combine(localRoot, "recovery-attempts", Guid.NewGuid().ToString("N"), id);
+            if (!EnsureLocalDirectory(localRoot) || !EnsureLocalDirectory(fallback))
+            {
+                fallback = Path.Combine(Path.GetTempPath(), "NexoRecovery-" + Guid.NewGuid().ToString("N"), id);
+                if (!EnsureLocalDirectory(fallback)) return null;
+            }
+            directory = fallback;
+        }
         var recordPath = Path.Combine(directory, RecordFile);
-        if (!File.Exists(recordPath) || File.Exists(Path.Combine(directory, "result.json")) || File.Exists(Path.Combine(directory, ResultFile))) return null;
+        if (!File.Exists(recordPath) && !trustedProtected) return null;
+        if (!trustedProtected && (File.Exists(Path.Combine(directory, "result.json")) || File.Exists(Path.Combine(directory, ResultFile)))) return null;
         NetworkTransactionRecord record;
-        try { record = JsonSerializer.Deserialize<NetworkTransactionRecord>(File.ReadAllText(recordPath)) ?? throw new JsonException("Registro vazio."); }
+        try { record = JsonSerializer.Deserialize<NetworkTransactionRecord>(File.ReadAllText(trustedProtected ? protectedRecord : recordPath)) ?? throw new JsonException("Registro vazio."); }
         catch (JsonException ex)
         {
             var unreadable = new NetworkTransactionRecord("", 0, "", now);
@@ -157,7 +192,6 @@ public static class NetworkRecovery
         // A cópia em %LOCALAPPDATA% pode ser forjada por qualquer processo do usuário (#10): o que é mostrado e restaurado
         // vem só da cópia protegida, gravada pelo executor elevado.
         var protectedBefore = Path.Combine(protectedDirectory, "before.json");
-        var protectedRecord = Path.Combine(protectedDirectory, RecordFile);
         if (!File.Exists(protectedBefore) || !File.Exists(protectedRecord))
             return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "Não há cópia protegida do estado anterior desta alteração de rede (ela é gravada pelo executor com permissão de administrador). A restauração automática não foi oferecida; confira a rede manualmente.", backup = beforePath });
         if (!trust.Trusted(protectedDirectory))
@@ -170,7 +204,7 @@ public static class NetworkRecovery
         }
         if (secured.Action != record.Action || secured.Index != record.Index || !SameGuid(secured.ExpectedGuid, record.ExpectedGuid))
             return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "O registro da transação de rede não corresponde à cópia protegida. A restauração automática não foi oferecida; confira a rede manualmente.", backup = beforePath });
-        record = secured with { ProcessId = record.ProcessId, RecoveryProcessId = record.RecoveryProcessId };
+        record = secured;
         if (secured.Phase is "applying" or "confirming" or "restoring" or "keeping") phase = secured.Phase;
         if (now - secured.Created > MaxAge)
             return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = TooOldMessage(secured.Created), backup = beforePath });
@@ -185,6 +219,48 @@ public static class NetworkRecovery
 
     private static string TooOldMessage(DateTimeOffset created)
         => "A alteração de rede interrompida foi iniciada há mais de " + MaxAge.TotalDays.ToString("F0", System.Globalization.CultureInfo.InvariantCulture) + " dias (" + created.ToLocalTime().ToString("dd/MM/yyyy HH:mm", System.Globalization.CultureInfo.InvariantCulture) + "). A restauração automática não é oferecida para uma configuração tão antiga; confira a rede antes de outra alteração.";
+
+    private static bool EnsureLocalDirectory(string directory)
+    {
+        try
+        {
+            var operations = Path.GetDirectoryName(directory)!;
+            foreach (var path in new[] { Path.GetDirectoryName(operations)!, operations, directory })
+            {
+                if (File.Exists(path)) return false;
+                Directory.CreateDirectory(path);
+                if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint)) return false;
+            }
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { return false; }
+    }
+
+    private static void CleanupFallback(string directory)
+    {
+        try
+        {
+            if (!IsOperationId(Path.GetFileName(directory))) return;
+            var parent = Path.GetDirectoryName(directory)!;
+            var name = Path.GetFileName(parent);
+            var baseDirectory = Path.GetDirectoryName(parent)!;
+            var local = IsOperationId(name) && Path.GetFileName(baseDirectory) == "recovery-attempts";
+            var temporary = name.StartsWith("NexoRecovery-", StringComparison.Ordinal)
+                && IsOperationId(name["NexoRecovery-".Length..]);
+            if (!local && !temporary || !Directory.Exists(directory)
+                || File.GetAttributes(directory).HasFlag(FileAttributes.ReparsePoint)
+                || File.GetAttributes(parent).HasFlag(FileAttributes.ReparsePoint)) return;
+            foreach (var file in new[] { RecordFile, RecordFile + ".tmp", ResultFile, ResultFile + ".tmp", "recovery-unconfirmed.json", "recovery-unconfirmed.json.tmp" })
+            {
+                var path = Path.Combine(directory, file);
+                if (File.Exists(path) && !File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint)) File.Delete(path);
+            }
+            Directory.Delete(directory);
+            Directory.Delete(parent);
+            if (local) { try { Directory.Delete(baseDirectory); } catch (IOException) { } }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException) { }
+    }
 
     public static string Validate(string beforeJson, NetworkTransactionRecord record)
     {
@@ -241,6 +317,8 @@ public static class NetworkRecovery
 
     public static async Task<string> Recover(InterruptedNetworkTransaction item, Func<ChangeRequest, Task<bool>> confirm, Func<string, IElevatedProcess> start, TimeSpan timeout, CancellationToken token)
     {
+        try
+        {
         if (item.Resolution != null) return item.Resolution;
         if (item.Before == null) throw new InvalidOperationException("Transação sem backup validado.");
         var resultPath = Path.Combine(item.Directory, ResultFile);
@@ -283,6 +361,8 @@ public static class NetworkRecovery
             await WriteTextAtomic(Path.Combine(item.Directory, "recovery-unconfirmed.json"), unconfirmed);
             return unconfirmed;
         }
+        }
+        finally { CleanupFallback(item.Directory); }
     }
 
     public static string Explain(string outcome)
