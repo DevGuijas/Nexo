@@ -11,6 +11,7 @@ if (args.Contains("--embedded-temperature"))
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
+if (args.Contains("--optimization")) { await BasicOptimizationChecks.Run(Assert); return; }
 if (args.Contains("--network-decision"))
 {
     await NetworkDecisionChecks.Run(Assert);
@@ -26,6 +27,7 @@ if (args.Contains("--network-recovery"))
 try
 {
     EmbeddedTemperatureChecks.Run(Assert);
+    await BasicOptimizationChecks.Run(Assert);
     await NetworkDecisionChecks.Run(Assert);
     HealthDataChecks.Run(Path.Combine(root, "operational"), Assert);
     MonitoringChecks.Run(Assert);
