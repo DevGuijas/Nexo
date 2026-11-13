@@ -3,6 +3,7 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Nexo</AssemblyName>
@@ -14,4 +15,6 @@
   <ItemGroup><EmbeddedResource Include="NetworkTransaction.ps1" LogicalName="Nexo.NetworkTransaction.ps1" /></ItemGroup>
   <ItemGroup><EmbeddedResource Include="NetworkInventory.ps1" LogicalName="Nexo.NetworkInventory.ps1" /><EmbeddedResource Include="EnableNetworkAdapter.ps1" LogicalName="Nexo.EnableNetworkAdapter.ps1" /></ItemGroup>
   <ItemGroup><PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.33" /></ItemGroup>
+  <ItemGroup><Using Remove="System.Drawing" /><Using Remove="System.Windows.Forms" /></ItemGroup>
+  <ItemGroup><EmbeddedResource Include="Assets/nexo-tray.ico" LogicalName="Nexo.Tray.ico" /></ItemGroup>
 </Project>

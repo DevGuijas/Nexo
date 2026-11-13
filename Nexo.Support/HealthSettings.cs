@@ -11,6 +11,7 @@ public sealed class HealthSettings
     public double CpuHighPercent { get; set; } = 90;
     public double DiskLowFreePercent { get; set; } = 10;
     public int RetentionDays { get; set; } = 30;
+    public bool BackgroundMode { get; set; }
     public double ProcessMemoryGrowthPoints { get; set; } = 5;
     public int ProcessMemorySamples { get; set; } = 4;
     public bool CheckGateway { get; set; }
