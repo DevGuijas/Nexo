@@ -70,7 +70,8 @@ internal static class NetworkRecoveryChecks
             var forwardLength = NetworkRecovery.CommandLength(applying.ForwardScript);
             var recoveryLength = NetworkRecovery.CommandLength(applying.RecoveryScript);
             check(NetworkRecovery.UncompactedLength(applying.ForwardScript) > NetworkRecovery.CommandLineLimit && forwardLength < NetworkRecovery.CommandLineLimit && recoveryLength < NetworkRecovery.CommandLineLimit
-                && NetworkRecovery.ElevatedArguments(applying.ForwardScript)[^1] == WindowsTools.ElevatedArguments(NetworkRecovery.Compact(applying.ForwardScript))[^1],
+                && NetworkRecovery.ElevatedArguments(applying.ForwardScript) is ["-NoProfile", "-NonInteractive", "-Command", var loaderArgument] && loaderArgument == NetworkRecovery.Compact(applying.ForwardScript)
+                && !NetworkRecovery.ElevatedArguments(applying.ForwardScript).Contains("-EncodedCommand") && !NetworkRecovery.ElevatedArguments(applying.RecoveryScript).Contains("-EncodedCommand"),
                 "Rede: comando elevado real de aplicação (" + forwardLength + ") e de restauração (" + recoveryLength + ") cabe no limite de " + NetworkRecovery.CommandLineLimit + " caracteres");
             await RoundTrip(check, root, [("aplicação", applying.ForwardScript), ("restauração", applying.RecoveryScript)]);
             await CompactRuns(check, root);
@@ -498,7 +499,9 @@ internal static class NetworkRecoveryChecks
             var inspect = loader[..^NetworkRecovery.LoaderRun.Length]
                 + "$hash=[BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($nexoScript))).Replace('-',''); $errors=$null; "
                 + "[void][System.Management.Automation.Language.Parser]::ParseInput($nexoScript,[ref]$null,[ref]$errors); Write-Output ($hash + ' ' + @($errors).Count + ' ' + $PSVersionTable.PSVersion.Major)";
-            using var process = Process.Start(new ProcessStartInfo(WindowsTools.ElevatedShell, string.Join(' ', WindowsTools.ElevatedArguments(inspect))) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true })!;
+            var inspectStart = new ProcessStartInfo(WindowsTools.ElevatedShell) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-Command", inspect }) inspectStart.ArgumentList.Add(argument);
+            using var process = Process.Start(inspectStart)!;
             var output = (await process.StandardOutput.ReadToEndAsync()).Trim();
             var error = await process.StandardError.ReadToEndAsync();
             await process.WaitForExitAsync();
@@ -518,7 +521,9 @@ internal static class NetworkRecoveryChecks
         var script = "$requestJson='pedido'; $operationDir=" + "'" + output.Replace("'", "''") + "';\n"
             + "$ErrorActionPreference = 'Stop'\nfunction Save-Result($value) { Set-Content -LiteralPath $operationDir -Value $value -Encoding UTF8 }\n"
             + "if ($requestJson) { Save-Result ($requestJson + ' configuração ' + ('x' * 40000).Length); return }\nSave-Result 'return ignorado'\n";
-        using var process = Process.Start(new ProcessStartInfo(shell, "-NoProfile -NonInteractive -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(NetworkRecovery.Compact(script)))) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true })!;
+        var compactStart = new ProcessStartInfo(shell) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+        foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-Command", NetworkRecovery.Compact(script) }) compactStart.ArgumentList.Add(argument);
+        using var process = Process.Start(compactStart)!;
         var error = await process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
         var text = File.Exists(output) ? File.ReadAllText(output).Trim() : "";
