@@ -13,6 +13,8 @@ public static class ToolResultPresentation
             if (root.ValueKind != JsonValueKind.Object) return ("Resultado indisponível", "A ferramenta não retornou um resultado válido.", true);
             if (root.TryGetProperty("denied", out var denied) && denied.ValueKind == JsonValueKind.True)
                 return ("Recusado", "Você recusou a alteração. O Nexo interrompeu esta etapa.", true);
+            if (AgentService.RestoredByUser(root))
+                return ("Restaurado a seu pedido", "Você escolheu restaurar. A configuração anterior foi restaurada e conferida; a mudança não ficou aplicada.", false);
             if (!root.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.True)
                 return ("Não concluído", Text(root, "error", "Não foi possível confirmar o resultado desta etapa."), true);
 
