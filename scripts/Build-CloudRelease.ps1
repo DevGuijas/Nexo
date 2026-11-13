@@ -4,6 +4,9 @@ param(
     [string]$OutputDirectory = 'artifacts/cloud-release',
     [string]$ModelRoot = "$env:USERPROFILE\.ollama\models",
     [string]$SigningKeyPath = "$env:USERPROFILE\.nexo-release-signing.pem",
+    [string]$CodeSigningThumbprint,
+    [string]$TimestampServer,
+    [string]$InstallerPath,
     [switch]$ReuseArchives,
     [switch]$ReusePublishedDependencies
 )
@@ -28,6 +31,11 @@ if ($OllamaInstallerPath) {
     if ($OllamaExpectedSha256 -notmatch '^[0-9a-fA-F]{64}$' -or (Get-FileHash -LiteralPath $ollama -Algorithm SHA256).Hash -ne $OllamaExpectedSha256) { throw 'SHA-256 do Ollama não corresponde ao pacote oficial escolhido.' }
 }
 if (!(Test-Path -LiteralPath $SigningKeyPath)) { throw 'Chave privada de publicação ausente.' }
+if (-not $CodeSigningThumbprint) { throw 'Informe -CodeSigningThumbprint para assinar e conferir Nexo.exe antes de publicar.' }
+if (-not $InstallerPath) { throw 'Informe -InstallerPath para conferir NexoSetup.exe antes de publicar.' }
+$installer = Get-Item -LiteralPath $InstallerPath -ErrorAction Stop
+if ($installer.Name -ne 'NexoSetup.exe') { throw 'O instalador deve ser NexoSetup.exe.' }
+& (Join-Path $PSScriptRoot 'Sign-NexoArtifacts.ps1') -Paths $installer.FullName -Thumbprint $CodeSigningThumbprint -VerifyOnly
 $releaseRoot = Join-Path $projectRoot $OutputDirectory
 $releaseDirectory = Join-Path $releaseRoot "releases/$version"
 $appStage = Join-Path $releaseRoot 'app-stage'
@@ -37,6 +45,7 @@ $modelArchive = Join-Path $releaseDirectory 'qwen3-8b-model.zip'
 if (-not $ReuseArchives) {
 dotnet publish $project -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $appStage
 if ($LASTEXITCODE -ne 0) { throw 'Falha ao publicar o aplicativo.' }
+& (Join-Path $PSScriptRoot 'Sign-NexoArtifacts.ps1') -Paths (Join-Path $appStage 'Nexo.exe') -Thumbprint $CodeSigningThumbprint -TimestampServer $TimestampServer
 if (Test-Path -LiteralPath $appArchive) { Remove-Item -LiteralPath $appArchive -Force }
 [System.IO.Compression.ZipFile]::CreateFromDirectory($appStage, $appArchive, [System.IO.Compression.CompressionLevel]::Optimal, $false)
 
@@ -69,6 +78,20 @@ try {
 } else {
     if (!(Test-Path -LiteralPath $appArchive) -or (-not $ReusePublishedDependencies -and !(Test-Path -LiteralPath $modelArchive))) { throw 'Arquivos existentes não foram encontrados para reutilização.' }
 }
+
+# Uma tentativa reaproveitada só pode publicar um ZIP cujo executável já esteja assinado.
+$signatureCheck = Join-Path ([System.IO.Path]::GetTempPath()) ('NexoSignatureCheck-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $signatureCheck | Out-Null
+try {
+    $archiveToCheck = [System.IO.Compression.ZipFile]::OpenRead($appArchive)
+    try {
+        $entryToCheck = $archiveToCheck.GetEntry('Nexo.exe')
+        if (-not $entryToCheck) { throw 'O pacote do aplicativo não contém Nexo.exe.' }
+        $executableToCheck = Join-Path $signatureCheck 'Nexo.exe'
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entryToCheck, $executableToCheck)
+        & (Join-Path $PSScriptRoot 'Sign-NexoArtifacts.ps1') -Paths $executableToCheck -Thumbprint $CodeSigningThumbprint -VerifyOnly
+    } finally { $archiveToCheck.Dispose() }
+} finally { Remove-Item -LiteralPath $signatureCheck -Recurse -Force }
 
 $ollamaTarget = $null
 if ($ollama) {
