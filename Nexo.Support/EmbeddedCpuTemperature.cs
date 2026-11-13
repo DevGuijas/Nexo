@@ -9,14 +9,22 @@ internal interface ICpuSensorSession : IDisposable
     void Open();
     IEnumerable<CpuSensorValue> ReadSensors();
 }
+internal sealed class CpuInitializationCircuit
+{
+    private string? failure;
+    internal string? Failure => Volatile.Read(ref failure);
+    internal void Fail(string detail) => Interlocked.CompareExchange(ref failure,
+        "A inicialização do sensor embutido falhou. Reinicie o Nexo para tentar novamente. Detalhe: " + detail, null);
+}
 
 /// <summary>CPU-only access; never installs drivers or starts an external monitor.</summary>
 internal static class EmbeddedCpuTemperature
 {
-    // A native hardware call cannot safely be killed. Keep its gate until Close completes, even after timeout.
+    // A native hardware call cannot safely be killed. Keep its gate until the worker ends, even after timeout.
     private static readonly SemaphoreSlim Gate = new(1, 1);
+    private static readonly CpuInitializationCircuit Initialization = new();
     internal static Task<string> ReadAsync(CancellationToken token) =>
-        ReadAsync(() => Read(() => new LibreCpuSession(), PawnIo.IsInstalled, token), token, TimeSpan.FromSeconds(HardwareSensors.TemperatureTimeoutSeconds));
+        ReadAsync(() => Read(() => new LibreCpuSession(), PawnIo.IsInstalled, token, Initialization), token, TimeSpan.FromSeconds(HardwareSensors.TemperatureTimeoutSeconds));
 
     internal static async Task<string> ReadAsync(Func<string> read, CancellationToken token, TimeSpan timeout)
     {
@@ -29,15 +37,23 @@ internal static class EmbeddedCpuTemperature
         });
         return await work.WaitAsync(timeout, token);
     }
-    internal static string Read(Func<ICpuSensorSession> create, bool driverInstalled, CancellationToken token)
+    internal static string Read(Func<ICpuSensorSession> create, bool driverInstalled, CancellationToken token, CpuInitializationCircuit initialization)
     {
         token.ThrowIfCancellationRequested();
+        if (initialization.Failure is { } previousFailure) return Error(previousFailure);
         if (!driverInstalled)
             return JsonSerializer.Serialize(new { Temperature = new { Available = false, DriverMissing = true, Error = "O driver PawnIO não está instalado. A temperatura da CPU está indisponível." } });
         try
         {
             using var session = create();
-            session.Open();
+            try { session.Open(); }
+            catch (Exception ex)
+            {
+                // LHM 0.9.6 can throw before setting its _open flag, making Close a no-op despite partial setup.
+                // Attempt disposal, but never repeat Open in this process after an initialization failure.
+                initialization.Fail(ex.Message);
+                throw;
+            }
             token.ThrowIfCancellationRequested();
             var sensors = session.ReadSensors().ToArray();
             token.ThrowIfCancellationRequested();
@@ -46,9 +62,10 @@ internal static class EmbeddedCpuTemperature
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
-            return JsonSerializer.Serialize(new { Temperature = new { Available = false, Error = "Não foi possível acessar o sensor embutido: " + ex.Message } });
+            return Error(initialization.Failure ?? "Não foi possível acessar o sensor embutido: " + ex.Message);
         }
     }
+    private static string Error(string detail) => JsonSerializer.Serialize(new { Temperature = new { Available = false, Error = detail } });
     private sealed class LibreCpuSession : ICpuSensorSession
     {
         private readonly Computer computer = new() { IsCpuEnabled = true };

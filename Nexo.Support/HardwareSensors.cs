@@ -164,6 +164,8 @@ public static class HardwareSensors
         foreach (var sensor in sensors)
             if (sensor.Value is { } value && double.IsFinite(value) && value > 0 && value <= MaxPlausibleCelsius)
                 return new TemperatureReading("read", Math.Round(value, 1), sensor.Name + " (" + sensor.Identifier + ")", TemperatureSource, time);
+        if (sensors.Any(s => s.Value == 0))
+            return new TemperatureReading("invalid", Source: TemperatureSource, Time: time, Detail: "O sensor retornou zero, sem temperatura válida; a leitura foi descartada. Mesmo instalado, o driver pode estar sem permissão de acesso ao hardware para o Nexo.");
         return new TemperatureReading("invalid", Source: TemperatureSource, Time: time, Detail: $"O sensor {sensors[0].Name} informou valor ausente ou fora de 0–{MaxPlausibleCelsius:F0} °C; a leitura foi descartada.");
     }
 

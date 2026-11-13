@@ -33,3 +33,11 @@ Files: Nexo.Support/ThirdParty/LibreHardwareMonitor/*; docs/embedded-temperature
 - [x] Document PawnIO/access requirements and native timeout limits.
 - [x] Inspect publish output for library and notices, with no driver installer.
 
+
+## Review follow-up: partial Open failure and access limitation
+
+- [x] Demonstrate repeated Open after failed initialization with a failing test.
+- [x] Add process-wide initialization circuit breaker, preserving independent storage collection.
+- [x] Preserve restart guidance even when the upstream exception text exceeds presentation limits.
+- [x] Report raw zero as invalid/null with possible permission limitation; document standard-host access denied diagnosis.
+- [x] Final verification: 2,615 full-suite checks, 10 focused checks, Release build and publish passed.

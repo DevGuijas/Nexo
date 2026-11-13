@@ -6,24 +6,35 @@ internal static class EmbeddedTemperatureChecks
     internal static void Run(Action<bool, string> check)
     {
         var session = new Session();
-        var snapshot = Parse(EmbeddedCpuTemperature.Read(() => session, true, CancellationToken.None));
+        var snapshot = Parse(EmbeddedCpuTemperature.Read(() => session, true, CancellationToken.None, new()));
         check(snapshot.CpuTemperatureC == 57.4 && snapshot.CpuTemperature!.Sensor.StartsWith("CPU Package") && session.Opened && session.Disposed,
             "Temperatura embutida: lê pacote e fecha sessão sem aplicativo WMI");
         var created = false;
-        var missing = Parse(EmbeddedCpuTemperature.Read(() => { created = true; return new Session(); }, false, CancellationToken.None));
+        var missing = Parse(EmbeddedCpuTemperature.Read(() => { created = true; return new Session(); }, false, CancellationToken.None, new()));
         check(!created && missing.CpuTemperature is { State: "no_source", Celsius: null } && missing.CpuTemperature.Detail.Contains("PawnIO"),
             "Temperatura embutida: driver ausente não inventa leitura nem abre hardware");
-        var broken = new Session { Fail = true };
-        var failed = Parse(EmbeddedCpuTemperature.Read(() => broken, true, CancellationToken.None));
+        var zero = Parse(EmbeddedCpuTemperature.Read(() => new Session { Value = 0 }, true, CancellationToken.None, new()));
+        check(zero.CpuTemperature is { State: "invalid", Celsius: null } && zero.CpuTemperature.Detail.Contains("zero") && zero.CpuTemperature.Detail.Contains("permissão"),
+            "Temperatura embutida: zero com driver instalado é indisponibilidade com possível limitação de permissão");
+        var broken = new Session { Fail = true, FailureMessage = new string('x', 400) };
+        var initialization = new CpuInitializationCircuit();
+        var failed = Parse(EmbeddedCpuTemperature.Read(() => broken, true, CancellationToken.None, initialization));
         check(broken.Disposed && failed.CpuTemperature is { State: "error", Celsius: null },
-            "Temperatura embutida: falha no hardware fecha sessão e informa indisponibilidade");
+            "Temperatura embutida: falha na inicialização tenta Close e informa indisponibilidade");
+        var retried = new HealthSnapshot();
+        HardwareSensors.Collect(retried, (_, _, _) => Task.FromResult("""{"Storage":{"Total":1,"Disks":[{"Device":"0","Name":"NVMe","Health":"Healthy","Operational":"OK"}]}}"""),
+            CancellationToken.None, readTemperature: _ => Task.FromResult(EmbeddedCpuTemperature.Read(() => broken, true, CancellationToken.None, initialization))).GetAwaiter().GetResult();
+        check(broken.OpenCalls == 1 && retried.CpuTemperature is { State: "error", Celsius: null }
+            && retried.CpuTemperature.Detail.Contains("Reinicie o Nexo"),
+            "Temperatura embutida: falha de Open bloqueia nova inicialização até reiniciar Nexo");
+        check(retried.StorageHealth == "healthy", "Temperatura embutida: bloqueio da inicialização não interrompe leitura dos discos");
         var readFailure = new Session { ReadFail = true };
-        var failedUpdate = Parse(EmbeddedCpuTemperature.Read(() => readFailure, true, CancellationToken.None));
+        var failedUpdate = Parse(EmbeddedCpuTemperature.Read(() => readFailure, true, CancellationToken.None, new()));
         check(readFailure.Disposed && failedUpdate.CpuTemperatureC == null && failedUpdate.CpuTemperature!.State == "error",
             "Temperatura embutida: falha ao atualizar não reaproveita valor anterior");
         using var cancelled = new CancellationTokenSource(); cancelled.Cancel();
         var propagated = false;
-        try { EmbeddedCpuTemperature.Read(() => new Session(), true, cancelled.Token); }
+        try { EmbeddedCpuTemperature.Read(() => new Session(), true, cancelled.Token, new()); }
         catch (OperationCanceledException) { propagated = true; }
         check(propagated, "Temperatura embutida: cancelamento é preservado");
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -69,8 +80,11 @@ internal static class EmbeddedTemperatureChecks
     private sealed class Session : ICpuSensorSession
     {
         public bool Opened, Disposed, Fail, ReadFail;
-        public void Open() { Opened = true; if (Fail) throw new UnauthorizedAccessException("hardware bloqueado"); }
-        public IEnumerable<CpuSensorValue> ReadSensors() => ReadFail ? throw new IOException("sensor desconectado") : [new("CPU Package", "/intelcpu/0/temperature/0", 57.4)];
+        public int OpenCalls;
+        public string FailureMessage = "hardware bloqueado";
+        public double Value = 57.4;
+        public void Open() { OpenCalls++; Opened = true; if (Fail) throw new UnauthorizedAccessException(FailureMessage); }
+        public IEnumerable<CpuSensorValue> ReadSensors() => ReadFail ? throw new IOException("sensor desconectado") : [new("CPU Package", "/intelcpu/0/temperature/0", Value)];
         public void Dispose() => Disposed = true;
     }
 }
