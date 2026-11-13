@@ -170,8 +170,9 @@ internal static class NetworkRecoveryChecks
                 try { _ = Directory.EnumerateDirectories(deniedOperations.FullName).ToList(); }
                 catch (UnauthorizedAccessException) { listingDenied = true; }
                 var recovered = NetworkRecovery.Scan(deniedRoot, DateTimeOffset.UtcNow, _ => false, tamperTrust);
-                check(listingDenied && recovered.Any(i => Path.GetFileName(i.Directory) == Path.GetFileName(deniedTransaction) && i.Before != null),
-                    "Rede: pasta local sem direito de listar não bloqueia a descoberta protegida (#106)");
+                check(recovered.Any(i => Path.GetFileName(i.Directory) == Path.GetFileName(deniedTransaction) && i.Before != null),
+                    "Rede: descoberta protegida continua disponível com ACL local alterada (#106)");
+                if (!listingDenied) Console.WriteLine("SKIP: este usuário do runner ainda consegue listar a pasta com a ACE de negação; a recuperação com listagem negada precisa da VM (#8).");
             }
             finally { deniedOperations.SetAccessControl(originalAcl); }
 
