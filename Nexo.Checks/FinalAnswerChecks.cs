@@ -998,6 +998,8 @@ internal static class FinalAnswerChecks
             ("set_dns", JsonSerializer.Serialize(new { success = false, error = "Falha", changed = true, reverted = true, backup = "b" }), ChangeState.NotCompleted),
             ("set_dns", JsonSerializer.Serialize(new { success = false, error = "Falha", changed = true, reverted = false, backup = "b" }), ChangeState.Unconfirmed),
             ("set_dns", JsonSerializer.Serialize(new { success = false, reverted = true, message = "Configuração anterior restaurada" }), ChangeState.NotCompleted),
+            ("set_dns", JsonSerializer.Serialize(new { success = false, reverted = true, restoredByUser = true, message = "Configuração anterior restaurada" }), ChangeState.RestoredByUser),
+            ("set_dns", JsonSerializer.Serialize(new { success = false, reverted = false, restoredByUser = true, error = "Restauração falhou" }), ChangeState.Unconfirmed),
             ("set_ipv4", JsonSerializer.Serialize(new { success = false, error = "Executor encerrado sem resultado. Verifique a rede; estado não confirmado.", recoveryFolder = "c" }), ChangeState.Unconfirmed),
             ("flush_dns", WindowsTools.Ok("Cache DNS limpo."), ChangeState.Changed),
             ("allow_camera", WindowsTools.Ok("""{"Before":"Allow","After":"Allow"}"""), ChangeState.Unchanged),

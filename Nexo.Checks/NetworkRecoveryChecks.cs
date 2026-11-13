@@ -32,6 +32,28 @@ internal static class NetworkRecoveryChecks
                 && Text(beforeBackup.Result.GetProperty("recovery"), "message").Contains("não chegou a alterar"),
                 "Rede: executor encerrado antes do backup registra que nada foi alterado, sem oferecer restauração");
 
+            // #97: executor que sai sem resultado e sem pasta protegida, com a cadeia NexoSupport recusada.
+            prompts.Clear();
+            const string HostileReason = @"C:\ProgramData\NexoSupport: é link (reparse point)";
+            var hostileTrust = trust with { ChainProblem = _ => HostileReason };
+            var hostile = await Apply(store, hostileTrust, async (dir, _) => await Task.Yield(), prompts, true);
+            var hostileError = Text(hostile.Result, "error");
+            check(Flag(hostile.Result, "protectedFolderProblem") && Bool(hostile.Result, "changed") == null && !hostile.Result.TryGetProperty("recovery", out _) && prompts.Count == 0 && hostile.RecoveryStarts == 0
+                && hostileError.Contains("%ProgramData%\\NexoSupport") && hostileError.Contains(HostileReason)
+                && hostileError.Contains("não há confirmação") && hostileError.Contains("Rede e recuperação") && hostileError.Contains("takeown") && hostileError.Contains("icacls") && hostileError.Contains("rmdir"),
+                "Rede: pasta NexoSupport hostil é diagnosticada sem atribuir causa ou estado da rede sem prova (#97)");
+            var precreated = await Apply(store, hostileTrust, async (dir, _) => { Directory.CreateDirectory(Secured(protectedRoot, dir)); await Task.Yield(); }, prompts, true);
+            check(Flag(precreated.Result, "protectedFolderProblem"), "Rede: pasta da operação pré-criada não esconde problema na cadeia protegida (#97)");
+            prompts.Clear();
+            var trustedChain = await Apply(store, trust with { ChainProblem = _ => null }, async (dir, _) => await Task.Yield(), prompts, true);
+            check(!Flag(trustedChain.Result, "protectedFolderProblem") && Text(trustedChain.Result, "error").StartsWith("Executor encerrado sem resultado."),
+                "Rede: com a pasta NexoSupport confiável, a mensagem de executor encerrado continua a mesma (#97)");
+            prompts.Clear();
+            var backedUp = await Apply(store, hostileTrust, async (dir, _) => await Backup(dir, protectedRoot, Before), prompts, true);
+            check(!Flag(backedUp.Result, "protectedFolderProblem") && backedUp.RecoveryStarts == 1,
+                "Rede: executor que chegou a gravar o backup protegido não é explicado como pasta recusada (#97)");
+            if (OperatingSystem.IsWindows()) await HostileChainOnWindows(check, root);
+
             prompts.Clear();
             var applying = await Apply(store, trust, async (dir, _) => await Backup(dir, protectedRoot, Before), prompts, true);
             check(prompts.SequenceEqual(["Restaurar configuração de rede anterior?"]) && applying.RecoveryStarts == 1 && Flag(applying.Result, "reverted") && Bool(applying.Result, "changed") == true,
@@ -191,6 +213,51 @@ internal static class NetworkRecoveryChecks
             var keptHung = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, keep: true, deadlines: quick);
             check(Text(keptHung.Result, "phase") == "keeping" && Decision(keptHung.Directory) == "keep" && Text(keptHung.Result, "error").Contains("não foi conferida") && !Flag(keptHung.Result, "reverted"),
                 "Rede: executor travado após confirmar manter preserva a escolha e informa que o estado não foi conferido");
+
+            // #98: restaurar escolhido na janela é escolha do usuário; o cartão e a resposta não mostram falha.
+            prompts.Clear();
+            var chosen = await Apply(store, trust, async (dir, stop) =>
+            {
+                await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}");
+                await WaitFor(Path.Combine(dir, "decision.txt"), stop);
+                await Write(Secured(protectedRoot, dir), "result.json", Decision(dir) == "keep" ? "{\"success\":true}" : "{\"success\":false,\"reverted\":true,\"message\":\"Configuração anterior restaurada por cancelamento ou ausência de confirmação.\"}");
+            }, prompts, true, keep: false, deadlines: quick);
+            var chosenCard = ToolResultPresentation.Describe("Alterando DNS", chosen.Result.GetRawText());
+            check(Decision(chosen.Directory) == "rollback" && Flag(chosen.Result, "restoredByUser") && Flag(chosen.Result, "reverted") && AgentService.RestoredByUser(chosen.Result)
+                && chosenCard.State == "Restaurado a seu pedido" && !chosenCard.Warning && prompts.SequenceEqual(["Manter a configuração de rede?"]),
+                "Rede: restaurar escolhido na janela vem marcado como pedido do usuário e o cartão não mostra falha (#98)");
+            var chosenAnswer = AgentProtocol.Normalize(AgentService.RestoredByUserAnswer);
+            check(!chosenAnswer.Contains("nao foi concluida") && !chosenAnswer.Contains("nao foi confirmada") && !chosenAnswer.Contains("nao consegui") && chosenAnswer.Contains("restaurei"),
+                "Rede: resposta da restauração a pedido não usa os termos que a interface mostra como etapa não concluída (#98)");
+
+            prompts.Clear();
+            var chosenFailed = await Apply(store, trust, async (dir, stop) =>
+            {
+                await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}");
+                await WaitFor(Path.Combine(dir, "decision.txt"), stop);
+                await Write(Secured(protectedRoot, dir), "result.json", "{\"success\":false,\"reverted\":false,\"error\":\"Os servidores DNS anteriores não foram restaurados.\",\"backup\":\"b\"}");
+            }, prompts, true, keep: false, deadlines: quick);
+            check(!Flag(chosenFailed.Result, "restoredByUser") && ToolResultPresentation.Describe("Alterando DNS", chosenFailed.Result.GetRawText()).Warning,
+                "Rede: restauração a pedido que falha continua aparecendo como erro (#98)");
+            prompts.Clear();
+            var automatic = await Apply(store, trust, async (dir, stop) =>
+            {
+                await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}");
+                await WaitFor(Path.Combine(dir, "decision.txt"), stop);
+                await Write(Secured(protectedRoot, dir), "result.json", "{\"success\":false,\"reverted\":true}");
+            }, prompts, true, keep: false, deadlines: quick, explicitRestore: false);
+            check(!Flag(automatic.Result, "restoredByUser") && ToolResultPresentation.Describe("Alterando DNS", automatic.Result.GetRawText()).Warning,
+                "Rede: prazo da janela não aparece como restauração a pedido (#98)");
+            check(NetworkChange.MarkRestoreChosen("{\"success\":false,\"reverted\":true,\"error\":\"falha no executor\"}", true)
+                == "{\"success\":false,\"reverted\":true,\"error\":\"falha no executor\"}",
+                "Rede: falha do executor restaurada não esconde o erro (#98)");
+            check(NetworkChange.MarkRestoreChosen("{\"success\":false,\"reverted\":true}", false) == "{\"success\":false,\"reverted\":true}"
+                && NetworkChange.MarkRestoreChosen("{\"success\":true}", true) == "{\"success\":true}" && NetworkChange.MarkRestoreChosen("<x>", true) == "<x>",
+                "Rede: prazo esgotado, cancelamento, sucesso e resultado inválido não ganham a marca de restauração a pedido (#98)");
+            var restoredFacts = new TurnFacts();
+            restoredFacts.Record("set_dns:4", "DNS manual “1.1.1.1” da interface 4", TurnFacts.Classify("set_dns", chosen.Result.GetRawText()));
+            check(restoredFacts.Line() == TurnFacts.Prefix + " nenhuma. Desfeitas a seu pedido: DNS manual “1.1.1.1” da interface 4.",
+                "Rede: linha de fatos lista a restauração a pedido como desfeita a seu pedido, não como não concluída (#98)");
 
             prompts.Clear();
             var restoringHung = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, keep: false, deadlines: quick);
@@ -511,7 +578,44 @@ internal static class NetworkRecoveryChecks
 
     private sealed record Outcome(JsonElement Result, string Directory, int RecoveryStarts, string RecoveryScript, string ForwardScript = "", bool Killed = false);
 
-    private static async Task<Outcome> Apply(Store store, NetworkRecoveryTrust trust, Func<string, CancellationToken, Task> executor, List<string> prompts, bool restore, bool keep = false, bool recoveryWrites = true, NetworkDeadlines? deadlines = null, CancellationToken token = default, bool unanswered = false)
+    // #97: a conferência real da cadeia %ProgramData%\NexoSupport\operations, com pastas criadas sem elevação e com junção.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static async Task HostileChainOnWindows(Action<bool, string> check, string root)
+    {
+        var chainRoot = Path.Combine(root, "chain-" + System.Guid.NewGuid().ToString("N"));
+        var missing = Path.Combine(chainRoot, "ausente", "NexoSupport", "operations");
+        check(NetworkRecovery.ProtectedChainProblemOnWindows(missing) == null, "Rede: cadeia NexoSupport ainda inexistente não é recusada; o executor a cria (#97)");
+        var fileParent = Path.Combine(chainRoot, "arquivo", "NexoSupport");
+        Directory.CreateDirectory(Path.GetDirectoryName(fileParent)!);
+        File.WriteAllText(fileParent, "ocupado");
+        check(NetworkRecovery.ProtectedChainProblemOnWindows(Path.Combine(fileParent, "operations"))?.Contains("não é pasta") == true,
+            "Rede: arquivo no lugar da pasta NexoSupport é diagnosticado (#97)");
+        check(NetworkRecovery.HostileChainMessage(fileParent + ": não é pasta").Contains("arquivo")
+            && !NetworkRecovery.HostileChainMessage(fileParent + ": não é pasta").Contains("rmdir /S"),
+            "Rede: arquivo no caminho recebe orientação própria, sem comando de remover pasta (#97)");
+
+        var plain = Path.Combine(chainRoot, "comum", "NexoSupport", "operations");
+        Directory.CreateDirectory(plain);
+        var plainReason = NetworkRecovery.ProtectedChainProblemOnWindows(plain);
+        check(plainReason != null && plainReason.StartsWith(Path.Combine(chainRoot, "comum", "NexoSupport") + ":") && (plainReason.Contains("herda permissões") || plainReason.Contains("dono não confiável") || plainReason.Contains("ACE de escrita")),
+            "Rede: pasta NexoSupport criada sem elevação é recusada com o motivo (" + plainReason + ") (#97)");
+
+        var target = Path.Combine(chainRoot, "destino");
+        Directory.CreateDirectory(Path.Combine(target, "operations"));
+        var linkParent = Path.Combine(chainRoot, "link");
+        Directory.CreateDirectory(linkParent);
+        var junction = Path.Combine(linkParent, "NexoSupport");
+        using (var mklink = Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"), "/d /c mklink /J \"" + junction + "\" \"" + target + "\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true })!)
+        {
+            await mklink.StandardOutput.ReadToEndAsync(); await mklink.StandardError.ReadToEndAsync(); await mklink.WaitForExitAsync();
+        }
+        var linkReason = NetworkRecovery.ProtectedChainProblemOnWindows(Path.Combine(junction, "operations"));
+        check(linkReason == junction + ": é link (reparse point)", "Rede: pasta NexoSupport que é junção é recusada como link (#97)");
+        Directory.Delete(junction);
+        check(Directory.Exists(Path.Combine(target, "operations")), "Rede: o teste da junção não apaga o destino");
+    }
+
+    private static async Task<Outcome> Apply(Store store, NetworkRecoveryTrust trust, Func<string, CancellationToken, Task> executor, List<string> prompts, bool restore, bool keep = false, bool recoveryWrites = true, NetworkDeadlines? deadlines = null, CancellationToken token = default, bool unanswered = false, bool explicitRestore = true)
     {
         string directory = "";
         var starts = 0;
@@ -529,7 +633,7 @@ internal static class NetworkRecoveryChecks
             directory = dir; forwardScript = script;
             return new SimulatedProcess(stop => executor(dir, stop));
         };
-        Func<ChangeRequest, Task<bool>> confirm = request => { prompts.Add(request.Title); return unanswered && request.KeepNetwork ? new TaskCompletionSource<bool>().Task : Task.FromResult(request.KeepNetwork ? keep : restore); };
+        Func<ChangeRequest, Task<bool>> confirm = request => { prompts.Add(request.Title); if (request.KeepNetwork && !keep && !unanswered && explicitRestore) request.OnExplicitRestore?.Invoke(); return unanswered && request.KeepNetwork ? new TaskCompletionSource<bool>().Task : Task.FromResult(request.KeepNetwork ? keep : restore); };
         var output = await NetworkChange.Apply(Request, store, confirm, new Silent(), token, start, deadlines, trust);
         using var document = JsonDocument.Parse(output);
         return new Outcome(document.RootElement.Clone(), directory, starts, recoveryScript, forwardScript);

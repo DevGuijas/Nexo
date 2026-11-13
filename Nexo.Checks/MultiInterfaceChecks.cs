@@ -7,7 +7,7 @@ internal static class MultiInterfaceChecks
     {
         await AmbiguousDisabledAdapters(assert);
         await UnchangedActivation(assert);
-        foreach (var scenario in new[] { "delayed-activation", "two-gateways", "rollback", "stale-identity", "transient-success", "cancel-wait" })
+        foreach (var scenario in new[] { "delayed-activation", "two-gateways", "rollback", "restored-by-user", "stale-identity", "transient-success", "cancel-wait" })
         {
             var changed = false; var testsAfter = 0; var waits = 0; var probes = 0; var alterations = new List<int>();
             var activate = scenario is "delayed-activation" or "transient-success" or "cancel-wait";
@@ -41,8 +41,10 @@ internal static class MultiInterfaceChecks
                 {
                     var index = JsonSerializer.SerializeToElement(args).GetProperty("interface_index").GetInt32(); alterations.Add(index);
                     if (index != 4 || alterations.Count > 1) throw new Exception("Alterou interface válida ou repetiu alteração");
-                    changed = scenario != "rollback";
-                    result = changed ? Ok(new { Changed = true }) : new { success = false, changed = true, reverted = true, error = "DHCP sem concessão, restaurado." };
+                    changed = scenario is not ("rollback" or "restored-by-user");
+                    result = changed ? Ok(new { Changed = true }) : scenario == "restored-by-user"
+                        ? new { success = false, reverted = true, restoredByUser = true, message = "Configuração anterior restaurada por cancelamento ou ausência de confirmação." }
+                        : new { success = false, changed = true, reverted = true, error = "DHCP sem concessão, restaurado." };
                 }
                 else throw new Exception("Ferramenta inesperada: " + name);
                 return Task.FromResult(JsonSerializer.SerializeToElement(result));
@@ -55,6 +57,7 @@ internal static class MultiInterfaceChecks
                 if (scenario == "delayed-activation") assert(waits == 4 && testsAfter == 4 && alterations.SequenceEqual([4]) && answer.Contains("responderam"), "Ativação aguarda duas falhas e duas confirmações separadas antes de concluir");
                 if (scenario == "two-gateways") assert(probes == 1 && alterations.SequenceEqual([4]) && waits == 2 && answer.Contains("responderam"), "Dois gateways: testa todas, corrige Ethernet falha e preserva vEthernet que responde");
                 if (scenario == "rollback") assert(probes == 1 && alterations.Count == 1 && answer.Contains("restaurada") && !answer.Contains("responderam"), "DHCP revertido é informado sem repetir nem declarar resolução");
+                if (scenario == "restored-by-user") assert(alterations.Count == 1 && answer == AgentService.RestoredByUserAnswer, "Restaurar a pedido no fluxo de rede responde como escolha do usuário, não como alteração não concluída (#98)");
                 if (scenario == "stale-identity") assert(alterations.Count == 0, "Resultado de teste com identidade antiga não autoriza selecionar interface reutilizada");
                 if (scenario == "transient-success") assert(waits == 6 && !answer.Contains("responderam"), "Sucesso intermitente não é recuperação estável");
             }

@@ -99,6 +99,7 @@ public static class NetworkWorkflow
             var selected = targets[0];
             inform("Os testes pela interface " + Text(selected, "Name") + " falharam e ela usa IP fixo. Vou apresentar a opção de obter IP automaticamente, preservando o DNS e guardando a configuração anterior. A rede precisa fornecer DHCP.");
             var applied = await execute("set_ipv4", new { interface_index = Number(selected, "Index"), mode = "dhcp", address = "", prefix = 0, gateway = "" });
+            if (AgentService.RestoredByUser(applied)) return AgentService.RestoredByUserAnswer;
             if (!Flag(applied, "success")) return "A alteração não foi concluída. " + Failure(applied) + (Flag(applied, "reverted") ? "\nA configuração anterior foi restaurada. O resultado da operação e o estado observado estão registrados no cartão acima; não vou atribuir a falha ao cabo ou ao roteador sem evidência." : Flag(applied, "denied") ? "\nVocê recusou a proposta; ela não foi executada." : "\nConfira o resultado e o estado da restauração antes de outra alteração.");
             changed = true; state = await Stabilize();
             if (state.Named) return Success();

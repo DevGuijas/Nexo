@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Nexo.Support;
 
@@ -72,6 +73,7 @@ public static class NetworkChange
         var clock = Stopwatch.StartNew();
         var deadline = deadlines.Applying;
         var cancelled = false;
+        var restoreChosen = false;
         while (!process.HasExited && !File.Exists(final))
         {
             if (token.IsCancellationRequested && !cancelled)
@@ -91,9 +93,11 @@ public static class NetworkChange
                 {
                     if (!token.IsCancellationRequested)
                     {
-                        var answer = confirm(new ChangeRequest("Manter a configuração de rede?", request.Description + "\n\nEstado obtido após a mudança:\n" + state + "\n\nTeste a conexão. Se não confirmar em até 45 segundos, a configuração anterior será restaurada.", true));
+                        var explicitRestoreSelected = false;
+                        var answer = confirm(new ChangeRequest("Manter a configuração de rede?", request.Description + "\n\nEstado obtido após a mudança:\n" + state + "\n\nTeste a conexão. Se não confirmar em até 45 segundos, a configuração anterior será restaurada.", true)
+                        { OnExplicitRestore = () => explicitRestoreSelected = true });
                         // O cancelamento do atendimento também encerra a espera pela janela: a decisão vira "rollback".
-                        if (await Task.WhenAny(answer, Task.Delay(deadlines.Confirming, token)) == answer) keep = await answer;
+                        if (await Task.WhenAny(answer, Task.Delay(deadlines.Confirming, token)) == answer) { keep = await answer; restoreChosen = !keep && explicitRestoreSelected && !token.IsCancellationRequested; }
                         else progress.Report(token.IsCancellationRequested ? "Cancelamento solicitado; restaurando a configuração anterior." : "A confirmação não respondeu no prazo; restaurando a configuração anterior.");
                     }
                 }
@@ -104,16 +108,36 @@ public static class NetworkChange
             if (clock.Elapsed >= deadline && !process.HasExited && !File.Exists(final)) return await Unconfirmed(dir, backup, decision, ready, cancelled || token.IsCancellationRequested, clock.Elapsed);
             await Task.Delay(250, CancellationToken.None);
         }
-        if (File.Exists(final)) return await ReadResult(dir, secured, trust);
+        if (File.Exists(final)) return MarkRestoreChosen(await ReadResult(dir, secured, trust), restoreChosen);
         await process.WaitForExitAsync(CancellationToken.None);
-        if (File.Exists(final)) return await ReadResult(dir, secured, trust);
+        if (File.Exists(final)) return MarkRestoreChosen(await ReadResult(dir, secured, trust), restoreChosen);
         var interrupted = NetworkRecovery.Inspect(dir, DateTimeOffset.UtcNow, _ => false, exited: true, trust: trust);
         if (interrupted == null) return JsonSerializer.Serialize(new { success = false, reverted = false, error = "Executor encerrado sem resultado. Verifique a rede; estado não confirmado.", backup, recoveryFolder = dir });
         if (interrupted.Resolution == null) progress.Report("O executor de rede terminou sem resultado. Oferecendo a restauração da configuração anterior…");
         var recovery = await NetworkRecovery.Recover(interrupted, confirm, start, NetworkRecovery.DefaultTimeout, CancellationToken.None);
         using var recoveryResult = JsonDocument.Parse(recovery);
         var unchanged = recoveryResult.RootElement.TryGetProperty("unchanged", out var flag) && flag.ValueKind == JsonValueKind.True;
-        return JsonSerializer.Serialize(new { success = false, changed = !unchanged, reverted = NetworkRecovery.Restored(recovery), error = "Executor encerrado sem resultado. " + NetworkRecovery.Explain(recovery), backup, recoveryFolder = dir, recovery = recoveryResult.RootElement.Clone() });
+        // #97: a cadeia pode estar bloqueada mesmo se alguém criou a pasta da operação antes do executor.
+        var hostile = unchanged ? trust.ChainProblem?.Invoke(trust.ProtectedRoot) : null;
+        var error = hostile != null ? NetworkRecovery.HostileChainMessage(hostile) : "Executor encerrado sem resultado. " + NetworkRecovery.Explain(recovery);
+        if (hostile != null) return JsonSerializer.Serialize(new { success = false, changed = (bool?)null, reverted = false, error, protectedFolderProblem = true, backup, recoveryFolder = dir });
+        return JsonSerializer.Serialize(new { success = false, changed = !unchanged, reverted = NetworkRecovery.Restored(recovery), error, backup, recoveryFolder = dir, recovery = recoveryResult.RootElement.Clone() });
+    }
+
+    // #98: o executor grava a mesma mensagem para "restaurar" escolhido na janela, prazo esgotado e cancelamento. Só o
+    // aplicativo sabe que o usuário escolheu restaurar; o resultado ganha restoredByUser quando a restauração foi conferida.
+    internal static string MarkRestoreChosen(string result, bool restoreChosen)
+    {
+        if (!restoreChosen) return result;
+        try
+        {
+            if (JsonNode.Parse(result) is not JsonObject root) return result;
+            if (root["success"]?.GetValueKind() != JsonValueKind.False || root["reverted"]?.GetValueKind() != JsonValueKind.True
+                || root.ContainsKey("error") || root.ContainsKey("failureState")) return result;
+            root["restoredByUser"] = true;
+            return root.ToJsonString();
+        }
+        catch (JsonException) { return result; }
     }
 
     private static async Task<string> ReadResult(string dir, string secured, NetworkRecoveryTrust trust)

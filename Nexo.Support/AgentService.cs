@@ -21,6 +21,10 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
     // Linha de fatos do turno em andamento ou do último (#73). Quem exibe uma interrupção (cancelamento, erro) a acrescenta.
     public string TurnFactsLine => facts.Line();
     public const string DefaultModel = "qwen3:8b";
+    internal const string RestoredByUserAnswer = "Restaurei a configuração de rede anterior, como você escolheu, e conferi o estado: a rede voltou a ficar como antes da mudança. Se a conexão ainda tiver problema, me diga o que acontece para investigarmos outra hipótese.";
+    internal static bool RestoredByUser(JsonElement root) => root.ValueKind == JsonValueKind.Object
+        && root.TryGetProperty("restoredByUser", out var chosen) && chosen.ValueKind == JsonValueKind.True
+        && root.TryGetProperty("reverted", out var reverted) && reverted.ValueKind == JsonValueKind.True;
     private const string SystemPrompt = """
         Você é Nexo, um agente de suporte que OPERA este computador Windows por ferramentas.
         Você também conversa naturalmente. Responda saudações, agradecimentos e perguntas
@@ -403,6 +407,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             string? functionalCheck = null;
             string? changeOutcome = null;
             string? networkFailure = null;
+            var networkRestoredByUser = false;
             string? failedMutation = null;
             string? failedKey = null;
             foreach (var call in calls.Value.EnumerateArray())
@@ -518,13 +523,15 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     if (name == "test_connection" && arguments.TryGetProperty("host", out var named) && named.ValueKind == JsonValueKind.String && !System.Net.IPAddress.TryParse(named.GetString(), out _)
                         && root.TryGetProperty("success", out var tested) && tested.ValueKind == JsonValueKind.True && root.TryGetProperty("data", out var nameTest) && nameTest.ValueKind == JsonValueKind.Object
                         && nameTest.TryGetProperty("dnsResolved", out var resolved) && resolved.ValueKind == JsonValueKind.False) nameResolutionFailed = true;
-                    if (name is "set_ipv4" or "set_dns" && root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False && root.TryGetProperty("backup", out _))
+                    // #98: restaurar na janela "Manter a configuração de rede?" é escolha do usuário, não falha da etapa.
+                    if (name is "set_ipv4" or "set_dns" && RestoredByUser(root)) networkRestoredByUser = true;
+                    else if (name is "set_ipv4" or "set_dns" && root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False && root.TryGetProperty("backup", out _))
                     {
                         var restored = root.TryGetProperty("reverted", out var rv) && rv.ValueKind == JsonValueKind.True;
                         var changed = !root.TryGetProperty("changed", out var ch) || ch.ValueKind != JsonValueKind.False;
                         var unknown = root.TryGetProperty("state", out var st) && st.ValueKind == JsonValueKind.String && st.GetString() == "unknown";
                         networkFailure = "A alteração de rede não foi concluída. " + (root.TryGetProperty("error", out var err) ? err.GetString() : "Confira o resultado acima.") + "\n\n" +
-                            (restored ? "A configuração anterior foi restaurada e conferida." : unknown ? "O estado da rede não pôde ser confirmado e nenhuma restauração foi confirmada. O caminho do backup está no cartão acima; consulte a rede antes de tentar outra mudança." : changed ? "A restauração automática não foi confirmada. O erro e o caminho do backup estão no cartão acima; é necessário conferir a configuração antes de tentar outra mudança." : "A operação foi interrompida antes de alterar a configuração.");
+                            (restored ? "A configuração anterior foi restaurada e conferida." : root.TryGetProperty("protectedFolderProblem", out var problem) && problem.ValueKind == JsonValueKind.True ? "O estado da rede não foi confirmado. Confira a configuração antes de tentar outra mudança." : unknown ? "O estado da rede não pôde ser confirmado e nenhuma restauração foi confirmada. O caminho do backup está no cartão acima; consulte a rede antes de tentar outra mudança." : changed ? "A restauração automática não foi confirmada. O erro e o caminho do backup estão no cartão acima; é necessário conferir a configuração antes de tentar outra mudança." : "A operação foi interrompida antes de alterar a configuração.");
                     }
                     if (ToolCatalog.IsMutation(name))
                     {
@@ -563,6 +570,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             }
             store.Save();
             if (networkFailure != null) return Finish(networkFailure);
+            if (networkRestoredByUser) return Finish(RestoredByUserAnswer);
             // Depois de um pedido de reinício, a resposta repete o que os eventos do serviço mostraram (#58).
             var restartEvents = restartedService != null && serviceEvents.TryGetValue(restartedService, out var note) ? " " + note : "";
             if (deniedByUser) return Finish("Você recusou a alteração proposta. Essa alteração não foi executada e parei esta etapa. Os resultados já obtidos estão registrados acima; a resolução do problema ainda não foi confirmada." + restartEvents);
