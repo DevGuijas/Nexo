@@ -30,6 +30,9 @@ public partial class MainWindow : Window
     private DateTimeOffset lastEventScan = DateTimeOffset.MinValue;
     private DateTimeOffset lastPrune = DateTimeOffset.MinValue;
     private int eventScanRunning;
+    private System.Windows.Forms.NotifyIcon? trayIcon;
+    private System.Drawing.Icon? trayImage;
+    private bool exitRequested;
     public MainWindow(Store store)
     {
         InitializeComponent(); Title = "Nexo " + AppVersion.Current + " • Suporte inteligente"; this.store = store; support = new SupportService(store);
@@ -44,16 +47,87 @@ public partial class MainWindow : Window
         catch (Exception ex) { healthError = "Histórico operacional indisponível. " + ex.Message; }
         Loaded += (_, _) => StartHealthMonitoring();
         Loaded += async (_, _) => await OfferNetworkRecovery();
-        Closed += async (_, _) => { if (healthMonitor != null) { await healthMonitor.StopAsync(); healthMonitor.Dispose(); } healthStore?.Dispose(); };
+        Closed += async (_, _) =>
+        {
+            DisposeTrayIcon();
+            try { if (healthMonitor != null) { await healthMonitor.StopAsync(); healthMonitor.Dispose(); } }
+            finally { healthStore?.Dispose(); Application.Current.Shutdown(); }
+        };
         Closing += (_, e) =>
         {
-            if (!busy) return;
-            e.Cancel = true;
-            var message = operation?.IsCancellationRequested == true
-                ? "O cancelamento foi solicitado. Aguarde o resultado das ações já iniciadas antes de fechar."
-                : "Aguarde o resultado da operação antes de fechar. Se o botão Cancelar estiver disponível, você pode solicitar a interrupção das próximas etapas.";
-            MessageBox.Show(this, message, "Atendimento em andamento");
+            if (busy)
+            {
+                e.Cancel = true;
+                exitRequested = false;
+                var message = operation?.IsCancellationRequested == true
+                    ? "O cancelamento foi solicitado. Aguarde o resultado das ações já iniciadas antes de fechar."
+                    : "Aguarde o resultado da operação antes de fechar. Se o botão Cancelar estiver disponível, você pode solicitar a interrupção das próximas etapas.";
+                MessageBox.Show(this, message, "Atendimento em andamento");
+                return;
+            }
+            if (!exitRequested && healthSettings.BackgroundMode && trayIcon?.Visible == true)
+            {
+                e.Cancel = true;
+                Hide();
+                trayIcon.BalloonTipTitle = "Nexo em segundo plano";
+                trayIcon.BalloonTipText = "O monitoramento continua. Abra o Nexo pelo ícone da bandeja.";
+                trayIcon.ShowBalloonTip(2500);
+            }
         };
+        if (healthSettings.BackgroundMode) EnsureTrayIcon();
+    }
+    private void EnsureTrayIcon()
+    {
+        if (trayIcon != null) { trayIcon.Visible = true; return; }
+        using var iconStream = typeof(MainWindow).Assembly.GetManifestResourceStream("Nexo.Tray.ico")
+            ?? throw new InvalidOperationException("Ícone da bandeja indisponível.");
+        trayImage = new System.Drawing.Icon(iconStream);
+        var menu = new System.Windows.Forms.ContextMenuStrip();
+        menu.Items.Add("Abrir Nexo", null, (_, _) => Dispatcher.BeginInvoke(new Action(OpenFromTray)));
+        menu.Items.Add("Encerrar Nexo", null, (_, _) => Dispatcher.BeginInvoke(new Action(() => { exitRequested = true; Close(); })));
+        trayIcon = new System.Windows.Forms.NotifyIcon { Icon = trayImage, Text = "Nexo • monitoramento local", ContextMenuStrip = menu, Visible = true };
+        trayIcon.DoubleClick += (_, _) => Dispatcher.BeginInvoke(new Action(OpenFromTray));
+    }
+    private void OpenFromTray()
+    {
+        Show();
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+    }
+    private void DisposeTrayIcon()
+    {
+        if (trayIcon == null) return;
+        trayIcon.Visible = false;
+        trayIcon.ContextMenuStrip?.Dispose();
+        trayIcon.Dispose(); trayIcon = null;
+        trayImage?.Dispose(); trayImage = null;
+    }
+    public async void VerifyTraySmoke()
+    {
+        var result = Path.Combine(AppContext.BaseDirectory, "tray-checks.txt");
+        try
+        {
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Background);
+            if (healthMonitor == null) throw new InvalidOperationException("O monitor não iniciou com a janela aberta.");
+            healthSettings.BackgroundMode = true;
+            EnsureTrayIcon();
+            Close();
+            if (IsVisible || trayIcon?.Visible != true || healthMonitor == null)
+                throw new InvalidOperationException("Fechar não manteve o monitor na bandeja.");
+            trayIcon.ContextMenuStrip?.Items[0].PerformClick();
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Background);
+            if (!IsVisible) throw new InvalidOperationException("Abrir Nexo não restaurou a janela.");
+            trayIcon.ContextMenuStrip?.Items[1].PerformClick();
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Background);
+            if (IsVisible || trayIcon != null) throw new InvalidOperationException("Encerrar Nexo não liberou janela e bandeja.");
+            File.WriteAllText(result, "Bandeja: fechar ocultou a janela e manteve o monitor; abrir restaurou; encerrar liberou o ícone.");
+            Application.Current.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            File.WriteAllText(result, "Falha na bandeja: " + ex);
+            Application.Current.Shutdown(1);
+        }
     }
     private static TextBlock Text(string text, double size = 14, string color = "Ink") => new() { Text = text, FontSize = size, Foreground = Brush(color), TextWrapping = TextWrapping.Wrap };
     private static string MetricPercent(double? value) => value.HasValue ? value.Value.ToString("F0") + "%" : "indisponível";
@@ -770,7 +844,9 @@ public partial class MainWindow : Window
             catch (Exception ex) { connectionStatus.Text = "Não foi possível verificar: " + ex.Message; }
         })); panel.Children.Add(connectionStatus); PageContent.Children.Add(Card(panel));
         var healthPanel = new StackPanel(); var monitorHeading = SectionHeading("health", "Monitoramento local"); monitorHeading.Margin = new Thickness(0, 0, 0, 8); healthPanel.Children.Add(monitorHeading);
-        healthPanel.Children.Add(Text("A coleta funciona enquanto a janela está aberta. A temperatura da CPU só aparece quando o Libre Hardware Monitor está em execução e publica o sensor por WMI. O estado dos discos é o informado pelo Windows, não um SMART completo.", 12, "Secondary"));
+        healthPanel.Children.Add(Text("A coleta funciona enquanto o Nexo está aberto. A temperatura da CPU só aparece quando o Libre Hardware Monitor está em execução e publica o sensor por WMI. O estado dos discos é o informado pelo Windows, não um SMART completo.", 12, "Secondary"));
+        var backgroundMode = Check(healthPanel, "Continuar monitorando em segundo plano ao fechar a janela", healthSettings.BackgroundMode);
+        healthPanel.Children.Add(Text("Com esta opção, o Nexo fica na bandeja do Windows. Use 'Abrir Nexo' para voltar ou 'Encerrar Nexo' para parar a coleta. O monitor não executa correções sozinho.", 12, "Secondary"));
         var interval = Field(healthPanel, "Intervalo entre amostras (segundos: 10–3600)", healthSettings.IntervalSeconds.ToString());
         var cpu = Field(healthPanel, "Alerta de CPU persistente (%)", healthSettings.CpuHighPercent.ToString("F0"));
         var disk = Field(healthPanel, "Alerta de espaço livre abaixo de (%)", healthSettings.DiskLowFreePercent.ToString("F0"));
@@ -805,10 +881,11 @@ public partial class MainWindow : Window
                 RetentionDays = retentionValue, CheckGateway = checkGateway.IsChecked == true, CheckDns = checkDns.IsChecked == true,
                 CheckExternal = checkExternal.IsChecked == true, DnsProbeHost = dnsHost.Text.Trim(), HttpProbeUrl = httpUrl.Text.Trim(),
                 HttpExpectedText = expectedText.Text.Trim(), ProcessMemoryGrowthPoints = processGrowthValue,
-                ProcessMemorySamples = processSamplesValue };
+                ProcessMemorySamples = processSamplesValue, BackgroundMode = backgroundMode.IsChecked == true };
             next.Save(store.Root);
             if (healthMonitor != null) { await healthMonitor.StopAsync(); healthMonitor.Dispose(); healthMonitor = null; }
             healthSettings = next; healthStore?.Prune(TimeSpan.FromDays(next.RetentionDays)); StartHealthMonitoring();
+            if (next.BackgroundMode) EnsureTrayIcon(); else DisposeTrayIcon();
             MessageBox.Show(this, "Preferências do monitoramento salvas.", "Nexo");
         }), true));
         PageContent.Children.Add(Card(healthPanel));
@@ -921,6 +998,8 @@ public partial class MainWindow : Window
         }
         ShowPage("settings");
         if (!PageContent.Children.OfType<Border>().Any(b => b.Child is StackPanel s && s.Children.OfType<StackPanel>().Any(h => h.Children.OfType<TextBlock>().Any(t => t.Text == "Monitoramento local")))) throw new InvalidOperationException("Controles de monitoramento não abriram.");
+        if (!Descendants<CheckBox>(PageContent).Any(check => check.Content?.ToString()?.Contains("segundo plano") == true && check.IsChecked == false))
+            throw new InvalidOperationException("A opção da bandeja precisa começar desligada.");
         if (!new[] { "Verificar gateway", "Verificar DNS", "Verificar destino externo" }.All(label => Descendants<CheckBox>(PageContent).Any(check => check.Content?.ToString()?.Contains(label) == true && check.IsChecked == false)))
             throw new InvalidOperationException("As três sondagens precisam de opções independentes desligadas por padrão.");
         await Capture("nexo-health-settings.png");

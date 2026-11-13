@@ -54,10 +54,11 @@ internal static class ScenarioChecks
             check(!HealthSettings.TryParsePercent("2,5", enUs, out _), "Limiar com vírgula é recusado em en-US, sem virar 25");
             foreach (var unreadable in new[] { "", "abc", "NaN", "Infinity", "-Infinity" })
                 check(!HealthSettings.TryParsePercent(unreadable, enUs, out _), "Limiar inválido é recusado: [" + unreadable + "]");
-            var settings = new HealthSettings { IntervalSeconds = 45, CpuHighPercent = 88, DiskLowFreePercent = 12, RetentionDays = 14 };
+            check(!new HealthSettings().BackgroundMode, "Bandeja: monitoramento em segundo plano começa desligado");
+            var settings = new HealthSettings { IntervalSeconds = 45, CpuHighPercent = 88, DiskLowFreePercent = 12, RetentionDays = 14, BackgroundMode = true };
             settings.Save(root);
             var loaded = HealthSettings.Load(root);
-            check(loaded.IntervalSeconds == 45 && loaded.CpuHighPercent == 88 && loaded.RetentionDays == 14, "Preferências de saúde persistem localmente");
+            check(loaded.IntervalSeconds == 45 && loaded.CpuHighPercent == 88 && loaded.RetentionDays == 14 && loaded.BackgroundMode, "Preferências de saúde e bandeja persistem localmente");
             using (var saved = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(root, "health-settings.json"))))
                 check(saved.RootElement.TryGetProperty("CheckGateway", out var gatewayCheck) && gatewayCheck.ValueKind == System.Text.Json.JsonValueKind.False
                     && saved.RootElement.TryGetProperty("CheckDns", out var dnsCheck) && dnsCheck.ValueKind == System.Text.Json.JsonValueKind.False
@@ -93,6 +94,7 @@ internal static class ScenarioChecks
             var legacySettings = HealthSettings.Load(root);
             check(!legacySettings.CheckGateway && !legacySettings.CheckDns && !legacySettings.CheckExternal,
                 "Preferência antiga carrega sem ativar consultas de rede");
+            check(!legacySettings.BackgroundMode, "Preferência antiga não ativa a bandeja sem consentimento");
             loaded.IntervalSeconds = 1;
             try { loaded.Save(root); throw new Exception("FAIL: intervalo inválido aceito"); }
             catch (ArgumentOutOfRangeException) { check(true, "Intervalo de coleta inválido é bloqueado"); }
