@@ -160,6 +160,7 @@ internal static class ValidationRetestChecks
             "O D: é um SSD. Não há arquivos visíveis.",
             "Não foram encontrados arquivos no D:.",
             "Não encontrei arquivos no D:.",
+            "No inventário não há arquivos listados e o D: não tem arquivos.",
             "O D: parece não ter arquivos.",
             "Se quiser, o D: está vazio.",
             "Não consigo ver os arquivos, mas não há arquivos no D:.",
@@ -179,6 +180,7 @@ internal static class ValidationRetestChecks
             "Posso te orientar a ver os arquivos no Explorador.",
             "Posso mostrar como ver os arquivos no Explorador.",
             "No inventário não há arquivos listados.",
+            "O D: é um SSD. Não há arquivos listados no inventário.",
             "Você pode verificar o conteúdo do D: no Explorador de Arquivos."
         ];
         assert(allowed.All(answer => evidence.ValidateStatement(answer, false) == null),

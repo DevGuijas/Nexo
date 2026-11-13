@@ -411,11 +411,11 @@ public sealed class InvestigationEvidence
     private static bool ClaimsDriveContents(string normalized)
     {
         var driveInAnswer = Regex.IsMatch(normalized, @"\b(?:disco|unidade|volume)\b|(?<![\w:])[a-z]:(?!\w)");
-        foreach (var clause in Sentences(normalized).SelectMany(sentence => Regex.Split(sentence, @"\b(?:mas|porem)\b|\bou\s+(?=voce\b|o usuario\b)")))
+        foreach (var clause in Sentences(normalized).SelectMany(sentence => Regex.Split(sentence, @"\b(?:mas|porem)\b|\bou\s+(?=voce\b|o usuario\b)|\be\s+(?=(?:o|a)\s+(?:disco|unidade|volume|[a-z]:))")))
         {
             var drive = Regex.IsMatch(clause, @"\b(?:disco|unidade|volume)\b|(?<![\w:])[a-z]:(?!\w)");
             var conditional = Regex.IsMatch(clause, @"^\s*(?:para saber se|verifique se|veja se|confira se|se (?:o|a)\b)") || clause.TrimEnd().EndsWith('?');
-            var metadataOnly = Regex.IsMatch(clause, @"\b(?:inventario|relatorio)\b.{0,50}\b(?:arquivos?|pastas?)\s+listad[oa]s?\b");
+            var metadataOnly = Regex.IsMatch(clause, @"\b(?:inventario|relatorio)\b.{0,50}\b(?:arquivos?|pastas?)\s+listad[oa]s?\b|\b(?:arquivos?|pastas?)\s+listad[oa]s?\b.{0,35}\b(?:inventario|relatorio)\b");
             if (!conditional && (!metadataOnly && Regex.IsMatch(clause, @"\b(?:nao ha|nao tem|nao encontrei|nao foram? encontrad[oa]s?|parece nao ter|sem|nenhum(?:a)?)\s+(?:\w+\s+){0,3}(?:arquivos?|pastas?)\b")
                 || drive && Regex.IsMatch(clause, @"(?:\b(?:disco|unidade|volume)\b|(?<![\w:])[a-z]:(?!\w)).{0,35}\b(?:esta|parece|ficou)\s+vazi[oa]\b")
                 || driveInAnswer && !Regex.IsMatch(clause, @"\b(?:relatorio|inventario|registro)\b")
