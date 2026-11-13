@@ -42,17 +42,19 @@ public static class NetworkChange
     public static Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token)
         => Apply(request, store, confirm, progress, token, NetworkRecovery.StartElevated);
 
-    public static async Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token, Func<string, IElevatedProcess> start, NetworkDeadlines? deadlines = null, NetworkRecoveryTrust? trust = null)
+    public static async Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token, Func<string, IElevatedProcess> start, NetworkDeadlines? deadlines = null, NetworkRecoveryTrust? trust = null, Func<string, int, string, TimeSpan, CancellationToken, Task<bool>>? deliverDecision = null)
     {
         deadlines ??= NetworkDeadlines.Default;
         trust ??= NetworkRecoveryTrust.Default;
         token.ThrowIfCancellationRequested();
         var id = Guid.NewGuid().ToString("N");
+        var pipeName = NetworkDecisionChannel.PipeName(id);
+        deliverDecision ??= NetworkDecisionChannel.SendAsync;
         var dir = Path.Combine(store.Root, "operations", id); Directory.CreateDirectory(dir);
         var parameters = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(request)));
         using var source = typeof(NetworkChange).Assembly.GetManifestResourceStream("Nexo.NetworkTransaction.ps1") ?? throw new IOException("Executor de rede ausente.");
         using var reader = new StreamReader(source);
-        var script = "$requestJson=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + parameters + "')); $operationId=" + WindowsTools.Quote(id) + "; $operationDir=" + WindowsTools.Quote(dir) + ";\n" + await reader.ReadToEndAsync(token);
+        var script = "$requestJson=[System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('" + parameters + "')); $operationId=" + WindowsTools.Quote(id) + "; $operationDir=" + WindowsTools.Quote(dir) + "; $decisionPipeName=" + WindowsTools.Quote(pipeName) + "; $appProcessId=" + Environment.ProcessId + ";\n" + await reader.ReadToEndAsync(token);
         token.ThrowIfCancellationRequested();
         var record = new NetworkTransactionRecord(request.Action, request.Index, request.ExpectedGuid, DateTimeOffset.UtcNow);
         NetworkRecovery.WriteRecord(dir, record);
@@ -74,15 +76,18 @@ public static class NetworkChange
         var deadline = deadlines.Applying;
         var cancelled = false;
         var restoreChosen = false;
+        var decisionSent = false;
+        var keepDelivered = false;
         while (!process.HasExited && !File.Exists(final))
         {
             if (token.IsCancellationRequested && !cancelled)
             {
                 cancelled = true;
-                if (!File.Exists(decision)) await File.WriteAllTextAsync(decision, "rollback", CancellationToken.None);
+                await File.WriteAllTextAsync(decision, "rollback", CancellationToken.None);
+                decisionSent = true;
                 if (!File.Exists(ready)) deadline = deadlines.Applying + deadlines.Finishing;
             }
-            if (File.Exists(ready) && !File.Exists(decision) && trust.TrustsFile(secured, "applied.json"))
+            if (File.Exists(ready) && !decisionSent && trust.TrustsFile(secured, "applied.json"))
             {
                 progress.Report("Configuração aplicada temporariamente. Conferindo o estado e aguardando sua confirmação…");
                 var state = await File.ReadAllTextAsync(ready, CancellationToken.None);
@@ -102,10 +107,20 @@ public static class NetworkChange
                     }
                 }
                 catch (Exception ex) { progress.Report("Confirmação indisponível; restaurando a configuração anterior. " + ex.Message); }
-                await File.WriteAllTextAsync(decision, keep && !token.IsCancellationRequested ? "keep" : "rollback", CancellationToken.None);
+                var chosen = keep && !token.IsCancellationRequested ? "keep" : "rollback";
+                var delivered = await deliverDecision(pipeName, process.Id ?? 0, chosen, TimeSpan.FromSeconds(10), CancellationToken.None);
+                if (!delivered)
+                {
+                    chosen = "rollback";
+                    restoreChosen = false;
+                    progress.Report("A decisão não chegou ao executor de rede; restaurando a configuração anterior.");
+                }
+                keepDelivered = delivered && chosen == "keep";
+                await File.WriteAllTextAsync(decision, chosen, CancellationToken.None);
+                decisionSent = true;
                 deadline = clock.Elapsed + deadlines.Finishing;
             }
-            if (clock.Elapsed >= deadline && !process.HasExited && !File.Exists(final)) return await Unconfirmed(dir, backup, decision, ready, cancelled || token.IsCancellationRequested, clock.Elapsed);
+            if (clock.Elapsed >= deadline && !process.HasExited && !File.Exists(final)) return await Unconfirmed(dir, backup, decision, ready, keepDelivered, cancelled || token.IsCancellationRequested, clock.Elapsed);
             await Task.Delay(250, CancellationToken.None);
         }
         if (File.Exists(final)) return MarkRestoreChosen(await ReadResult(dir, secured, trust), restoreChosen);
@@ -150,12 +165,11 @@ public static class NetworkChange
         return text;
     }
 
-    private static async Task<string> Unconfirmed(string dir, string backup, string decision, string ready, bool cancelled, TimeSpan elapsed)
+    private static async Task<string> Unconfirmed(string dir, string backup, string decision, string ready, bool keepDelivered, bool cancelled, TimeSpan elapsed)
     {
-        if (!File.Exists(decision)) await File.WriteAllTextAsync(decision, "rollback", CancellationToken.None);
-        var chosen = File.ReadAllText(decision).Trim();
+        if (!keepDelivered) await File.WriteAllTextAsync(decision, "rollback", CancellationToken.None);
         var applied = File.Exists(ready);
-        var phase = chosen == "keep" ? "keeping" : applied ? "restoring" : "applying";
+        var phase = keepDelivered ? "keeping" : applied ? "restoring" : "applying";
         var seconds = (int)Math.Round(elapsed.TotalSeconds);
         var error = (cancelled ? "Cancelamento registrado. " : "") + phase switch
         {

@@ -76,12 +76,24 @@ internal static class NetworkRecoveryChecks
             await CompactRuns(check, root);
 
             prompts.Clear();
+            var forgedKeep = await Apply(store, trust, async (dir, stop) =>
+            {
+                await File.WriteAllTextAsync(Path.Combine(dir, "decision.txt"), "keep", stop);
+                await Backup(dir, protectedRoot, Before);
+                await Write(Secured(protectedRoot, dir), "applied.json", "{}");
+                await Task.Delay(750, stop);
+                await Write(Secured(protectedRoot, dir), "result.json", Decision(dir) == "keep" ? "{\"success\":true}" : "{\"success\":false,\"reverted\":true}");
+            }, prompts, true, keep: false);
+            check(prompts.SequenceEqual(["Manter a configuração de rede?"]) && Decision(forgedKeep.Directory) == "rollback" && Flag(forgedKeep.Result, "reverted"),
+                "Rede: keep forjado antes da aplicação não pula a confirmação nem mantém a rede (#11)");
+
+            prompts.Clear();
             var restoring = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); }, prompts, true, keep: false);
             check(prompts.SequenceEqual(["Manter a configuração de rede?", "Restaurar configuração de rede anterior?"]) && Flag(restoring.Result, "reverted"),
                 "Rede: executor encerrado durante a restauração própria tem a restauração oferecida novamente");
 
             prompts.Clear();
-            var kept = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); }, prompts, true, keep: true);
+            var kept = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await RecordKeep(dir, protectedRoot); }, prompts, true, keep: true);
             check(prompts.SequenceEqual(["Manter a configuração de rede?"]) && kept.RecoveryStarts == 0 && !Flag(kept.Result, "reverted")
                 && Text(kept.Result.GetProperty("recovery"), "message").Contains("não foi conferida") && File.Exists(Path.Combine(kept.Directory, NetworkRecovery.ResultFile)),
                 "Rede: executor encerrado após confirmação de manter registra a incerteza sem desfazer a escolha");
@@ -210,7 +222,7 @@ internal static class NetworkRecoveryChecks
             }
 
             prompts.Clear();
-            var keptHung = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, keep: true, deadlines: quick);
+            var keptHung = await Apply(store, trust, async (dir, stop) => { await Backup(dir, protectedRoot, Before); await Write(Secured(protectedRoot, dir), "applied.json", "{}"); await WaitFor(Path.Combine(dir, "decision.txt"), stop); await RecordKeep(dir, protectedRoot); await Task.Delay(Timeout.Infinite, stop); }, prompts, true, keep: true, deadlines: quick);
             check(Text(keptHung.Result, "phase") == "keeping" && Decision(keptHung.Directory) == "keep" && Text(keptHung.Result, "error").Contains("não foi conferida") && !Flag(keptHung.Result, "reverted"),
                 "Rede: executor travado após confirmar manter preserva a escolha e informa que o estado não foi conferido");
 
@@ -355,6 +367,17 @@ internal static class NetworkRecoveryChecks
             var phasedItem = NetworkRecovery.Inspect(phased, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
             check(phasedItem.Phase == "applying" && NetworkRecovery.Describe(phasedItem).Contains("durante a aplicação da mudança"),
                 "Rede: a fase mostrada na restauração vem do registro protegido");
+
+            var forgedKeepAfterCrash = Transaction(startup, protectedRoot, 1, secureRecord: new NetworkTransactionRecord("set_ipv4", 7, Guid, DateTimeOffset.UtcNow, Phase: "confirming"));
+            File.WriteAllText(Path.Combine(forgedKeepAfterCrash, "decision.txt"), "keep");
+            var forgedKeepItem = NetworkRecovery.Inspect(forgedKeepAfterCrash, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
+            check(forgedKeepItem.Resolution == null && forgedKeepItem.Before != null,
+                "Rede: keep forjado depois da queda não encerra a restauração oferecida (#11)");
+
+            var authenticatedKeep = Transaction(startup, protectedRoot, 1, secureRecord: new NetworkTransactionRecord("set_ipv4", 7, Guid, DateTimeOffset.UtcNow, Phase: "keeping"));
+            var authenticatedKeepItem = NetworkRecovery.Inspect(authenticatedKeep, DateTimeOffset.UtcNow, _ => false, trust: trust)!;
+            check(authenticatedKeepItem.Resolution != null && authenticatedKeepItem.Phase == "keeping",
+                "Rede: confirmação gravada pelo executor na pasta protegida preserva a escolha após queda (#11)");
 
             // Resultado elevado que ficou só na pasta protegida (o aplicativo fechou antes de copiá-lo): é copiado e não há nova oferta.
             var copied = Transaction(startup, protectedRoot, 1);
@@ -634,7 +657,8 @@ internal static class NetworkRecoveryChecks
             return new SimulatedProcess(stop => executor(dir, stop));
         };
         Func<ChangeRequest, Task<bool>> confirm = request => { prompts.Add(request.Title); if (request.KeepNetwork && !keep && !unanswered && explicitRestore) request.OnExplicitRestore?.Invoke(); return unanswered && request.KeepNetwork ? new TaskCompletionSource<bool>().Task : Task.FromResult(request.KeepNetwork ? keep : restore); };
-        var output = await NetworkChange.Apply(Request, store, confirm, new Silent(), token, start, deadlines, trust);
+        var output = await NetworkChange.Apply(Request, store, confirm, new Silent(), token, start, deadlines, trust,
+            (_, _, _, _, _) => Task.FromResult(true));
         using var document = JsonDocument.Parse(output);
         return new Outcome(document.RootElement.Clone(), directory, starts, recoveryScript, forwardScript);
     }
@@ -674,6 +698,10 @@ internal static class NetworkRecoveryChecks
         await Write(secured, NetworkRecovery.RecordFile, Record(DateTimeOffset.UtcNow));
         await Write(secured, "before.json", before);
     }
+
+    private static Task RecordKeep(string dir, string protectedRoot)
+        => Write(Secured(protectedRoot, dir), NetworkRecovery.RecordFile,
+            JsonSerializer.Serialize(new NetworkTransactionRecord("set_ipv4", 7, Guid, DateTimeOffset.UtcNow, Phase: "keeping")));
 
     private static string Secured(string protectedRoot, string dir) => Path.Combine(protectedRoot, Path.GetFileName(dir));
 

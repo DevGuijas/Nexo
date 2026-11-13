@@ -171,10 +171,10 @@ public static class NetworkRecovery
         if (secured.Action != record.Action || secured.Index != record.Index || !SameGuid(secured.ExpectedGuid, record.ExpectedGuid))
             return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = "O registro da transação de rede não corresponde à cópia protegida. A restauração automática não foi oferecida; confira a rede manualmente.", backup = beforePath });
         record = secured with { ProcessId = record.ProcessId, RecoveryProcessId = record.RecoveryProcessId };
-        if (secured.Phase is "applying" or "confirming" or "restoring") phase = secured.Phase;
+        if (secured.Phase is "applying" or "confirming" or "restoring" or "keeping") phase = secured.Phase;
         if (now - secured.Created > MaxAge)
             return Resolved(directory, record, phase, new { success = false, restored = false, uncertain = true, message = TooOldMessage(secured.Created), backup = beforePath });
-        if (decision == "keep")
+        if (secured.Phase == "keeping")
             return Resolved(directory, record, "keeping", new { success = false, restored = false, uncertain = true, message = "Você confirmou manter a nova configuração de rede, mas o executor terminou antes de registrar o resultado. A configuração atual não foi conferida; consulte a rede antes de outra alteração.", backup = beforePath });
         try { return new InterruptedNetworkTransaction(directory, record, phase, Validate(File.ReadAllText(protectedBefore), record), null, protectedDirectory); }
         catch (Exception ex) when (ex is JsonException or InvalidDataException or FormatException or IOException or UnauthorizedAccessException)
