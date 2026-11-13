@@ -27,6 +27,8 @@ internal static class ValidationRetestChecks
             MemoryFigureOfTheProcess(assert);
             await MemoryFlow(store, actor, assert);
             FileSearchOffer(assert);
+            DriveContentsWithoutEvidence(assert);
+            await DriveContentsFlow(store, actor, assert);
             await DiskOfferFlow(store, actor, assert);
             StorageLine(assert);
             ClosedDisk(assert);
@@ -135,11 +137,67 @@ internal static class ValidationRetestChecks
             "Vou verificar o relatório: os maiores arquivos não aparecem nele.",
             "Vou ser direto: o relatório mostra só o espaço livre, e os maiores arquivos ficam no Armazenamento do Windows."
         };
-        var passed = allowed.Where(text => empty.ValidateStatement(text, false) == null).Count();
-        assert(passed == allowed.Length,
-            "Reteste disco: o caminho do Armazenamento, a negação e a orientação sem oferta passam (" + passed + " de " + allowed.Length + ")");
+        var rejected = allowed.Select(text => (Text: text, Reason: empty.ValidateStatement(text, false)))
+            .Where(result => result.Reason != null).ToArray();
+        assert(rejected.Length == 0,
+            "Reteste disco: o caminho do Armazenamento, a negação e a orientação sem oferta passam: "
+            + string.Join(" | ", rejected.Select(result => result.Text)));
         assert(InvestigationEvidence.FileSearchReason.Contains("Configurações > Sistema > Armazenamento") && InvestigationEvidence.FileSearchReason.Contains("No lugar"),
             "Reteste disco: o motivo diz ao modelo o que escrever no lugar da oferta");
+    }
+
+    private static void DriveContentsWithoutEvidence(Action<bool, string> assert)
+    {
+        var evidence = new InvestigationEvidence();
+        string[] refused =
+        [
+            "O D: é um SSD interno. Não há arquivos ou pastas visíveis nessa unidade.",
+            "O disco D: está vazio, sem arquivos.",
+            "O D: está vazio.",
+            "Nenhum arquivo foi encontrado no D:.",
+            "O D: contém fotos.",
+            "O D: contém dados.",
+            "O D: é um SSD. Não há arquivos visíveis.",
+            "Não foram encontrados arquivos no D:.",
+            "Não encontrei arquivos no D:.",
+            "O D: parece não ter arquivos.",
+            "Se quiser, o D: está vazio.",
+            "Não consigo ver os arquivos, mas não há arquivos no D:.",
+            "Posso ajudar a verificar o conteúdo do D: para você.",
+            "Posso ajudar a verificar o conteúdo do D: ou você pode abrir o Explorador.",
+            "Posso ajudar a verificar quais arquivos existem no D:."
+        ];
+        assert(refused.All(answer => evidence.ValidateStatement(answer, false)?.Contains("não lista o conteúdo de unidades", StringComparison.Ordinal) == true),
+            "#93: não afirmar nem oferecer inspecionar arquivos do D: sem ferramenta que liste seu conteúdo");
+        string[] allowed =
+        [
+            "O D: é um SSD interno SATA da BIWIN, conforme o inventário de hardware.",
+            "O D: tem 11,9 GB livres segundo a leitura do Windows.",
+            "Não consigo ver os arquivos do D: por aqui; abra a unidade no Explorador de Arquivos.",
+            "Não consigo verificar o conteúdo do D: daqui.",
+            "Para saber se a unidade está vazia, abra o Explorador de Arquivos.",
+            "Posso te orientar a ver os arquivos no Explorador.",
+            "Posso mostrar como ver os arquivos no Explorador.",
+            "No inventário não há arquivos listados.",
+            "Você pode verificar o conteúdo do D: no Explorador de Arquivos."
+        ];
+        assert(allowed.All(answer => evidence.ValidateStatement(answer, false) == null),
+            "#93: informação de hardware e orientação honesta sobre conteúdo continuam válidas");
+    }
+
+    private static async Task DriveContentsFlow(Store store, Account actor, Action<bool, string> assert)
+    {
+        const string invented = "O D: é um SSD interno. Não há arquivos ou pastas visíveis nessa unidade. Posso ajudar a verificar o conteúdo do D:.";
+        const string honest = "O inventário identifica o D: como SSD interno. Não consigo ver os arquivos daqui; abra o D: no Explorador de Arquivos para conferir o conteúdo.";
+        var model = new CapturingModel([Call("get_hardware_inventory", new { category = "storage" }), Text(invented), Text(honest)]);
+        var tools = new FlowTools((name, _) => name == "get_hardware_inventory"
+            ? WindowsTools.Ok(new { Devices = new[] { new { Name = "BIWIN SSD", DriveLetter = "D:", BusType = "SATA" } } })
+            : throw new Exception("Ferramenta inesperada: " + name));
+        var answer = await Ask(store, actor, "O que é o D:?", tools, model);
+        assert((model.SystemMessages(2).LastOrDefault() ?? "").Contains("Motivo: " + InvestigationEvidence.DriveContentsReason),
+            "#93: o modelo recebe o motivo da recusa e pode reescrever a resposta");
+        assert(answer.StartsWith(honest + "\n\n" + TurnFacts.Prefix, StringComparison.Ordinal) && tools.Calls.SequenceEqual(["get_hardware_inventory"]),
+            "#93: o atendimento aceita a resposta honesta sem inventar inspeção de arquivos");
     }
 
     private static async Task DiskOfferFlow(Store store, Account actor, Action<bool, string> assert)
@@ -360,6 +418,7 @@ internal static class ValidationRetestChecks
     }
 
     private static string Text(string content) => JsonSerializer.Serialize(new { message = new { role = "assistant", content } });
+    private static string Call(string name, object args) => JsonSerializer.Serialize(new { message = new { role = "assistant", content = "", tool_calls = new[] { new { function = new { name, arguments = args } } } } });
 
     private sealed class FlowTools(Func<string, JsonElement, string> execute) : IAgentTools
     {

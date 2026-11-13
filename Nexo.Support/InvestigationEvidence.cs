@@ -240,6 +240,7 @@ public sealed class InvestigationEvidence
         }
         if (PresentsStaleProcess(text)) return StaleProcessReason;
         if (OffersFileSearch(text)) return FileSearchReason;
+        if (ClaimsDriveContents(text)) return DriveContentsReason;
         if (PresentsClosedDisk(text)) return ClosedDiskReason;
         if (SuggestsMalware(text)) return MalwareReason;
         if (BlamesStablePlateau(text)) return StablePlateauReason;
@@ -255,6 +256,7 @@ public sealed class InvestigationEvidence
         {
             StaleProcessReason => PresentsStaleProcess,
             FileSearchReason => OffersFileSearch,
+            DriveContentsReason => ClaimsDriveContents,
             ClosedDiskReason => PresentsClosedDisk,
             MalwareReason => SuggestsMalware,
             AgentProtocol.PendingActionReason => part => AgentProtocol.PendingActionPhrase(part) != null,
@@ -370,6 +372,7 @@ public sealed class InvestigationEvidence
     }
 
     internal const string FileSearchReason = "O Nexo não lista nem procura arquivos ou pastas: não ofereça identificar os maiores arquivos nem o que ocupa espaço. No lugar, diga o espaço livre medido e indique que o usuário vê o que ocupa espaço em Configurações > Sistema > Armazenamento no Windows.";
+    internal const string DriveContentsReason = "O Nexo não lista o conteúdo de unidades: o inventário mostra hardware e metadados, não arquivos ou pastas. Não afirme que a unidade está vazia, que não há arquivos nela, nem ofereça verificar seu conteúdo. Diga apenas o que a ferramenta mediu e indique o Explorador de Arquivos para ver o conteúdo.";
     internal const string ClosedDiskReason = "A resposta apresenta como atual a falta de espaço em disco, mas o relatório de saúde só mostra essa ocorrência encerrada (resolvida ou com estado atual desconhecido) e nenhuma leitura atual tem pouco espaço. Cite o espaço livre atual por volume, ou diga que essa ocorrência não está ativa.";
     // Caminho real para ver o uso do disco (#88): o Nexo não lista arquivos nem pastas.
     internal const string StorageGuidance = "Para ver o que ocupa espaço, abra Configurações > Sistema > Armazenamento no Windows.";
@@ -402,6 +405,29 @@ public sealed class InvestigationEvidence
     private static bool OffersFileSearch(string normalized) => Sentences(normalized).Any(sentence =>
         OfferedSearch.Matches(sentence).Any(offer => !Negated(sentence, offer)
             && !(StoragePath.IsMatch(sentence) && Guide.IsMatch(offer.Groups["lead"].Value))));
+
+    // O inventário informa discos e volumes, nunca o conteúdo dos arquivos. Avaliar cada oração evita que
+    // "não consigo ver..." ou "você pode abrir..." isente uma afirmação/oferta diferente na mesma frase.
+    private static bool ClaimsDriveContents(string normalized)
+    {
+        var driveInAnswer = Regex.IsMatch(normalized, @"\b(?:disco|unidade|volume)\b|(?<![\w:])[a-z]:(?!\w)");
+        foreach (var clause in Sentences(normalized).SelectMany(sentence => Regex.Split(sentence, @"\b(?:mas|porem)\b|\bou\s+(?=voce\b|o usuario\b)")))
+        {
+            var drive = Regex.IsMatch(clause, @"\b(?:disco|unidade|volume)\b|(?<![\w:])[a-z]:(?!\w)");
+            var conditional = Regex.IsMatch(clause, @"^\s*(?:para saber se|verifique se|veja se|confira se|se (?:o|a)\b)") || clause.TrimEnd().EndsWith('?');
+            var metadataOnly = Regex.IsMatch(clause, @"\b(?:inventario|relatorio)\b.{0,50}\b(?:arquivos?|pastas?)\s+listad[oa]s?\b");
+            if (!conditional && (!metadataOnly && Regex.IsMatch(clause, @"\b(?:nao ha|nao tem|nao encontrei|nao foram? encontrad[oa]s?|parece nao ter|sem|nenhum(?:a)?)\s+(?:\w+\s+){0,3}(?:arquivos?|pastas?)\b")
+                || drive && Regex.IsMatch(clause, @"(?:\b(?:disco|unidade|volume)\b|(?<![\w:])[a-z]:(?!\w)).{0,35}\b(?:esta|parece|ficou)\s+vazi[oa]\b")
+                || driveInAnswer && !Regex.IsMatch(clause, @"\b(?:relatorio|inventario|registro)\b")
+                    && Regex.IsMatch(clause, @"\b(?:contem|possui|tem|ha)\s+(?:\w+\s+){0,4}(?:arquivos?|pastas?|fotos?|documentos?|videos?|imagens?|musicas?|dados)\b")))
+                return true;
+            var offers = Regex.Matches(clause, @"\b(?:posso|podemos|consigo|vou|irei)\b[^:;]{0,45}?\b(?:verific\w*|inspecion\w*|analis\w*|list\w*|mostr\w*|ver)\b[^:;]{0,50}?\b(?:conteudo|arquivos?|pastas?)\b");
+            if (offers.Any(offer => !Negated(clause, offer)
+                && !Regex.IsMatch(offer.Value, @"\b(?:te orientar a|orientar (?:voce|o usuario) a|explicar como|mostrar como|ensinar (?:voce )?a)\b")))
+                return true;
+        }
+        return false;
+    }
 
     // Na validação da 11fa078 (conversa 2f762bbb), com o C: 87% livre e o alerta do T: encerrado depois de o VHDX sair, a
     // resposta mandou "Libere espaço no disco". Com alguma ocorrência de disco encerrada, nenhuma atual e nenhum volume do
