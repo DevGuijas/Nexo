@@ -9,6 +9,8 @@
 
 O PC de teste não tem o Ollama, e a mudança de DNS só é disparada pelo agente. Por isso os testes **não passaram pela janela do Nexo**. Um programa de teste (fora do repositório) chama `NetworkChange.Apply` da `development` com o executor elevado real, o mesmo código que o agente usa, e registra cada etapa com horário. O pedido foi `set_dns` manual `1.1.1.1` na interface 6.
 
+Os resultados abaixo são o relato de quem executou os testes. O programa de teste e os registros com horário não foram incluídos neste PR, então os resultados no PC não podem ser reproduzidos apenas com os arquivos versionados.
+
 - Teste 2: terminal comum, UAC real.
 - Testes 1 e 3: terminal elevado. O programa congela (`NtSuspendProcess`) ou encerra (`Kill`) o processo do executor. Como o terminal já era administrador, **o UAC não foi exibido** nesses dois.
 
@@ -17,10 +19,10 @@ O PC de teste não tem o Ollama, e a mudança de DNS só é disparada pelo agent
 | # | Critério da issue | Resultado | Evidência |
 |---|---|---|---|
 | 1 | Transação travada respeita o prazo e termina como estado desconhecido, sem restauração concorrente | **Passou** | Executor congelado logo após iniciar. Aos **150 s**: `state: "unknown"`, `timedOut: true`, `processRunning: true`, `phase: "applying"`, `reverted: false`. Mensagem: "não chegou à confirmação em 150 segundos e ainda está em execução... nenhuma restauração foi confirmada". **Nenhuma pergunta de restauração** e nenhum segundo UAC. |
-| 2 | Recusar o UAC não deixa alerta falso nem transação pendente | **Passou** | "Não" no UAC. Em **2 s**: `Win32Exception: A operação foi cancelada pelo usuário`. DNS inalterado. A pasta da operação ficou com `recovery-result.json` (`started: false`, `unchanged: true`, "Nenhuma alteração de rede foi feita") e **não** houve pasta protegida para essa operação. |
-| 3 | Executor encerrado à força: restauração oferecida | **Passou, em parte** (ver limite abaixo) | Executor encerrado aos 7 s, com a pergunta "Manter a configuração de rede?" aberta. Sem resposta, aos 67 s (prazo de 60 s da janela) o Nexo gravou o rollback, informou "O executor de rede terminou sem resultado. Oferecendo a restauração..." e fez a pergunta de restauração. Aceita, aos 71 s: `reverted: true`, DNS de volta ao automático (`192.168.101.1`, `StaticDns` vazio). |
+| 2 | Recusar o UAC não deixa alerta falso nem transação pendente | **Passou, em parte** (alerta da interface não testado) | "Não" no UAC. Em **2 s**: `Win32Exception: A operação foi cancelada pelo usuário`. DNS inalterado. A pasta da operação ficou com `recovery-result.json` (`started: false`, `unchanged: true`, "Nenhuma alteração de rede foi feita") e **não** houve pasta protegida para essa operação. |
+| 3 | Executor encerrado à força: restauração oferecida | **Passou, em parte** (ver limite abaixo) | Executor encerrado aos 7 s, com a pergunta "Manter a configuração de rede?" aberta. Sem resposta, aos 67 s (prazo de 60 s do executor elevado; a janela do aplicativo usa 45 s) o Nexo gravou o rollback, informou "O executor de rede terminou sem resultado. Oferecendo a restauração..." e fez a pergunta de restauração. Aceita, aos 71 s: `reverted: true`, DNS de volta ao automático (`192.168.101.1`, `StaticDns` vazio). |
 
-Em todos os testes o DNS terminou em `192.168.101.1`.
+Nos Testes 2 e 3, foi confirmado que o DNS terminou em `192.168.101.1`. No Teste 1, o executor ainda estava ativo aos 150 s e a transação permanecia em estado desconhecido; este relatório não comprova o estado final do DNS nessa rodada.
 
 Antes do Teste 2 houve uma rodada em que o UAC foi aceito por engano. Ela exercitou o caminho normal: aplicou `1.1.1.1`, mostrou o estado e o aviso de 45 s, e restaurou ao responder "restaurar", em 14 s.
 
@@ -37,4 +39,4 @@ Na primeira rodada do Teste 3, o executor falhou ao iniciar com `Win32Exception:
 
 ## Para fechar a #9
 
-Falta conferir, com a janela do Nexo, (a) a oferta de restauração na abertura seguinte depois de encerrar o executor e (b) a ausência de alerta depois de recusar o UAC. Isso exige o Ollama (ou outro caminho que dispare `set_dns` pelo Nexo) ou a validação no PC de teste do Victor.
+Falta conferir, com a janela do Nexo, (a) a oferta de restauração na abertura seguinte depois de encerrar o executor e (b) a ausência de alerta depois de recusar o UAC. Isso exige o Ollama (ou outro caminho que dispare `set_dns` pelo Nexo) ou a validação no PC de teste do Victor. Também falta a validação da transação numa VM Windows com snapshot, prevista no critério original da #9 e na #8.
