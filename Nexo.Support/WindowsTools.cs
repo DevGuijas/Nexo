@@ -8,7 +8,10 @@ using System.Text.RegularExpressions;
 
 namespace Nexo.Support;
 
-public sealed record ChangeRequest(string Title, string Details, bool KeepNetwork = false, string? LicenseUrl = null);
+public sealed record ChangeRequest(string Title, string Details, bool KeepNetwork = false, string? LicenseUrl = null)
+{
+    public Action? OnExplicitRestore { get; init; }
+}
 public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, Action<string>? inform = null) : IAgentTools
 {
     internal static readonly TimeSpan ElevatedTimeout = TimeSpan.FromMinutes(15);

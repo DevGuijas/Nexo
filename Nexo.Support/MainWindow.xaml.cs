@@ -636,7 +636,7 @@ public partial class MainWindow : Window
         var title = Text(request.Title, 23); title.FontWeight = FontWeights.SemiBold; title.Margin = new Thickness(0, 12, 0, 0);
         header.Children.Add(title); DockPanel.SetDock(header, Dock.Top); panel.Children.Add(header);
         var buttons = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 20, 0, 0) }; DockPanel.SetDock(buttons, Dock.Bottom);
-        buttons.Children.Add(Action(request.KeepNetwork ? "Restaurar configuração anterior" : "Cancelar ação", (_, _) => dialog.DialogResult = false));
+        buttons.Children.Add(Action(request.KeepNetwork ? "Restaurar configuração anterior" : "Cancelar ação", (_, _) => { if (request.KeepNetwork) request.OnExplicitRestore?.Invoke(); dialog.DialogResult = false; }));
         var authorize = Action(request.KeepNetwork ? "Manter configuração" : "Autorizar e executar", (_, _) => dialog.DialogResult = true, true);
         authorize.IsEnabled = request.LicenseUrl == null;
         buttons.Children.Add(authorize); panel.Children.Add(buttons);
