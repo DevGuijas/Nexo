@@ -28,10 +28,21 @@ Antes do Teste 2 houve uma rodada em que o UAC foi aceito por engano. Ela exerci
 
 ## O que esta validação não cobre
 
-- **Abertura seguinte do Nexo (Teste 3 e Teste 2).** O Teste 3 verificou a restauração oferecida na mesma chamada, depois que o executor morreu. Não foi aberta uma nova instância do Nexo para ver a oferta pela varredura de abertura (`NetworkRecovery.Scan`). Pelo mesmo motivo, não foi conferido na interface que, depois de recusar o UAC, a abertura seguinte não mostra alerta. Esses dois pontos seguem cobertos só pelas checagens automatizadas.
+- **Transação numa VM Windows com snapshot.** Prevista no critério original da #9 e na #8; não foi feita (ver o fim deste relatório).
 - **UAC nos Testes 1 e 3.** O terminal elevado dispensou o prompt. A recusa do UAC foi coberta separadamente no Teste 2.
 - **Janela do Nexo e agente.** Os textos mostrados ao usuário nas janelas não foram exercitados, só as respostas e as perguntas do `NetworkChange.Apply`.
 - **Suíte `Nexo.Checks` completa.** Neste PC ela parou com `Win32Exception (5): Acesso negado` ao iniciar o `powershell.exe` (em `NetworkRecoveryChecks.RoundTrip` ou `CompactRuns`), depois de 2.393 `PASS` e antes dos cenários simulados de prazo. A suíte do executor (`NetworkScriptChecks.ps1`) passou. A causa do acesso negado não foi apurada.
+
+## Complemento de 13/11/2026: abertura seguinte na janela do Nexo
+
+Mesmo PC e mesma interface (Wi-Fi, `ifIndex` 6, DNS original `192.168.101.1`). O Nexo (`development`, compilado em Release) foi aberto depois de cada simulação. O disparo da mudança continuou sendo o programa de teste, não o agente, mas o que apareceu na abertura é a varredura do próprio Nexo (`NetworkRecovery.Scan`).
+
+| # | Critério | Resultado | Evidência |
+|---|---|---|---|
+| 3 (abertura seguinte) | Executor encerrado à força: restauração oferecida na próxima abertura | **Passou** | Programa de teste no modo `cair` em terminal elevado, com o DNS preso em `1.1.1.1`. O Nexo foi aberto às 19:00:29 e mostrou o diálogo "Restaurar configuração de rede anterior?", com o horário da alteração interrompida (13/11/2026 18:59), a configuração anterior salva ("Wi-Fi #6, DNS: automático"), a explicação de que a interface é conferida antes e o aviso de que a restauração pede permissão de administrador. Autorizado, com UAC confirmado, às 19:01:18. Às 19:01:21 o `recovery-result.json` registrou `restored: true`, `success: true` ("Configuração anterior restaurada e conferida.") e DNS `192.168.101.1`, sem DNS fixo. |
+| 2 (abertura seguinte) | Recusar o UAC não deixa alerta falso | **Passou** | Programa de teste em terminal comum, "Não" no UAC. Operação das 19:05:01 gravada com `started: false`, `unchanged: true` ("A operação foi cancelada pelo usuário. Nenhuma alteração de rede foi feita."); DNS `192.168.101.1`. Ao abrir o Nexo em seguida, a tela inicial apareceu sem nenhum aviso de rede interrompida. |
+
+Na primeira tentativa do dia, o Nexo foi aberto sem nenhuma queda simulada antes (nenhuma operação nova) e a tela inicial apareceu normalmente; essa abertura não conta como teste.
 
 ## Observação: início do executor negado de forma intermitente
 
@@ -39,4 +50,4 @@ Na primeira rodada do Teste 3, o executor falhou ao iniciar com `Win32Exception:
 
 ## Para fechar a #9
 
-Falta conferir, com a janela do Nexo, (a) a oferta de restauração na abertura seguinte depois de encerrar o executor e (b) a ausência de alerta depois de recusar o UAC. Isso exige o Ollama (ou outro caminho que dispare `set_dns` pelo Nexo) ou a validação no PC de teste do Victor. Também falta a validação da transação numa VM Windows com snapshot, prevista no critério original da #9 e na #8.
+Os três critérios da validação no PC (prazo, recusa do UAC e executor encerrado com restauração na abertura seguinte) passaram. Resta apenas a transação numa VM Windows com snapshot, prevista no critério original da #9 e já acompanhada na #8; ela não depende de código novo da #9.
