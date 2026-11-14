@@ -45,6 +45,28 @@ internal static class BasicOptimizationChecks
             check(BasicOptimizationService.ParseDiskResult("{\"success\":true,\"data\":[]}") == "Skipped" && BasicOptimizationService.ParseDiskResult("{\"success\":false}") == "Failed" && BasicOptimizationService.ParseDiskResult("bad") == "Unknown", "Otimização: distingue disco inelegível, falha e saída desconhecida");
             var protectedRoot = await new BasicOptimizationService([Path.Combine(temp, "Downloads")], audit.Add).RunAsync(null, CancellationToken.None);
             check(protectedRoot.RemovedFiles == 0 && protectedRoot.Status == "Partial" && File.Exists(Path.Combine(temp, "Downloads", "old.tmp")), "Otimização: valida exclusões também nos ancestrais da raiz");
+            var deniedRoot = Path.Combine(root, "denied");
+            var denied = Path.Combine(deniedRoot, "old.tmp"); Old(denied);
+            var deniedAudit = new List<OptimizationAudit>();
+            try
+            {
+                var deniedResult = await new BasicOptimizationService([deniedRoot], a =>
+                {
+                    deniedAudit.Add(a);
+                    // Exercise a real native disposition error after the handle has been validated.
+                    if (a.Outcome == "Deleting") File.SetAttributes(denied, FileAttributes.ReadOnly);
+                }).RunAsync(null, CancellationToken.None);
+                check(deniedResult.Status == "Partial" && deniedResult.RemovedFiles == 0 && File.Exists(denied) && deniedAudit.Any(a => a.Outcome == "Unavailable"), "Otimização: erro nativo de exclusão preserva arquivo e produz Partial auditado");
+            }
+            finally { if(File.Exists(denied)) File.SetAttributes(denied, FileAttributes.Normal); }
+            var lockRoot = Path.Combine(root, "lock-only");
+            var lockOnly = Path.Combine(lockRoot, "old.tmp"); Old(lockOnly);
+            var lockedAudit = new List<OptimizationAudit>();
+            using (var lockHandle = new FileStream(lockOnly, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                var lockResult = await new BasicOptimizationService([lockRoot], lockedAudit.Add).RunAsync(null, CancellationToken.None);
+                check(lockResult.Status == "Completed" && lockResult.SkippedFiles == 1 && File.Exists(lockOnly) && lockedAudit.Any(a => a.Outcome == "Locked"), "Otimização: arquivo em uso é skip esperado e não falha operacional");
+            }
             var cancelRoot = Path.Combine(root, "cancel-between-files");
             Old(Path.Combine(cancelRoot, "first.tmp")); Old(Path.Combine(cancelRoot, "second.tmp"));
             using var midCancel = new CancellationTokenSource();

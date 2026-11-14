@@ -67,7 +67,8 @@ internal static class SafeTemporaryFiles
                         continue;
                     }
                     using var file = CreateFile(path, Delete | ReadAttributes, 1, IntPtr.Zero, OpenExisting, OpenReparsePoint, IntPtr.Zero);
-                    if (file.IsInvalid || !GetFileInformationByHandle(file, out var info)) { record(path, "LockedOrUnavailable", 0); continue; }
+                    if (file.IsInvalid) { record(path, NativeFailureOutcome(), 0); continue; }
+                    if (!GetFileInformationByHandle(file, out var info)) { record(path, "Unavailable", 0); continue; }
                     if ((info.Attributes & (uint)(FileAttributes.ReparsePoint | FileAttributes.Directory | FileAttributes.ReadOnly | FileAttributes.System)) != 0
                         || info.NumberOfLinks != 1) { record(path, "Protected", 0); continue; }
                     if (FileTime(info.LastWriteTime) >= cutoff || FileTime(info.CreationTime) >= cutoff) { record(path, "Recent", 0); continue; }
@@ -75,7 +76,7 @@ internal static class SafeTemporaryFiles
                     // A durable intent must be accepted before an irreversible deletion.
                     record(path, "Deleting", 0);
                     var disposition = new Disposition { DeleteFile = true };
-                    if (!SetFileInformationByHandle(file, 4, ref disposition, (uint)Marshal.SizeOf<Disposition>())) { record(path, "LockedOrUnavailable", 0); continue; }
+                    if (!SetFileInformationByHandle(file, 4, ref disposition, (uint)Marshal.SizeOf<Disposition>())) { record(path, NativeFailureOutcome(), 0); continue; }
                     var length = ((long)info.SizeHigh << 32) | info.SizeLow;
                     file.Dispose();
                     record(path, "Completed", length);
@@ -85,6 +86,9 @@ internal static class SafeTemporaryFiles
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { record(directory, "Unavailable", 0); }
     }
+
+    // Only explicit Windows sharing/lock violations are expected skips; ACL and other native errors are operational failures.
+    private static string NativeFailureOutcome() => Marshal.GetLastPInvokeError() is 32 or 33 ? "Locked" : "Unavailable";
 
     private static DateTime FileTime(System.Runtime.InteropServices.ComTypes.FILETIME value) => DateTime.FromFileTimeUtc(((long)value.dwHighDateTime << 32) | (uint)value.dwLowDateTime);
     [StructLayout(LayoutKind.Sequential)] private struct FileInfo
