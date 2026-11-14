@@ -184,7 +184,7 @@ internal static class HardwareSensorChecks
                 var isTemperature = script == HardwareSensors.TemperatureScript;
                 timeouts[isTemperature ? "temperature" : "storage"] = timeout;
                 return isTemperature ? temperature(script) : storage(script);
-            }, token, () => Now);
+            }, token, () => Now, _ => temperature(HardwareSensors.TemperatureScript));
             if (!task.Wait(TimeSpan.FromSeconds(10))) throw new TimeoutException("Collect não terminou: as consultas não foram iniciadas juntas.");
             return snapshot;
         }
@@ -194,9 +194,9 @@ internal static class HardwareSensorChecks
             && stuckDisks.Storage!.Detail == $"O Windows não informou os discos físicos em {HardwareSensors.StorageTimeoutSeconds} s." && stuckDisks.Storage.Time == Now
             && stuckDisks.Warnings.SequenceEqual(["Estado dos discos: " + stuckDisks.Storage.Detail]),
             "Sensores independentes: disco travado fica indisponível pelo prazo e a temperatura lida continua no registro");
-        check(timeouts["temperature"] == HardwareSensors.TemperatureTimeoutSeconds && timeouts["storage"] == HardwareSensors.StorageTimeoutSeconds
+        check(!timeouts.ContainsKey("temperature") && timeouts["storage"] == HardwareSensors.StorageTimeoutSeconds
             && HardwareSensors.TemperatureTimeoutSeconds + HardwareSensors.StorageTimeoutSeconds > 0 && HardwareSensors.StorageTimeoutSeconds <= 20,
-            "Sensores independentes: cada consulta recebe o próprio prazo");
+            "Sensores independentes: somente discos iniciam PowerShell e recebem o próprio prazo");
 
         var brokenWmi = Collect(_ => Task.FromException<string>(new InvalidOperationException("O Windows não concluiu a operação. WMI travou")), _ => Task.FromResult(StorageJson));
         check(brokenWmi.CpuTemperature!.State == "error" && brokenWmi.CpuTemperature.Detail.Contains("WMI travou") && brokenWmi.CpuTemperatureC == null
@@ -276,7 +276,8 @@ internal static class HardwareSensorChecks
         var snapshot = new HealthSnapshot();
         HardwareSensors.Collect(snapshot, (script, _, _) =>
             Execute($"$temperatureScenario='{temperatureScenario}'; $storageScenario='{storageScenario}'\n" + Fakes + "\n" + script, seconds ?? 60),
-            CancellationToken.None, () => Now).GetAwaiter().GetResult();
+            CancellationToken.None, () => Now, _ =>
+                Execute($"$temperatureScenario='{temperatureScenario}'; $storageScenario='{storageScenario}'\n" + Fakes + "\n" + HardwareSensors.TemperatureScript, seconds ?? 60)).GetAwaiter().GetResult();
         return snapshot;
     }
 

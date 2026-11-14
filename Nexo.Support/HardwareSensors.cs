@@ -10,17 +10,17 @@ public sealed record StorageReading(string State, string Source, DateTimeOffset 
 public static class HardwareSensors
 {
     public const int MaxPhysicalDisks = 16;
-    public const string TemperatureSource = "Libre Hardware Monitor (WMI root/LibreHardwareMonitor)";
+    public const string TemperatureSource = "Libre Hardware Monitor (biblioteca embutida no Nexo)";
     public const string StorageSource = "Windows Storage (Get-PhysicalDisk)";
     public const double MaxPlausibleCelsius = 125;
     private static readonly string[] PackageSensors = ["CPU Package", "Package", "Core (Tdie)", "Core (Tctl/Tdie)"];
     private static readonly string[] AlertStatuses = ["Degraded", "Stressed", "Predictive Failure", "Error", "Non-Recoverable Error", "No Contact", "Lost Communication", "Aborted", "Supporting Entity in Error", "Failed Media", "Split", "Stale Metadata", "IO Error", "Unrecognized Metadata", "Transient Error", "Not Usable"];
     private static readonly string[] NormalStatuses = ["OK", "Online", "In Service"];
 
-    // Temperatura e discos são consultas separadas, cada uma no próprio processo e com o próprio prazo (#19): um
-    // Get-PhysicalDisk travado (RAID, USB) não pode apagar uma temperatura válida, nem o contrário.
+    // A temperatura usa a biblioteca embutida; os discos usam PowerShell. Cada fonte tem o próprio prazo (#19).
     public const int TemperatureTimeoutSeconds = 10;
     public const int StorageTimeoutSeconds = 15;
+    // Script legado mantido apenas como fixture das verificações de compatibilidade. A coleta real não usa WMI.
     // Só os sensores de pacote ou die entram, antes do corte de 32: numa CPU com muitos núcleos, "CPU Package" vinha
     // depois do 32º sensor de núcleo e a leitura virava no_sensor.
     internal const string TemperatureScript = """
@@ -51,10 +51,10 @@ public static class HardwareSensors
     /// Lê temperatura e discos em paralelo, cada um com o próprio prazo e a própria falha (#19). O resultado é aplicado
     /// depois das duas consultas, na mesma ordem, para a lista de avisos não ser escrita por duas tarefas ao mesmo tempo.
     /// </summary>
-    public static async Task Collect(HealthSnapshot snapshot, Func<string, int, CancellationToken, Task<string>> run, CancellationToken token, Func<DateTimeOffset>? clock = null)
+    public static async Task Collect(HealthSnapshot snapshot, Func<string, int, CancellationToken, Task<string>> run, CancellationToken token, Func<DateTimeOffset>? clock = null, Func<CancellationToken, Task<string>>? readTemperature = null)
     {
         var now = clock ?? (() => DateTimeOffset.UtcNow);
-        var temperature = Attempt(() => run(TemperatureScript, TemperatureTimeoutSeconds, token), token);
+        var temperature = Attempt(() => (readTemperature ?? EmbeddedCpuTemperature.ReadAsync)(token), token);
         var storage = Attempt(() => run(StorageScript, StorageTimeoutSeconds, token), token);
         // Attempt só deixa subir o cancelamento pedido; WhenAll observa as duas tarefas mesmo quando ele acontece.
         await Task.WhenAll(temperature, storage);
@@ -149,6 +149,8 @@ public static class HardwareSensors
         if (!(element.TryGetProperty("Available", out var available) && available.ValueKind == JsonValueKind.True))
         {
             var error = Text(element, "Error");
+            if (element.TryGetProperty("DriverMissing", out var missing) && missing.ValueKind == JsonValueKind.True)
+                return new TemperatureReading("no_source", Source: TemperatureSource, Time: time, Detail: error);
             return error.Contains("0x8004100e", StringComparison.OrdinalIgnoreCase) || error.Contains("0x80041010", StringComparison.OrdinalIgnoreCase) || error.Contains("InvalidNamespace", StringComparison.OrdinalIgnoreCase) || error.Contains("InvalidClass", StringComparison.OrdinalIgnoreCase)
                 ? new TemperatureReading("no_source", Source: TemperatureSource, Time: time, Detail: "Libre Hardware Monitor não está em execução ou não publica sensores por WMI.")
                 : new TemperatureReading("error", Source: TemperatureSource, Time: time, Detail: "O Libre Hardware Monitor não respondeu: " + Limit(error));
@@ -158,10 +160,12 @@ public static class HardwareSensors
             .Where(s => PackageSensors.Contains(s.Name, StringComparer.OrdinalIgnoreCase))
             .OrderBy(s => Array.FindIndex(PackageSensors, n => n.Equals(s.Name, StringComparison.OrdinalIgnoreCase))).ThenBy(s => s.Identifier, StringComparer.Ordinal)
             .ToArray();
-        if (sensors.Length == 0) return new TemperatureReading("no_sensor", Source: TemperatureSource, Time: time, Detail: "O Libre Hardware Monitor não expôs sensor de pacote ou die da CPU.");
+        if (sensors.Length == 0) return new TemperatureReading("no_sensor", Source: TemperatureSource, Time: time, Detail: "O sensor embutido não expôs temperatura de pacote ou die da CPU. O acesso ao hardware pode exigir privilégios de administrador.");
         foreach (var sensor in sensors)
             if (sensor.Value is { } value && double.IsFinite(value) && value > 0 && value <= MaxPlausibleCelsius)
                 return new TemperatureReading("read", Math.Round(value, 1), sensor.Name + " (" + sensor.Identifier + ")", TemperatureSource, time);
+        if (sensors.Any(s => s.Value == 0))
+            return new TemperatureReading("invalid", Source: TemperatureSource, Time: time, Detail: "O sensor retornou zero, sem temperatura válida; a leitura foi descartada. Mesmo instalado, o driver pode estar sem permissão de acesso ao hardware para o Nexo.");
         return new TemperatureReading("invalid", Source: TemperatureSource, Time: time, Detail: $"O sensor {sensors[0].Name} informou valor ausente ou fora de 0–{MaxPlausibleCelsius:F0} °C; a leitura foi descartada.");
     }
 

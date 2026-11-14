@@ -20,4 +20,4 @@
 <ItemGroup><Compile Include="../Nexo.Support/ServiceEvents.cs" Link="ServiceEvents.cs"/><Compile Include="../Nexo.Support/TurnFacts.cs" Link="TurnFacts.cs"/><Compile Include="../Nexo.Support/QuickReplies.cs" Link="QuickReplies.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/NetworkRecovery.cs" Link="NetworkRecovery.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/NetworkDecisionChannel.cs" Link="NetworkDecisionChannel.cs"/></ItemGroup>
-</Project>
+<ItemGroup><Compile Include="../Nexo.Support/EmbeddedCpuTemperature.cs" Link="EmbeddedCpuTemperature.cs"/><PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" /></ItemGroup></Project>
