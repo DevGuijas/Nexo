@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Time.Testing;
 using Nexo.Support;
 using System.Diagnostics;
 namespace Nexo.Checks;
@@ -77,6 +78,19 @@ internal static class BasicOptimizationChecks
             check(unknownDisk.Status == "Canceled" && unknownDisk.DiskStatus == "Unknown", "Otimização: cancelamento durante operação nativa não inventa conclusão nem rollback");
             var diskFailure = await new BasicOptimizationService([], audit.Add, (_, _) => Task.FromResult("{\"success\":true,\"data\":[{\"Status\":\"Failed\"}]}")).RunAsync(null, CancellationToken.None);
             check(diskFailure.Status == "Partial" && diskFailure.DiskStatus == "Failed", "Otimização: falha nativa não vira sucesso geral");
+            var timedRoot = Path.Combine(root, "timed"); var timedFile = Path.Combine(timedRoot, "old.tmp"); Old(timedFile);
+            var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+            var stageAudit = new List<OptimizationAudit>();
+            var timedResult = await new BasicOptimizationService([timedRoot], a => { stageAudit.Add(a); if(a.Outcome == "Deleting") clock.Advance(TimeSpan.FromSeconds(2)); },
+                (_, _) => { clock.Advance(TimeSpan.FromSeconds(3)); return Task.FromResult("{\"success\":true,\"data\":[{\"Drive\":\"C\",\"Status\":\"Completed\"},{\"Drive\":\"D\",\"Status\":\"Skipped\"},{\"Drive\":\"E\",\"Status\":\"Failed\",\"Error\":\"fixture error\"}]}"); }, clock).RunAsync(null, CancellationToken.None);
+            check(timedResult.Stages.Count == 2, "Otimização: retorna resumo das duas etapas executadas");
+            var cleanupStage = timedResult.Stages.Single(s => s.Stage == "Cleanup");
+            var diskStage = timedResult.Stages.Single(s => s.Stage == "Disk");
+            check(cleanupStage.Duration == TimeSpan.FromSeconds(2) && cleanupStage.CompletedItems == 1 && cleanupStage.LogicalBytesRemoved == 5 && cleanupStage.ErrorCount == 0, "Otimização: etapa limpeza registra duração monotônica e contadores observados");
+            check(diskStage.Duration == TimeSpan.FromSeconds(3) && diskStage.CompletedItems == 1 && diskStage.SkippedItems == 1 && diskStage.ErrorCount == 1 && diskStage.LogicalBytesRemoved == null && diskStage.Errors.Contains("E: fixture error"), "Otimização: etapa disco registra volumes, tempo e erros sem alegar bytes liberados");
+            check(stageAudit.FindIndex(a => a.Stage?.Stage == "Cleanup") < stageAudit.FindIndex(a => a.Action == "OptimizeVolumes" && a.Outcome == "Started") && stageAudit.Count(a => a.Stage != null) == 2 && stageAudit.Where(a => a.Stage != null).Select(a => a.Stage).SequenceEqual(timedResult.Stages), "Otimização: auditoria preserva os mesmos resumos por etapa do resultado");
+            var deniedDisk = await new BasicOptimizationService([], _ => {}, (_, _) => Task.FromResult("{\"success\":false,\"denied\":true,\"error\":\"UAC recusado\"}")).RunAsync(null, CancellationToken.None);
+            check(deniedDisk.Status == "Partial" && deniedDisk.DiskStatus == "Denied" && deniedDisk.Stages.Single(s => s.Stage == "Disk") is { ErrorCount: 1, CompletedItems: null, LogicalBytesRemoved: null }, "Otimização: UAC recusado é parcial explícito sem inventar contagem de volumes");
             var paused = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
             var first = new BasicOptimizationService([], audit.Add, (_, _) => paused.Task).RunAsync(null, CancellationToken.None);
             bool duplicate = false;

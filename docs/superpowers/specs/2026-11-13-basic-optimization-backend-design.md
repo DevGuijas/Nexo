@@ -21,3 +21,10 @@ The production constructor with no disk executor reports disk skipped. The calle
 Fake temporary directory trees cover age, locked files, protected names, root/nested junctions, audit failure and cancellation. A separate PowerShell process replaces every storage command with fixture functions to verify native selection and failure reporting without invoking native maintenance. Run focused checks, complete checks and WPF Release build.
 
 Microsoft reference for default media-specific operation: https://learn.microsoft.com/powershell/module/storage/optimize-volume
+## Per-stage evidence
+
+`BasicOptimizationResult.Stages` and `OptimizationAudit.Stage` expose the same typed Cleanup/Disk summaries. Each has an optional observed start time, monotonic elapsed duration, completed/skipped item counts, logical file bytes removed, error count and local error details. Cleanup items are filesystem entries (including inaccessible roots); errors are counted separately from expected skips. Detailed cleanup errors are bounded to the first 100 while ErrorCount remains the full count. The cleanup summary is persisted before native disk work begins. Cancellation preserves completed cleanup evidence and marks unconfirmed native work Unknown.
+
+Disk logical bytes are always null: no free-space delta is measured. Unknown/denied native execution has null volume counts. Explicit UAC refusal and access-denied executor exceptions produce Denied and overall Partial. The native script records skipped volumes and errors as well as completed volumes.
+
+Real cleanup, UAC and native disk validation must be performed only in a disposable Windows VM. Host verification uses fake directories and shadowed PowerShell storage commands; it does not establish real disk optimization success.
