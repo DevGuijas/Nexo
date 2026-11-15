@@ -17,12 +17,13 @@ internal static class NativeOptimizationChecks
                 [pscustomobject]@{DriveLetter='E';DriveType='Removable';HealthStatus='Healthy';OperationalStatus=@('OK');FileSystemType='NTFS'},
                 [pscustomobject]@{DriveLetter='F';DriveType='Fixed';HealthStatus='Healthy';OperationalStatus=@('OK');FileSystemType='FAT32'},
                 [pscustomobject]@{DriveLetter='G';DriveType='Fixed';HealthStatus='Healthy';OperationalStatus=@('OK');FileSystemType='NTFS'},
-                [pscustomobject]@{DriveLetter='H';DriveType='Fixed';HealthStatus='Healthy';OperationalStatus=@('OK');FileSystemType='ReFS'})
+                [pscustomobject]@{DriveLetter='H';DriveType='Fixed';HealthStatus='Healthy';OperationalStatus=@('OK');FileSystemType='ReFS'},
+                [pscustomobject]@{DriveLetter='I';DriveType='Fixed';HealthStatus='Healthy';OperationalStatus=@('OK');FileSystemType='NTFS'})
             }
             function Get-Partition { param([char]$DriveLetter) [pscustomobject]@{Letter=$DriveLetter} }
             function Get-Disk {
                 [CmdletBinding()] param([Parameter(ValueFromPipeline=$true)]$InputObject)
-                process { [pscustomobject]@{HealthStatus=$(if($InputObject.Letter -eq 'G'){'Warning'}else{'Healthy'});IsOffline=$false;IsReadOnly=$false;OperationalStatus=@('Online')} }
+                process { [pscustomobject]@{HealthStatus=$(if($InputObject.Letter -eq 'G'){'Warning'}else{'Healthy'});IsOffline=$false;IsReadOnly=$false;OperationalStatus=@('Online');FriendlyName=$(if($InputObject.Letter -eq 'I'){'VBOX HARDDISK'}else{'Physical NVMe'});BusType='SATA'} }
             }
             function Optimize-Volume {
                 [CmdletBinding()] param([char]$DriveLetter)
@@ -46,5 +47,6 @@ internal static class NativeOptimizationChecks
         var outcomes=result.RootElement.GetProperty("Results").EnumerateArray().ToArray();
         check(calls.SequenceEqual(new[]{"C","H"}) && outcomes.Any(v=>v.GetProperty("Drive").GetString()=="C" && v.GetProperty("Status").GetString()=="Completed"), "Otimização nativa: somente volumes fixos saudáveis suportados recebem operação padrão Windows");
         check(outcomes.Any(v=>v.GetProperty("Drive").GetString()=="G" && v.GetProperty("Status").GetString()=="Skipped") && outcomes.Any(v=>v.GetProperty("Drive").GetString()=="H" && v.GetProperty("Status").GetString()=="Failed"), "Otimização nativa: disco não saudável é ignorado e erro nativo é registrado");
+        check(!calls.Contains("I") && outcomes.Any(v=>v.GetProperty("Drive").GetString()=="I" && v.GetProperty("Status").GetString()=="Skipped"), "Otimização nativa: disco VirtualBox é ignorado para evitar crescimento do VDI");
     }
 }

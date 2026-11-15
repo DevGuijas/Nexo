@@ -199,7 +199,9 @@ public sealed class BasicOptimizationService
             try {
                 $disks=@(Get-Partition -DriveLetter $letter -ErrorAction Stop | Get-Disk -ErrorAction Stop)
                 if($disks.Count -ne 1 -or $disks[0].HealthStatus -ne 'Healthy' -or $disks[0].IsOffline -or $disks[0].IsReadOnly -or
-                   @($disks[0].OperationalStatus) -notcontains 'Online') {
+                   @($disks[0].OperationalStatus) -notcontains 'Online' -or
+                   [string]$disks[0].BusType -in @('Virtual','File Backed Virtual') -or
+                   [string]$disks[0].FriendlyName -match 'VBOX|VMWARE|VIRTUAL|QEMU|VIRTIO|XEN|PARALLELS') {
                     $results += [pscustomobject]@{Drive=[string]$letter;Status='Skipped'}; continue
                 }
                 Optimize-Volume -DriveLetter $letter -ErrorAction Stop

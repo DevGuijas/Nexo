@@ -4,7 +4,7 @@ Implements the orchestrator-delegated safe backend only. Entry point is an expli
 
 ## Approach
 
-Use a deterministic service with Windows handle-based temporary-file deletion and an injected privileged native-disk executor. A recursive shell cleanup was rejected because pathname validation alone cannot prevent junction replacement races; assistant-driven cleanup was rejected because this is a direct action. Native Optimize-Volume chooses the appropriate operation for its media without forced defragmentation or trim flags.
+Use a deterministic service with Windows handle-based temporary-file deletion and an injected privileged native-disk executor. A recursive shell cleanup was rejected because pathname validation alone cannot prevent junction replacement races; assistant-driven cleanup was rejected because this is a direct action. Native Optimize-Volume chooses the appropriate operation for its media without forced defragmentation or trim flags. Virtual disk models and virtual bus types are skipped: a VirtualBox VDI grew by roughly 24 GB during the first real lab run and exhausted the host disk before the operation returned.
 
 ## Safety and limits
 

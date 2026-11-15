@@ -16,6 +16,9 @@ public partial class App : Application
         {
             var store = new Store(preview ? Path.Combine(AppContext.BaseDirectory, ".preview-data") : null, directAccess: true);
             var window = new MainWindow(store);
+            var workArea = SystemParameters.WorkArea;
+            window.Width = Math.Min(window.Width, Math.Max(window.MinWidth, workArea.Width));
+            window.Height = Math.Min(window.Height, Math.Max(window.MinHeight, workArea.Height));
             MainWindow = window;
             window.Show();
             if (e.Args.Contains("--screenshot")) window.CapturePreview();
