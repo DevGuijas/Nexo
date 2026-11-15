@@ -33,6 +33,13 @@ public partial class MainWindow : Window
     private System.Windows.Forms.NotifyIcon? trayIcon;
     private System.Drawing.Icon? trayImage;
     private bool exitRequested;
+    private CancellationTokenSource? optimizationCancellation;
+    private bool optimizationRunning;
+    private string optimizationStatus = "Nenhuma otimização iniciada nesta sessão.";
+    private TextBlock? optimizationProgressView;
+    private Button? optimizationStartView;
+    private Button? optimizationCancelView;
+    private readonly object optimizationAuditSync = new();
     public MainWindow(Store store)
     {
         InitializeComponent(); Title = "Nexo " + AppVersion.Current + " • Suporte inteligente"; this.store = store; support = new SupportService(store);
@@ -55,6 +62,13 @@ public partial class MainWindow : Window
         };
         Closing += (_, e) =>
         {
+            if (optimizationRunning)
+            {
+                e.Cancel = true;
+                exitRequested = false;
+                MessageBox.Show(this, "Aguarde a manutenção em andamento. Use Cancelar em Ferramentas para interromper as próximas etapas; uma manutenção de disco já iniciada precisa terminar antes de encerrar o Nexo.", "Ferramentas em andamento");
+                return;
+            }
             if (busy)
             {
                 e.Cancel = true;
@@ -139,7 +153,7 @@ public partial class MainWindow : Window
             if (button.Tag is not string section || button.Content is not StackPanel previous) continue;
             var label = previous.Children.OfType<TextBlock>().Last().Text;
             var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            row.Children.Add(UiIcons.Create(section switch { "chat" => "chat", "health" => "health", "history" => "history", "tickets" => "tickets", "users" => "users", "settings" => "settings", "audit" => "audit", _ => "brand" }, 19));
+            row.Children.Add(UiIcons.Create(section switch { "chat" => "chat", "health" => "health", "history" => "history", "tickets" => "tickets", "tools" => "tools", "users" => "users", "settings" => "settings", "audit" => "audit", _ => "brand" }, 19));
             row.Children.Add(new TextBlock { Text = label, Margin = new Thickness(12, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center });
             button.Content = row;
             button.Style = (Style)FindResource("NavigationButton");
@@ -281,7 +295,7 @@ public partial class MainWindow : Window
         }
         if (target == "chat") return;
         PageContent.Children.Clear();
-        switch (target) { case "profile": Profile(); break; case "users": Users(); break; case "history": History(); break; case "tickets": Tickets(); break; case "health": Health(); break; case "settings": Settings(); break; case "audit": Audits(); break; }
+        switch (target) { case "profile": Profile(); break; case "users": Users(); break; case "history": History(); break; case "tickets": Tickets(); break; case "health": Health(); break; case "tools": Tools(); break; case "settings": Settings(); break; case "audit": Audits(); break; }
         PageScroll.ScrollToTop();
     }
     private void RefreshChatActions()
@@ -821,6 +835,59 @@ public partial class MainWindow : Window
             panel.Children.Add(Action("Exportar relatório .txt", (_, _) => Guard(() => { var dialog = new SaveFileDialog { FileName = ticket.Id + ".txt", Filter = "Relatório de texto|*.txt" }; if (dialog.ShowDialog(this) == true) { File.WriteAllText(dialog.FileName, ticket.Report); store.Log(user, "Relatório exportado: " + ticket.Id); MessageBox.Show(this, "Relatório exportado. Anexe-o ao canal de atendimento da sua TI."); } }))); PageContent.Children.Add(Card(panel));
         }
     }
+    private void UpdateToolsView()
+    {
+        if (page != "tools") return;
+        if (optimizationProgressView != null) optimizationProgressView.Text = optimizationStatus;
+        if (optimizationStartView != null) optimizationStartView.IsEnabled = !optimizationRunning;
+        if (optimizationCancelView != null) optimizationCancelView.IsEnabled = optimizationRunning;
+    }
+    private void Tools()
+    {
+        Heading("Ferramentas", "Ações locais iniciadas por você, com resultado e histórico visíveis.");
+
+        var optimizePanel = new StackPanel();
+        optimizePanel.Children.Add(SectionHeading("performance", "Otimização básica"));
+        optimizePanel.Children.Add(Text("Remove arquivos temporários com mais de sete dias das pastas temporárias do perfil e do Windows. Pula arquivos bloqueados e protegidos; preserva Documentos, Downloads, caches do navegador e a Lixeira. Depois, solicita ao Windows a manutenção nativa dos discos elegíveis; discos virtuais são ignorados.", 13, "Secondary"));
+        optimizePanel.Children.Add(Text("O Windows pode pedir autorização de administrador uma vez para a etapa de disco. Arquivos removidos não podem ser recuperados pelo Nexo.", 12, "Secondary"));
+        optimizationProgressView = Text(optimizationStatus, 12, "Secondary"); optimizationProgressView.Margin = new Thickness(0, 12, 0, 10);
+        optimizePanel.Children.Add(optimizationProgressView);
+        var optimizeActions = new WrapPanel();
+        optimizationCancelView = Action("Cancelar próximas etapas", (_, _) => optimizationCancellation?.Cancel());
+        optimizationStartView = Action("Otimizar PC", async (_, _) => await GuardAsync(async () =>
+        {
+            if (optimizationRunning) return;
+            optimizationCancellation = new CancellationTokenSource(); optimizationRunning = true;
+            optimizationStatus = "Iniciando otimização..."; UpdateToolsView();
+            try
+            {
+                var auditPath = Path.Combine(store.Root, "optimization-audit.ndjson");
+                var service = new BasicOptimizationService(item =>
+                {
+                    lock (optimizationAuditSync) File.AppendAllText(auditPath, JsonSerializer.Serialize(item) + Environment.NewLine);
+                }, OptimizationDiskExecutor.RunAsync);
+                var progress = new Progress<OptimizationProgress>(item => { optimizationStatus = item.Message; UpdateToolsView(); });
+                var result = await service.RunAsync(progress, optimizationCancellation.Token);
+                var cleanup = result.Stages.First(stage => stage.Stage == "Cleanup");
+                var disk = result.Stages.First(stage => stage.Stage == "Disk");
+                var diskOutcome = disk.Status switch { "Completed" => "concluído", "Skipped" => "sem volume elegível", "Denied" => "autorização negada", "Failed" => "falhou", _ => "resultado não confirmado" };
+                var overall = result.Status switch { "Completed" => "concluído", "Partial" => "parcial", "Canceled" => "cancelado", _ => "resultado não confirmado" };
+                var details = string.Join("; ", result.Stages.SelectMany(stage => stage.Errors).Take(3));
+                optimizationStatus = $"Resultado {overall}. Limpeza: {cleanup.Duration.TotalSeconds:F1}s, {cleanup.CompletedItems} arquivo(s) removido(s), {cleanup.SkippedItems} ignorado(s), {cleanup.LogicalBytesRemoved} bytes lógicos removidos, {cleanup.ErrorCount} erro(s). " +
+                    $"Disco: {diskOutcome}, {disk.Duration.TotalSeconds:F1}s, {disk.CompletedItems?.ToString() ?? "?"} volume(s) concluído(s), {disk.ErrorCount} erro(s)." +
+                    (details.Length == 0 ? "" : " Detalhes: " + details);
+                UpdateToolsView();
+                store.Log(user, $"Otimização básica: {result.Status}; {result.RemovedFiles} arquivos; disco {result.DiskStatus}");
+            }
+            finally { optimizationRunning = false; optimizationCancellation.Dispose(); optimizationCancellation = null; UpdateToolsView(); }
+        }), true);
+        optimizeActions.Children.Add(optimizationStartView);
+        optimizeActions.Children.Add(optimizationCancelView);
+        optimizePanel.Children.Add(optimizeActions);
+        optimizePanel.Children.Add(Text("Se a etapa de disco já começou, o Nexo aguarda seu término para informar o resultado. A manutenção executada não é revertida pelo cancelamento.", 11, "Subtle"));
+        PageContent.Children.Add(Card(optimizePanel));
+        UpdateToolsView();
+    }
     private void Settings()
     {
         Heading("Configurações", "Um agente local conectado às ferramentas deste computador.");
@@ -1004,6 +1071,14 @@ public partial class MainWindow : Window
             throw new InvalidOperationException("As três sondagens precisam de opções independentes desligadas por padrão.");
         await Capture("nexo-health-settings.png");
         Width = 1060; Height = 720; UpdateLayout(); await Capture("nexo-health-settings-small.png");
+        Width = 1380; Height = 900; UpdateLayout();
+        ShowPage("tools");
+        var toolButtons = Descendants<Button>(PageContent).Select(b => b.Content?.ToString()).ToArray();
+        if (!toolButtons.Contains("Otimizar PC"))
+            throw new InvalidOperationException("A otimização não abriu em Ferramentas.");
+        await Capture("nexo-tools.png");
+        Width = 1060; Height = 720; UpdateLayout(); await Capture("nexo-tools-small.png");
+        Width = 980; Height = 680; UpdateLayout(); await Capture("nexo-tools-compact.png");
         Width = 1380; Height = 900; UpdateLayout();
         foreach (var (target, file) in new[] { ("history", "nexo-history-empty.png"), ("tickets", "nexo-tickets.png"),
             ("audit", "nexo-audit.png"), ("profile", "nexo-profile.png") })
