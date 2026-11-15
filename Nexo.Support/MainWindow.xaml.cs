@@ -33,12 +33,19 @@ public partial class MainWindow : Window
     private System.Windows.Forms.NotifyIcon? trayIcon;
     private System.Drawing.Icon? trayImage;
     private bool exitRequested;
+    private CancellationTokenSource? officeCancellation;
     private CancellationTokenSource? optimizationCancellation;
+    private bool officeRunning;
     private bool optimizationRunning;
+    private string officeStatus = "Nenhuma instalação iniciada nesta sessão.";
     private string optimizationStatus = "Nenhuma otimização iniciada nesta sessão.";
+    private TextBlock? officeProgressView;
     private TextBlock? optimizationProgressView;
+    private Button? officeInstallView;
+    private Button? officeCancelView;
     private Button? optimizationStartView;
     private Button? optimizationCancelView;
+    private readonly OfficeDeploymentService officeDeployment = new(new WindowsOfficeDeployment());
     private readonly object optimizationAuditSync = new();
     public MainWindow(Store store)
     {
@@ -62,11 +69,11 @@ public partial class MainWindow : Window
         };
         Closing += (_, e) =>
         {
-            if (optimizationRunning)
+            if (officeRunning || optimizationRunning)
             {
                 e.Cancel = true;
                 exitRequested = false;
-                MessageBox.Show(this, "Aguarde a manutenção em andamento. Use Cancelar em Ferramentas para interromper as próximas etapas; uma manutenção de disco já iniciada precisa terminar antes de encerrar o Nexo.", "Ferramentas em andamento");
+                MessageBox.Show(this, "Aguarde a etapa em andamento. Use Cancelar em Ferramentas para interromper a preparação; uma instalação ou manutenção já iniciada precisa terminar antes de encerrar o Nexo.", "Ferramentas em andamento");
                 return;
             }
             if (busy)
@@ -131,10 +138,16 @@ public partial class MainWindow : Window
             trayIcon.ContextMenuStrip?.Items[0].PerformClick();
             await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Background);
             if (!IsVisible) throw new InvalidOperationException("Abrir Nexo não restaurou a janela.");
+            Close();
+            if (IsVisible || trayIcon?.Visible != true || healthMonitor == null)
+                throw new InvalidOperationException("Fechar pela segunda vez não manteve o monitor na bandeja.");
+            trayIcon.ContextMenuStrip?.Items[0].PerformClick();
+            await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Background);
+            if (!IsVisible) throw new InvalidOperationException("A segunda abertura não restaurou a janela.");
             trayIcon.ContextMenuStrip?.Items[1].PerformClick();
             await System.Windows.Threading.Dispatcher.Yield(System.Windows.Threading.DispatcherPriority.Background);
             if (IsVisible || trayIcon != null) throw new InvalidOperationException("Encerrar Nexo não liberou janela e bandeja.");
-            File.WriteAllText(result, "Bandeja: fechar ocultou a janela e manteve o monitor; abrir restaurou; encerrar liberou o ícone.");
+            File.WriteAllText(result, "Bandeja: dois fechamentos ocultaram a janela e mantiveram o monitor; duas aberturas restauraram; encerrar liberou o ícone.");
             Application.Current.Shutdown();
         }
         catch (Exception ex)
@@ -349,7 +362,7 @@ public partial class MainWindow : Window
     }
     private void Health()
     {
-        Heading("Saúde do computador", "Leituras locais enquanto o Nexo está aberto. Achados são hipóteses até a função ser testada.");
+        Heading("Saúde do computador", "Leituras locais enquanto o Nexo está em execução. Achados são hipóteses até a função ser testada.");
         if (healthStore == null) { PageContent.Children.Add(Card(Text("Histórico operacional indisponível: " + healthError, 14, "Warning"))); return; }
         if (healthError != null) PageContent.Children.Add(Card(Text("Última falha de coleta: " + healthError, 13, "Warning")));
         if (healthMonitor?.LastError != null) PageContent.Children.Add(Card(Text("Monitoramento: " + healthMonitor.LastError, 13, "Warning")));
@@ -357,7 +370,7 @@ public partial class MainWindow : Window
         {
             var latest = healthStore.RecentSnapshots(DateTimeOffset.UtcNow.AddDays(-1), 1).FirstOrDefault();
             if (latest == null) PageContent.Children.Add(EmptyState("performance", "Aguardando a primeira leitura",
-                "A coleta começa quando esta janela abre. Os indicadores aparecem quando houver dados disponíveis."));
+                "A coleta começa quando o Nexo abre. Os indicadores aparecem quando houver dados disponíveis."));
             else
             {
                 var overview = new StackPanel();
@@ -838,13 +851,44 @@ public partial class MainWindow : Window
     private void UpdateToolsView()
     {
         if (page != "tools") return;
+        if (officeProgressView != null) officeProgressView.Text = officeStatus;
         if (optimizationProgressView != null) optimizationProgressView.Text = optimizationStatus;
+        if (officeInstallView != null) officeInstallView.IsEnabled = !officeRunning;
+        if (officeCancelView != null) officeCancelView.IsEnabled = officeRunning;
         if (optimizationStartView != null) optimizationStartView.IsEnabled = !optimizationRunning;
         if (optimizationCancelView != null) optimizationCancelView.IsEnabled = optimizationRunning;
     }
     private void Tools()
     {
         Heading("Ferramentas", "Ações locais iniciadas por você, com resultado e histórico visíveis.");
+
+        var officePanel = new StackPanel();
+        officePanel.Children.Add(SectionHeading("tools", "Pacote de trabalho completo"));
+        officePanel.Children.Add(Text(OfficeDeploymentService.LicenseNotice, 13, "Secondary"));
+        officePanel.Children.Add(Text("Ao clicar em Instalar Office, você confirma que leu o aviso acima. O download e a instalação seguem sem assistente de avanço; o Windows pode pedir autorização de administrador.", 12, "Secondary"));
+        officeProgressView = Text(officeStatus, 12, "Secondary"); officeProgressView.Margin = new Thickness(0, 12, 0, 10);
+        officePanel.Children.Add(officeProgressView);
+        var officeActions = new WrapPanel();
+        officeCancelView = Action("Cancelar espera", (_, _) => officeCancellation?.Cancel());
+        officeInstallView = Action("Instalar Office", async (_, _) => await GuardAsync(async () =>
+        {
+            if (officeRunning) return;
+            officeCancellation = new CancellationTokenSource(); officeRunning = true;
+            officeStatus = "Verificando requisitos..."; UpdateToolsView();
+            try
+            {
+                var progress = new Progress<OfficeDeploymentProgress>(item => { officeStatus = item.Message; UpdateToolsView(); });
+                var result = await officeDeployment.InstallAsync(true, progress, officeCancellation.Token);
+                officeStatus = result.Message; UpdateToolsView();
+                store.Log(user, "Instalação Office LTSC 2024: " + result.State + (result.ExitCode.HasValue ? " (código " + result.ExitCode + ")" : ""));
+            }
+            finally { officeRunning = false; officeCancellation.Dispose(); officeCancellation = null; UpdateToolsView(); }
+        }), true);
+        officeActions.Children.Add(officeInstallView);
+        officeActions.Children.Add(officeCancelView);
+        officePanel.Children.Add(officeActions);
+        officePanel.Children.Add(Text("Cancelar depois que o instalador iniciou interrompe somente a espera do Nexo; o Office pode continuar. Nesse caso, confira o resultado com a TI antes de repetir.", 11, "Subtle"));
+        PageContent.Children.Add(Card(officePanel));
 
         var optimizePanel = new StackPanel();
         optimizePanel.Children.Add(SectionHeading("performance", "Otimização básica"));
@@ -911,7 +955,7 @@ public partial class MainWindow : Window
             catch (Exception ex) { connectionStatus.Text = "Não foi possível verificar: " + ex.Message; }
         })); panel.Children.Add(connectionStatus); PageContent.Children.Add(Card(panel));
         var healthPanel = new StackPanel(); var monitorHeading = SectionHeading("health", "Monitoramento local"); monitorHeading.Margin = new Thickness(0, 0, 0, 8); healthPanel.Children.Add(monitorHeading);
-        healthPanel.Children.Add(Text("A coleta funciona enquanto o Nexo está aberto. A temperatura da CPU só aparece quando o Libre Hardware Monitor está em execução e publica o sensor por WMI. O estado dos discos é o informado pelo Windows, não um SMART completo.", 12, "Secondary"));
+        healthPanel.Children.Add(Text("A coleta funciona enquanto o Nexo está em execução. A leitura de temperatura usa um componente integrado; se o hardware ou o acesso ao sensor não permitir a leitura, ela aparece como indisponível. O estado dos discos é o informado pelo Windows, não um SMART completo.", 12, "Secondary"));
         var backgroundMode = Check(healthPanel, "Continuar monitorando em segundo plano ao fechar a janela", healthSettings.BackgroundMode);
         healthPanel.Children.Add(Text("Com esta opção, o Nexo fica na bandeja do Windows. Use 'Abrir Nexo' para voltar ou 'Encerrar Nexo' para parar a coleta. O monitor não executa correções sozinho.", 12, "Secondary"));
         var interval = Field(healthPanel, "Intervalo entre amostras (segundos: 10–3600)", healthSettings.IntervalSeconds.ToString());
@@ -1074,8 +1118,9 @@ public partial class MainWindow : Window
         Width = 1380; Height = 900; UpdateLayout();
         ShowPage("tools");
         var toolButtons = Descendants<Button>(PageContent).Select(b => b.Content?.ToString()).ToArray();
-        if (!toolButtons.Contains("Otimizar PC"))
-            throw new InvalidOperationException("A otimização não abriu em Ferramentas.");
+        if (!toolButtons.Contains("Instalar Office") || !toolButtons.Contains("Otimizar PC") ||
+            !Descendants<TextBlock>(PageContent).Any(t => t.Text.Contains("A licença por volume e a ativação são responsabilidade da TI")))
+            throw new InvalidOperationException("Ferramentas e aviso de licença não abriram.");
         await Capture("nexo-tools.png");
         Width = 1060; Height = 720; UpdateLayout(); await Capture("nexo-tools-small.png");
         Width = 980; Height = 680; UpdateLayout(); await Capture("nexo-tools-compact.png");
