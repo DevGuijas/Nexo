@@ -32,6 +32,8 @@ internal static class ValidationAnswerChecks
             await RepeatedRefusal(store, actor, assert);
             RepeatedGuidanceWithoutPassage(assert);
             MalwareSentences(assert);
+            ProcessPurposeSentences(assert);
+            await ProcessPurposeFlow(store, actor, assert);
             await MalwareFlow(store, actor, assert);
             StorageVolumes(assert);
             VolumesScript(assert);
@@ -63,6 +65,18 @@ internal static class ValidationAnswerChecks
         assert(!(onFinish.SystemMessages(1).LastOrDefault() ?? "").Contains("mesma recusa") && (onFinish.SystemMessages(2).LastOrDefault() ?? "").Contains("Esta é a mesma recusa da tentativa anterior")
             && (onFinish.SystemMessages(2).LastOrDefault() ?? "").Contains(quoted),
             "#93 recusa repetida: o caminho do finish_support também cita a frase na 2ª recusa pelo mesmo motivo");
+
+        var stubborn = new CapturingModel([Text(Stale), Text(Stale), Text(Stale), Text(StaleHonest)]);
+        var stopped = await Ask(store, actor, "meu pc ta lento", Tools(ResolvedReport), stubborn, consumeAll: false);
+        assert(stubborn.Calls == 3 && stopped.StartsWith("O que as consultas deste turno mostraram:", StringComparison.Ordinal)
+            && !stopped.Contains("A IA não conseguiu", StringComparison.Ordinal),
+            "#93 recusa repetida: a 3ª resposta idêntica encerra com os dados, sem pedir uma 4ª resposta ao modelo");
+
+        var stubbornFinish = new CapturingModel([Call("finish_support", new { message = Stale }), Call("finish_support", new { message = Stale }),
+            Call("finish_support", new { message = Stale }), Text(StaleHonest)]);
+        var finishStopped = await Ask(store, actor, "meu pc ta lento", Tools(ResolvedReport), stubbornFinish, consumeAll: false);
+        assert(stubbornFinish.Calls == 3 && finishStopped.StartsWith("O que as consultas deste turno mostraram:", StringComparison.Ordinal),
+            "#93 recusa repetida: finish_support idêntico também para na 3ª tentativa");
 
         // Motivos diferentes em seguida não contam como repetição.
         var different = new CapturingModel([Text(Stale), Text("O NexoMemTeste pode ser um vírus."), Text(StaleHonest)]);
@@ -125,6 +139,40 @@ internal static class ValidationAnswerChecks
         assert(asked.ValidateStatement("Verifique se o NexoMemTeste é malicioso no Microsoft Defender.", false) == null
             && InvestigationEvidence.MentionsMalware("o NexoMemTeste é vírus?") && !InvestigationEvidence.MentionsMalware("meu pc ta lento"),
             "#93 processo desconhecido: quando o usuário pergunta sobre vírus, a resposta sobre isso passa");
+    }
+
+    private static void ProcessPurposeSentences(Action<bool, string> assert)
+    {
+        var evidence = Observed(ActiveReport);
+        string[] refused =
+        [
+            "Esse processo pode estar sendo executado para testar a memória, mas ele não é um processo do sistema operacional ou de um software essencial.",
+            "O NexoMemTeste é uma ferramenta de diagnóstico de memória desenvolvida para verificar a integridade da RAM.",
+            "O NexoMemTeste serve para testar a memória RAM.",
+            "O processo NexoMemTeste não é um software essencial do Windows."
+        ];
+        string[] accepted =
+        [
+            "O NexoMemTeste PID 23132 usa 13591 MB.",
+            "O nome NexoMemTeste não informa para que serve o processo; confira o programa no Gerenciador de Tarefas.",
+            "Se você iniciou um teste de memória, confira o nome do programa no Gerenciador de Tarefas.",
+            "Você sabe se o NexoMemTeste é um teste que iniciou?"
+        ];
+        var wrong = refused.Where(text => evidence.ValidateStatement(text, false) != InvestigationEvidence.ProcessPurposeReason)
+            .Concat(accepted.Where(text => evidence.ValidateStatement(text, false) != null)).ToArray();
+        assert(wrong.Length == 0,
+            "#93 função do processo: consumo medido passa; finalidade e categoria inventadas são recusadas"
+            + (wrong.Length > 0 ? " (erradas: " + string.Join(" | ", wrong) + ")" : ""));
+    }
+
+    private static async Task ProcessPurposeFlow(Store store, Account actor, Action<bool, string> assert)
+    {
+        const string invented = "O NexoMemTeste pode estar sendo executado para testar a memória, mas não é um software essencial do Windows.";
+        const string honest = "O monitor mediu o NexoMemTeste PID 23132 com memória alta. Não sei para que serve esse programa; confira o nome e o local do arquivo no Gerenciador de Tarefas.";
+        var model = new CapturingModel([Text(invented), Text(honest)]);
+        var answer = await Ask(store, actor, "meu pc ta lento", Tools(ActiveReport), model);
+        assert(answer.StartsWith(honest, StringComparison.Ordinal) && (model.SystemMessages(1).LastOrDefault() ?? "").Contains("A resposta atribui ao processo uma função ou categoria"),
+            "#93 função do processo: a afirmação sem fonte é recusada e a resposta corrigida informa apenas a leitura");
     }
 
     private static async Task MalwareFlow(Store store, Account actor, Action<bool, string> assert)

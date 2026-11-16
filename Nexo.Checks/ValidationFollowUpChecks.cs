@@ -102,8 +102,7 @@ internal static class ValidationFollowUpChecks
     private static async Task DiskRepeated(Store store, Account actor, Action<bool, string> assert)
     {
         var tools = DiskTools();
-        var model = new CapturingModel([Text(DiskText), Text(DiskText), Call("get_hardware_inventory", new { category = "storage" }),
-            Text(DiskText), Text(DiskText), Text(DiskText), Text(DiskText)]);
+        var model = new CapturingModel([Text(DiskText), Text(DiskText), Call("get_hardware_inventory", new { category = "storage" }), Text(DiskText)]);
         var answer = await Ask(store, actor, "estou sem espaço no disco T:", tools, model);
         // A vírgula decimal segue a cultura do relatório (F1): pt-BR e de-DE mostram "7,0", en-US "7.0".
         assert(System.Text.RegularExpressions.Regex.IsMatch(answer, @"T: 7[.,]0% livre") && answer.Contains("Para ver o que ocupa espaço, abra Configurações > Sistema > Armazenamento no Windows.")
