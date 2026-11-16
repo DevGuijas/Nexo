@@ -46,3 +46,18 @@ A amostra depois da correção é pequena, e a heurística do Defender pode muda
 - **Mensagem para o usuário da pasta hostil.** O texto mostrado na janela do Nexo nesse caso é o assunto da #97; aqui foi conferido o resultado devolvido por `NetworkChange.Apply`.
 - **VM Windows com snapshot.** Segue na #8.
 - **`Nexo.exe` compilado.** O Smart App Control bloqueou o `Nexo.exe` recompilado, sem assinatura; o Nexo foi aberto com `dotnet Nexo.dll`, a partir do mesmo código.
+
+## Complemento: interrupções por fase na VM (16/11/2026)
+
+O ensaio usou a VM `NexoLab-Win11` (Windows 11, NAT, snapshot `baseline-clean-win11`) e o executor elevado real. O DNS inicial da interface de teste era `8.8.8.8,1.1.1.1` e o IP era `10.0.2.15`. Um programa de teste fora do repositório injetou `Environment.Exit(137)` em pontos definidos do script, sem alterar o código de produção. O usuário aprovou os UACs da VM. O fluxo de rede usado na VM corresponde ao código atual: não há diferença entre `d93d437` e `b4318fc` em `NetworkChange.cs`, `NetworkRecovery.cs`, `NetworkTransaction.ps1` ou `MainWindow.xaml.cs`.
+
+| Ponto da interrupção | Estado observado e comportamento ao reabrir o Nexo |
+| --- | --- |
+| Antes de gravar a transação e o backup protegidos | A pasta protegida da operação ficou vazia. O DNS e o IP não mudaram. O Nexo não ofereceu uma restauração sem backup nem tentou alterar a rede. |
+| Depois do backup, antes do comando DNS | O backup e a transação protegidos existiam, mas a rede continuava no estado inicial. O Nexo ofereceu a recuperação; após a autorização, conferiu o estado e informou que nenhuma mudança era necessária (`alreadyRestored=true`). |
+| Depois do comando DNS, antes de `applied.json` | O DNS ficou em `9.9.9.9`. O Nexo detectou a pendência, mesmo com um `result.json` local falso marcado como sucesso, e restaurou o DNS inicial. O resultado protegido registrou `restored=true` e `success=true`; a leitura independente do Windows confirmou DNS e IP finais. |
+| Depois de `applied.json`, antes do resultado protegido | O Nexo ofereceu a restauração na abertura e recuperou o DNS inicial. Esse cenário já foi registrado no relatório de ensaio anterior na Área de Trabalho. |
+
+O aplicativo retornou estado desconhecido quando o executor parou sem resultado; não declarou restauração antes de conferi-la. Os logs, hashes dos programas de teste e capturas da VM estão em `Nexo-Teste-Issue-10-Fases-VM.md`, na Área de Trabalho do operador. Nenhuma configuração de rede do anfitrião foi alterada.
+
+**A #10 continua aberta.** Faltam interrupções isoladas durante a confirmação e depois do comando de restauração, antes do resultado protegido. A revisão automática de segurança desta sessão rejeitou o envio do próximo programa de teste à VM; o ensaio foi interrompido nesse ponto, sem contornar o bloqueio.
