@@ -12,12 +12,17 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 
 - [x] **Prioridade alta:** o executor de rede elevado deixa de gravar resultados na pasta do usuário (`%LOCALAPPDATA%`) e passa a gravar só na pasta protegida em `%ProgramData%` (#95, PR #96, validado no PC com UAC real em 10/11/2026).
 - [ ] Investigar com o log do Ollama ativo as etapas expiradas na 1ª chamada ao modelo, antes de mudar o limite de 3 minutos (#93, item 4).
-- [ ] Validar as sete falhas controladas em VM Windows (#8).
+- [ ] Validar as sete falhas controladas em VM Windows (#8). O cenário 5 de memória foi ensaiado com alerta, PID e resolução no [relatório da VM](docs/ENSAIO-VM-MEMORIA-2026-11-16.md); faltam os demais cenários e controles.
 - [ ] Validar em VM descartável a limpeza de temporários, a manutenção de disco e o cancelamento da otimização (#118); os testes automatizados usam pastas e comandos simulados.
 - [ ] Obter certificado de assinatura de código confiável, assinar `Nexo.exe` e `NexoSetup.exe`, conferir em Windows limpo e registrar emissor, validade e hashes antes da distribuição (#22).
-- [ ] Validar em VM o canal autenticado que confirma manter a mudança de rede (#11) e a instalação NVIDIA real com o prazo alinhado ao supervisor (#12).
+- [x] Validar em VM o canal autenticado da rede: um `keep` plantado antes do UAC não venceu a escolha explícita de restaurar; DNS e IP foram conferidos depois (#11, 15/11/2026).
+- [ ] Validar a instalação NVIDIA real com o prazo alinhado ao supervisor num laboratório com GPU acessível ao Windows convidado (#12); a VM VirtualBox atual só expõe vídeo virtual.
 - [x] Validar no PC o patamar estável de memória com o NexoMemTeste-toca (#71): "Persiste", "Estável em patamar alto" depois de 31 min, volta a "Persiste" com +15% e "Resolvida" com o processo encerrado, na 76d9028 em 10/11/2026.
-- [ ] Validar no PC: na #10, a ACL da pasta protegida, a transação forjada, a pasta hostil, o executor encerrado e o carregador sob UAC passaram em 13/11/2026 (`docs/VALIDACAO-REDE-10-2026-11-13.md`); na #9, o prazo, a recusa do UAC e o executor encerrado passaram em 12/11/2026, e a oferta de restauração e a ausência de alerta na abertura seguinte do Nexo, em 13/11/2026 (`docs/VALIDACAO-REDE-9-2026-11-12.md`); só a VM com snapshot segue na #8; o custo da coleta de sensores, com e sem o Libre Hardware Monitor, e os discos atrás do AMD-RAID (#19); de novo, depois dos ajustes da validação de 10/11, o disco e a memória na resposta (#88: loop do disco, "pouca espaço", linha dos MB e alerta do volume removido) e as respostas da #93 (letra de unidade perguntada como "o que é o D:?", descrição de processo sem evidência); e o patamar estável na resposta (#71: não culpar o processo pela lentidão).
+- [x] Conferir prazo e estado desconhecido após travamento no PC (12/11/2026) e, na VM, a abertura seguinte após queda do executor: ofereceu restauração, ignorou resultado local forjado e mostrou estado confirmado depois de recuperar o DNS (#9, 15/11/2026). O registro protegido permitiu a recuperação com a pasta local ausente (#106).
+- [ ] Completar as quedas em cada fase da transação de rede na VM (#10). O caso depois de `applied.json` foi comprovado; os demais ainda faltam.
+- [ ] Repetir os ensaios com sensores e discos atrás de AMD-RAID (#19). No PC de desenvolvimento, o sensor AMD retornou 63,8 °C com Nexo elevado; sem elevação, o valor zero foi descartado. O hardware disponível não tem AMD-RAID.
+- [ ] Repetir o diálogo real do volume T:/VHDX após os ajustes do PR #120 (#88) e investigar as respostas indevidas e a expiração com log Ollama ativo (#93). Conferir também a mensagem do chat após escolher restaurar DNS na VM (#98).
+- [x] Validar no PC o patamar estável na resposta, sem culpar o processo pela lentidão quando a memória está abaixo de 80% (#71).
 - [ ] Trocar "não publicada" pela data de publicação, gerar os pacotes e registrar abaixo o commit e os hashes impressos pelo script.
 
 ### Saúde do computador
@@ -28,7 +33,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - Crescimento de memória por processo, identificado por PID e horário de início. Um processo que se estabiliza num patamar alto por 30 minutos passa a "Estável em patamar alto", informativo; volta a "Persiste" se subir 10% sobre a referência gravada na ocorrência (#71).
 - Sondagens opcionais de gateway, DNS e destino HTTP(S), desligadas por padrão.
 - Serviços automáticos que o Windows deixa parados de propósito (início atrasado ou por gatilho com código 0) não geram alerta.
-- Temperatura da CPU pelo LibreHardwareMonitorLib incorporado ao Nexo (sensor de pacote ou die) e estado dos discos físicos pelo Windows Storage, com origem e horário da leitura; sem fonte confiável, o painel diz "indisponível" e o motivo (#19, PR #79). O driver PawnIO não é instalado pelo Nexo e, no computador de desenvolvimento sem elevação, não houve leitura válida mesmo com o driver presente.
+- Temperatura da CPU pelo LibreHardwareMonitorLib incorporado ao Nexo (sensor de pacote ou die) e estado dos discos físicos pelo Windows Storage, com origem e horário da leitura; sem fonte confiável, o painel diz "indisponível" e o motivo (#19, PR #79). O driver PawnIO não é instalado pelo Nexo. Em 16/11/2026, uma leitura elevada neste PC retornou 63,8 °C do sensor AMD `Core (Tctl/Tdie)`; cinco leituras sem elevação descartaram valor zero como indisponível. AMD-RAID segue sem ensaio real.
 - Serviço automático parado com saída normal só gera alerta se o Nexo o viu em execução estável nos 10 minutos anteriores; os demais, como os GoogleUpdater, ficam num cartão informativo e não vão ao modelo como problema (#57). Saída com erro continua gerando alerta.
 - Limiares digitados com ponto não são mais multiplicados por dez.
 
@@ -65,8 +70,8 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 
 ### Rede
 
-- A confirmação para manter IP/DNS passa por um pipe local de uso único: aplicativo e executor elevado conferem os PIDs um do outro. Um `keep` plantado em `decision.txt` não confirma a mudança nem encerra a oferta de restauração após queda; a escolha aceita fica no registro protegido (#11). A validação na VM ainda está pendente.
-- A recuperação procura transações pendentes no registro protegido, mesmo com a pasta local apagada, bloqueada ou com resultados falsos. Uma recusa guardada só na pasta local volta a ser perguntada na próxima abertura; a validação elevada na VM ainda está pendente (#106).
+- A confirmação para manter IP/DNS passa por um pipe local de uso único: aplicativo e executor elevado conferem os PIDs um do outro. Um `keep` plantado em `decision.txt` não confirma a mudança nem encerra a oferta de restauração após queda; a escolha aceita fica no registro protegido (#11). A VM confirmou que a escolha explícita de restaurar vence um `keep` plantado antes do UAC e devolve o DNS anterior.
+- A recuperação procura transações pendentes no registro protegido, mesmo com a pasta local apagada, bloqueada ou com resultados falsos. Uma recusa guardada só na pasta local volta a ser perguntada na próxima abertura (#106). A VM confirmou a descoberta com resultado local forjado ou pasta local ausente, a oferta visual na abertura seguinte e a restauração do DNS a partir do backup protegido.
 - O carregador compactado do executor de rede elevado vai em `-Command`, não mais em `-EncodedCommand`, que o Microsoft Defender bloqueava de vez em quando como `!#SLF:CMD_HSTR:General.ML.B` e fazia o `powershell.exe` elevado falhar com "Acesso negado" (#10).
 
 - DNS fixo com DHCP apontado, teste TCP por IP e preferência por DNS automático.
