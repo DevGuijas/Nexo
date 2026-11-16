@@ -20,6 +20,7 @@ Download público do instalador: [NexoSetup.exe](https://objectstorage.sa-saopau
 ```powershell
 dotnet run --project Nexo.Checks -c Release
 dotnet run --project Nexo.Setup.Checks -c Release
+dotnet run --project Nexo.Office.Checks -c Release
 ```
 
 5. Troque "não publicada" pela data da publicação (`## [1.7.0] — AAAA-MM-DD`), sem commitar ainda, e gere os pacotes. Sem a data, o script não gera os pacotes. Ele não roda as suítes; confere o CHANGELOG, a versão publicada e a assinatura do instalador antes de compilar.
