@@ -239,6 +239,7 @@ public sealed class InvestigationEvidence
                 return "A resposta descreve uma verificação de componente sem resultado bem sucedido dessa categoria.";
         }
         if (PresentsStaleProcess(text)) return StaleProcessReason;
+        if (InventsProcessPurpose(text)) return ProcessPurposeReason;
         if (OffersFileSearch(text)) return FileSearchReason;
         if (ClaimsDriveContents(text)) return DriveContentsReason;
         if (PresentsClosedDisk(text)) return ClosedDiskReason;
@@ -255,6 +256,7 @@ public sealed class InvestigationEvidence
         Func<string, bool>? refuses = reason switch
         {
             StaleProcessReason => PresentsStaleProcess,
+            ProcessPurposeReason => InventsProcessPurpose,
             FileSearchReason => OffersFileSearch,
             DriveContentsReason => ClaimsDriveContents,
             ClosedDiskReason => PresentsClosedDisk,
@@ -281,6 +283,21 @@ public sealed class InvestigationEvidence
     private IEnumerable<string> ProcessNames() => topProcesses.Select(p => p.Name).Concat(currentProcesses).Concat(staleProcesses).Concat(memoryHolders.Select(h => h.Name));
     private static bool Cites(string normalized, string name) =>
         AgentProtocol.Normalize(name) is { Length: > 0 } key && Regex.IsMatch(normalized, @"(?<![\w.-])" + Regex.Escape(key) + @"(?:\.exe)?(?![\w-]|\.\w)");
+
+    internal const string ProcessPurposeReason = "A resposta atribui ao processo uma função ou categoria que nenhuma ferramenta informou. Fale só do nome e do consumo medido; se o usuário não reconhece o programa, oriente conferir o nome e o local do arquivo no Gerenciador de Tarefas.";
+    // Inventário e monitor informam nome, PID e consumo, não a finalidade de um executável. O nome do processo não é prova
+    // de que ele seja um teste, um diagnóstico ou um componente essencial do Windows.
+    private bool InventsProcessPurpose(string normalized)
+    {
+        var names = ProcessNames().ToArray();
+        return Sentences(normalized).Any(sentence =>
+            !sentence.Contains('?')
+            && !Regex.IsMatch(sentence, @"\b(?:nao sei|nao da para (?:saber|afirmar)|nao e possivel (?:saber|afirmar)|nenhuma ferramenta informa)\b")
+            && (Regex.IsMatch(sentence, @"\b(?:processo|programa|aplicativo|software)\b") || names.Any(name => Cites(sentence, name)))
+            && (Regex.IsMatch(sentence, @"\b(?:serve|executad[oa]|criad[oa]|desenvolvid[oa]|usad[oa]|iniciad[oa])\b.{0,50}\bpara\s+(?:testar|verificar|diagnosticar|monitorar|avaliar|medir|gerenciar|otimizar|atualizar|proteger)\b")
+                || Regex.IsMatch(sentence, @"\b(?:ferramenta|programa|aplicativo|software)\s+de\s+(?:diagnostico|teste|monitoramento|otimizacao|seguranca)\b")
+                || Regex.IsMatch(sentence, @"\b(?:e|nao e|parece|pode ser)\s+(?:um|uma)?\s*(?:processo do sistema(?: operacional)?|software essencial(?: do windows)?)\b")));
+    }
 
     internal const string MalwareReason = "A resposta sugere que um processo pode ser malicioso (vírus, malware), mas nenhuma ferramenta do Nexo traz evidência de segurança. Fale só do consumo medido; se o usuário não reconhece o programa, oriente conferir o nome e o local do arquivo no Gerenciador de Tarefas, sem chamá-lo de malicioso ou suspeito.";
     // O usuário perguntou sobre vírus ou malware neste turno: responder sobre isso não é sugestão do modelo.

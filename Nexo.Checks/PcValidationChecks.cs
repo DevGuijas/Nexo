@@ -76,7 +76,7 @@ internal static class PcValidationChecks
     private static async Task CleanupLoop(Store store, Account actor, Action<bool, string> assert)
     {
         var tools = new FlowTools((name, _) => name == "get_health_report" ? WindowsTools.Ok(FinalAnswerChecks.DiskLowReport(false)) : throw new Exception("Ferramenta inesperada: " + name));
-        var model = new CapturingModel([Text(Cleanup), Text(Cleanup), Text(Cleanup), Text(Cleanup)]);
+        var model = new CapturingModel([Text(Cleanup), Text(Cleanup), Text(Cleanup)]);
         var answer = await Ask(store, actor, [User("meu pc ta sem espaco no disco T"), Assistant("O volume T: está com 7,0% livre."), User("sim")], tools, model);
         var first = model.SystemMessages(1).LastOrDefault() ?? "";
         var second = model.SystemMessages(2).LastOrDefault() ?? "";

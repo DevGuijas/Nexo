@@ -176,6 +176,19 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             UserRequest = conversation.Entries.LastOrDefault(e => e.Role == "user")?.Text ?? "" };
         // Recusas da resposta final por motivo, neste turno: a partir da 2ª pelo mesmo motivo, o controle cita o trecho (#93).
         var refusals = new Dictionary<string, int>(StringComparer.Ordinal);
+        var identicalRefusals = new Dictionary<string, int>(StringComparer.Ordinal);
+        var diskRequest = conversation.Entries.Any(entry => entry.Role == "user"
+            && System.Text.RegularExpressions.Regex.IsMatch(AgentProtocol.Normalize(entry.Text), @"\b(?:disco|unidade|espaco|armazenamento)\b"));
+        bool StopUnchanged(string reason, string message) =>
+            (reason == InvestigationEvidence.StaleProcessReason || reason == AgentProtocol.PendingActionReason && diskRequest)
+            && RepeatedUnchanged(reason, message);
+        bool RepeatedUnchanged(string reason, string message)
+        {
+            var normalized = System.Text.RegularExpressions.Regex.Replace(AgentProtocol.Normalize(message), @"\s+", " ").Trim();
+            var key = reason + "\0" + normalized;
+            identicalRefusals[key] = identicalRefusals.GetValueOrDefault(key) + 1;
+            return identicalRefusals[key] >= 3;
+        }
         string Guidance(string reason, string message)
         {
             var guidance = AgentProtocol.Guidance(reason, message);
@@ -348,6 +361,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 // never a fabricated user message or consent to change Windows settings.
                 if (!string.IsNullOrWhiteSpace(content)) history.Add(new AgentMessage { role = "assistant", content = content });
                 Rejected("texto sem ferramenta", rejection);
+                if (StopUnchanged(rejection, content)) return Finish(await GaveUp("A IA repetiu a mesma resposta recusada. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento."));
                 if (++protocolRetries > 3) return Finish(await GaveUp("A IA não conseguiu selecionar a próxima etapa. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento."));
                 // O motivo da recusa vai junto (#83): sem ele, o modelo reescrevia a mesma frase até esgotar as tentativas.
                 control = "Controle de execução: sua resposta não chamou uma ferramenta e não foi aceita como conclusão. Motivo: " + Guidance(rejection, content) + " Se anunciou um teste ou consulta, execute-o agora. Para concluir chame finish_support com message; se não conseguir emitir tool_calls para esse controle, escreva exatamente finish_support seguido de um objeto JSON com message. Para informação indispensável ou teste manual use ask_user com message e reason. Não peça Ok nem autorização no chat. Nenhuma mudança foi autorizada por esta instrução; o executor mantém a confirmação do usuário.";
@@ -426,6 +440,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     history.Add(new AgentMessage { role = "tool", tool_name = name, content = result });
                     if (error == null) return Finish(ModelAnswer(text));
                     Rejected(name, error);
+                    if (StopUnchanged(error, text)) return Finish(await GaveUp("A IA repetiu a mesma resposta recusada. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento."));
                     if (++protocolRetries > 3) return Finish(await GaveUp("A IA não conseguiu selecionar a próxima etapa. Interrompi a tentativa; os resultados acima podem orientar a continuação do atendimento."));
                     control = "Controle de execução: " + Guidance(error, text);
                     continue;
