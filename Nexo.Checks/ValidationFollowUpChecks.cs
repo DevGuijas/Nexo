@@ -195,6 +195,7 @@ internal static class ValidationFollowUpChecks
         var evidence = new InvestigationEvidence();
         evidence.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(report));
         assert(evidence.WithMemoryFigures("O NexoMemTeste segue com 13.591 MB.") == "O NexoMemTeste segue com 13.591 MB."
+            && evidence.WithMemoryFigures("O NexoMemTeste usa cerca de 13,59 GB.").Contains("“NexoMemTeste” (PID 23132) segue com 13591 MB")
             && evidence.WithMemoryFigures("O disco C: está com bastante espaço.") == "O disco C: está com bastante espaço."
             && evidence.WithMemoryFigures("A memória está alta por causa de um programa.").Contains("“NexoMemTeste” (PID 23132) segue com 13591 MB"),
             "Memória: a resposta que já tem o número fica como está, a que não fala de memória também");

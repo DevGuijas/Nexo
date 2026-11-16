@@ -113,8 +113,8 @@ internal static class PcValidationChecks
         var shortName = evidence.WithMemoryFigures("O Nexo está aberto. Feche o NexoM.exe se não usar.");
         // "chrome" é o nome inteiro de outro processo atual, não o começo do "chromedriver".
         var browsers = Observed(HealthReportPresentation.CurrentHeader + "\n" + Holding("chrome", 4120, 500, 900) + Holding("chromedriver", 77, 300, 800)).WithMemoryFigures("O chrome está aberto há horas.");
-        assert(!figure.Contains("Pelo monitor") && !shortName.Contains("Pelo monitor") && browsers.Contains("“chrome” (PID 4120)") && !browsers.Contains("chromedriver"),
-            "#88 linha dos MB: não entra quando a frase já traz os MB, quando o começo tem menos de 6 caracteres ou é o nome inteiro de outro processo atual");
+        assert(figure.Contains("“NexoMemTeste-toca” (PID 1732) subiu de 2072 MB para 7192 MB") && !shortName.Contains("Pelo monitor") && browsers.Contains("“chrome” (PID 4120)") && !browsers.Contains("chromedriver"),
+            "#88 linha dos MB: arredondamento em GB recebe a medição; nome curto e outro processo não são confundidos");
         // A trava do processo encerrado continua comparando o nome inteiro: o NexoMemTeste de ontem não vira o -toca.
         assert(evidence.ValidateStatement("O NexoMemTeste está consumindo muita memória.", false) == InvestigationEvidence.StaleProcessReason
             && evidence.ValidateStatement("O NexoMemTeste-toca está consumindo muita memória.", false) == null,

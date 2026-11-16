@@ -25,6 +25,7 @@ internal static class ValidationRetestChecks
         try
         {
             MemoryFigureOfTheProcess(assert);
+            CultureAndLineEndings(assert);
             await MemoryFlow(store, actor, assert);
             FileSearchOffer(assert);
             DriveContentsWithoutEvidence(assert);
@@ -47,6 +48,26 @@ internal static class ValidationRetestChecks
         return evidence;
     }
 
+    private static void CultureAndLineEndings(Action<bool, string> assert)
+    {
+        var previous = System.Globalization.CultureInfo.CurrentCulture;
+        try
+        {
+            foreach (var culture in new[] { "pt-BR", "en-US", "de-DE" })
+            {
+                System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.GetCultureInfo(culture);
+                var evidence = Observed(HolderReport(12055).ReplaceLineEndings("\r\n"));
+                var answer = evidence.WithMemoryFigures("O NexoMemTeste usa cerca de 11,8 GB.\r\nVocê usa esse processo?").ReplaceLineEndings("\n");
+                var offer = "Se precisar de ajuda para identificar quais arquivos estão ocupando espaço, posso ajudar!\r\nDeseja que eu ajude a identificar os arquivos mais ocupantes do disco T:?".ReplaceLineEndings("\n");
+                assert(answer.Contains("“NexoMemTeste” (PID 21356) segue com 12055 MB")
+                    && answer.IndexOf("Pelo monitor de saúde", StringComparison.Ordinal) < answer.IndexOf("Você usa", StringComparison.Ordinal)
+                    && new InvestigationEvidence().ValidateStatement(offer, false) == InvestigationEvidence.FileSearchReason,
+                    "#88: MB e ofertas de arquivos com quebras normalizadas na cultura " + culture);
+            }
+        }
+        finally { System.Globalization.CultureInfo.CurrentCulture = previous; }
+    }
+
     private static void MemoryFigureOfTheProcess(Action<bool, string> assert)
     {
         var report = HolderReport(12055);
@@ -59,18 +80,18 @@ internal static class ValidationRetestChecks
         assert(evidence.WithMemoryFigures("O NexoMemTeste está pesado. O chrome usa 12055 MB.").Contains(line),
             "Reteste memória: o número de outra frase não conta como os MB do processo");
         assert(evidence.WithMemoryFigures("O NexoMemTeste segue com 12.055 MB.") == "O NexoMemTeste segue com 12.055 MB."
-            && evidence.WithMemoryFigures("O processo PID 21356 está com 11,8 GB.") == "O processo PID 21356 está com 11,8 GB."
+            && evidence.WithMemoryFigures("O processo PID 21356 está com 11,8 GB.").Contains(line)
             && evidence.WithMemoryFigures("O NexoMemTeste.exe segura 12055MB agora.") == "O NexoMemTeste.exe segura 12055MB agora.",
-            "Reteste memória: a frase que cita o processo (pelo nome ou PID) com os MB dele, em MB ou GB, fica como está");
+            "Reteste memória: valor observado em MB fica como está; arredondamento em GB recebe os MB exatos");
         assert(evidence.WithMemoryFigures("O NexoMemTeste está com 6 GB.").Contains(line)
             && evidence.WithMemoryFigures("O NexoMemTeste tem 12055 MB livres para outros programas.").Contains(line),
             "Reteste memória: um valor longe da leitura, ou ligado a memória livre, não conta");
 
-        // Passo 2.7: "NexoMemTeste (cerca de 10 GB)" com 10806 MB. 10 GB = 10240 MB, 5% longe: conta como citado.
+        // Passo 2.7: "NexoMemTeste (cerca de 10 GB)" com 10806 MB não substitui o número medido em MB.
         var rounded = Observed(HolderReport(10806));
-        assert(rounded.WithMemoryFigures("O NexoMemTeste (cerca de 10 GB) segura memória.") == "O NexoMemTeste (cerca de 10 GB) segura memória."
+        assert(rounded.WithMemoryFigures("O NexoMemTeste (cerca de 10 GB) segura memória.").Contains("“NexoMemTeste” (PID 21356) segue com 10806 MB")
             && rounded.WithMemoryFigures("O NexoMemTeste (cerca de 9 GB) segura memória.").Contains("“NexoMemTeste” (PID 21356) segue com 10806 MB"),
-            "Reteste memória (passo 2.7): até 10% da leitura conta como os MB do processo (10 GB para 10806 MB); 9 GB (15%) não");
+            "Reteste memória (passo 2.7): arredondamentos em GB não ocultam os MB observados");
 
         // O "livre" de outra oração não tira o valor do processo; milhar com espaço comum ou não separável (@qa, item 6).
         const string clauses = "O NexoMemTeste (PID 21356) usa 10.806 MB, e a memória livre é de 4,7 GB.";
@@ -83,7 +104,7 @@ internal static class ValidationRetestChecks
         // A memória livre do sistema com o mesmo valor do processo continua sem contar.
         var same = Observed(HolderReport(4813));
         assert(same.WithMemoryFigures("O NexoMemTeste está pesado e a memória livre está em 4,7 GB.").Contains("“NexoMemTeste” (PID 21356) segue com 4813 MB")
-            && same.WithMemoryFigures("O NexoMemTeste usa 4,7 GB; o total instalado é 32 GB.") == "O NexoMemTeste usa 4,7 GB; o total instalado é 32 GB.",
+            && same.WithMemoryFigures("O NexoMemTeste usa 4,7 GB; o total instalado é 32 GB.").Contains("“NexoMemTeste” (PID 21356) segue com 4813 MB"),
             "Reteste memória: um valor de memória livre nunca conta, mesmo igual ao do processo; o do processo, ao lado do total, conta");
         assert(evidence.WithMemoryFigures("O disco C: tem 250 GB livres.") == "O disco C: tem 250 GB livres.",
             "Reteste memória: a resposta que não fala de memória nem do processo continua sem a linha");
@@ -117,6 +138,8 @@ internal static class ValidationRetestChecks
             "Vou procurar os arquivos que ocupam mais espaço no T:.",
             // Revisão do @qa no ceb7f40: o caminho não isenta a oferta do próprio Nexo, e o ":" depois da oferta não a quebra.
             "Posso ajudar a identificar os maiores arquivos e depois você confere em Configurações > Sistema > Armazenamento.",
+            "Se precisar de ajuda para identificar quais arquivos estão ocupando espaço, posso ajudar!",
+            "Deseja que eu ajude a identificar os arquivos mais ocupantes do disco T:?",
             "Posso, se quiser: identificar os maiores arquivos."
         };
         var refused = offers.Where(offer => empty.ValidateStatement(offer, false) == InvestigationEvidence.FileSearchReason).Count();
