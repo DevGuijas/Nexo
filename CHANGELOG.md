@@ -13,6 +13,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - [x] **Prioridade alta:** o executor de rede elevado deixa de gravar resultados na pasta do usuário (`%LOCALAPPDATA%`) e passa a gravar só na pasta protegida em `%ProgramData%` (#95, PR #96, validado no PC com UAC real em 10/11/2026).
 - [ ] Investigar com o log do Ollama ativo as etapas expiradas na 1ª chamada ao modelo, antes de mudar o limite de 3 minutos (#93, item 4).
 - [ ] Validar as sete falhas controladas em VM Windows (#8).
+- [ ] Validar em VM descartável a limpeza de temporários, a manutenção de disco e o cancelamento da otimização (#118); os testes automatizados usam pastas e comandos simulados.
 - [ ] Obter certificado de assinatura de código confiável, assinar `Nexo.exe` e `NexoSetup.exe`, conferir em Windows limpo e registrar emissor, validade e hashes antes da distribuição (#22).
 - [ ] Validar em VM o canal autenticado que confirma manter a mudança de rede (#11) e a instalação NVIDIA real com o prazo alinhado ao supervisor (#12).
 - [x] Validar no PC o patamar estável de memória com o NexoMemTeste-toca (#71): "Persiste", "Estável em patamar alto" depois de 31 min, volta a "Persiste" com +15% e "Resolvida" com o processo encerrado, na 76d9028 em 10/11/2026.
@@ -27,7 +28,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - Crescimento de memória por processo, identificado por PID e horário de início. Um processo que se estabiliza num patamar alto por 30 minutos passa a "Estável em patamar alto", informativo; volta a "Persiste" se subir 10% sobre a referência gravada na ocorrência (#71).
 - Sondagens opcionais de gateway, DNS e destino HTTP(S), desligadas por padrão.
 - Serviços automáticos que o Windows deixa parados de propósito (início atrasado ou por gatilho com código 0) não geram alerta.
-- Temperatura da CPU pelo Libre Hardware Monitor (sensor de pacote ou die) e estado dos discos físicos pelo Windows Storage, com origem e horário da leitura; sem fonte confiável, o painel diz "indisponível" e o motivo (#19, PR #79).
+- Temperatura da CPU pelo LibreHardwareMonitorLib incorporado ao Nexo (sensor de pacote ou die) e estado dos discos físicos pelo Windows Storage, com origem e horário da leitura; sem fonte confiável, o painel diz "indisponível" e o motivo (#19, PR #79). O driver PawnIO não é instalado pelo Nexo e, no computador de desenvolvimento sem elevação, não houve leitura válida mesmo com o driver presente.
 - Serviço automático parado com saída normal só gera alerta se o Nexo o viu em execução estável nos 10 minutos anteriores; os demais, como os GoogleUpdater, ficam num cartão informativo e não vão ao modelo como problema (#57). Saída com erro continua gerando alerta.
 - Limiares digitados com ponto não são mais multiplicados por dez.
 
@@ -78,6 +79,9 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 ### Interface e repositório
 
 - Navegação, formulários e confirmações redesenhados, com tema claro e ícones vetoriais.
+- A opção de monitoramento em segundo plano mantém o Nexo na bandeja quando escolhida; fechar a janela sem essa opção encerra o aplicativo (#111).
+- Em **Ferramentas**, a instalação do Office LTSC Professional Plus 2024 (64 bits, pt-BR) pede confirmação e UAC, valida o instalador oficial da Microsoft e confere a instalação no Windows. Não inclui licença nem ativação (#117).
+- Em **Ferramentas**, **Otimizar PC** remove arquivos antigos apenas das pastas temporárias permitidas e solicita ao Windows a manutenção de discos elegíveis, sem prometer ganho de desempenho. Registra cada etapa e trata acesso negado ou resultado não confirmado como parcial ou desconhecido (#118).
 - Título da janela lido da versão do aplicativo, sem número fixo no código.
 - CI na `development` com compilação e regressões.
 - Testes que dependiam da data do dia passam a usar relógio injetado.

@@ -51,6 +51,9 @@ jobs:
       - name: Regressões do instalador
         run: dotnet run --project Nexo.Setup.Checks -c Release 2>&1 | tee logs/setup-checks.log
 
+      - name: Regressões da instalação do Office
+        run: dotnet run --project Nexo.Office.Checks -c Release 2>&1 | tee logs/office-checks.log
+
       - name: Transações de rede simuladas
         run: powershell -NoProfile -ExecutionPolicy Bypass -File Nexo.Checks/NetworkScriptChecks.ps1 2>&1 | tee logs/network-transaction.log
 

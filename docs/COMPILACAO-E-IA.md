@@ -4,7 +4,7 @@ Este documento explica como preparar o ambiente, compilar, testar e publicar o N
 
 ## 1. Visão geral do projeto
 
-O repositório contém quatro projetos .NET, sem arquivo `.sln`:
+O repositório contém cinco projetos .NET, sem arquivo `.sln`:
 
 | Projeto | Tipo | Finalidade |
 |---|---|---|
@@ -12,6 +12,7 @@ O repositório contém quatro projetos .NET, sem arquivo `.sln`:
 | `Nexo.Checks/Nexo.Checks.csproj` | Console, `net8.0-windows` | Regressões, avaliações da IA e verificações opcionais do Windows real. |
 | `Nexo.Setup/Nexo.Setup.csproj` | WPF, `net8.0-windows` | Instalador gráfico. O executável gerado se chama `NexoSetup.exe`. |
 | `Nexo.Setup.Checks/Nexo.Setup.Checks.csproj` | Console, `net8.0-windows` | Regressões do instalador. |
+| `Nexo.Office.Checks/Nexo.Office.Checks.csproj` | Console, `net8.0-windows` | Regressões da instalação do Office. |
 
 O Nexo é exclusivo para Windows porque usa WPF e ferramentas do próprio sistema operacional. Os dados operacionais usam SQLite, então `Nexo.Support` e `Nexo.Checks` dependem do pacote NuGet `Microsoft.Data.Sqlite` 8.0.33: a primeira restauração precisa de acesso ao NuGet ou de um cache local. Os scripts PowerShell necessários são incorporados ao assembly durante a compilação.
 
@@ -171,9 +172,10 @@ Sem Ollama ou sem o modelo, o aplicativo ainda pode ser compilado e as verifica�
 ```powershell
 dotnet run --project .\Nexo.Checks\Nexo.Checks.csproj -c Release
 dotnet run --project .\Nexo.Setup.Checks\Nexo.Setup.Checks.csproj -c Release
+dotnet run --project .\Nexo.Office.Checks\Nexo.Office.Checks.csproj -c Release
 ```
 
-As duas usam pastas temporárias para os dados e executam regressões do código. Ao terminar, cada uma mostra a quantidade de verificações aprovadas. O CI do repositório roda em `windows-latest`, em todo PR para `development`, os builds de `Nexo.Support` e `Nexo.Setup`, estas duas suítes e os dois scripts de rede simulados.
+As três executam regressões do código sem instalar o Office nem alterar discos reais. Ao terminar, cada uma mostra a quantidade de verificações aprovadas. O CI do repositório roda em `windows-latest`, em todo PR para `development`, os builds de `Nexo.Support` e `Nexo.Setup`, estas três suítes e os dois scripts de rede simulados.
 
 ### Scripts de rede simulados
 
