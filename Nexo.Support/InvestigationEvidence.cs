@@ -397,9 +397,9 @@ public sealed class InvestigationEvidence
     // busca é orientação ao usuário ("explicar como", "orientar você a", "abra"): "posso ajudar a identificar os maiores
     // arquivos e depois você confere em Configurações…" continua recusada. O ":" logo depois da oferta, com no máximo "se
     // quiser" no meio ("Posso, se quiser: identificar…"), não quebra a oração. "Não posso listar os maiores arquivos" passa.
-    private static readonly Regex OfferedSearch = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo|(?:gostaria|quer|deseja|precisa)(?: de)? (?:uma )?ajuda)\b"
+    private static readonly Regex OfferedSearch = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo|(?:gostaria|quer|deseja|precisa|precisar)(?: de)? (?:uma )?ajuda)\b"
         + @"(?<lead>(?:,?\s*(?:se (?:quiser|precisar|preferir)|claro|sim)?\s*:)?[^:;]*?)\b(?:identific\w*|list\w*|ach\w*|encontr\w*|localiz\w*|procur\w*|busc\w*|verific\w*|mostr\w*|analis\w*|descobr\w*|apont\w*|ver|veja)\b"
-        + @"[^:;]*?\b(?:maiores (?:arquivos|pastas)|(?:arquivos|pastas) (?:mais )?(?:grandes|pesad\w*|volumos\w*)|(?:arquivos|pastas) (?:que )?(?:(?:esta|estao|estejam) )?ocupa\w*|(?:arquivos|pastas) (?:com|de) mais espaco|o que (?:(?:esta|estao) )?ocupa\w* (?:mais )?(?:o )?espaco)");
+        + @"[^:;]*?\b(?:maiores (?:arquivos|pastas)|(?:arquivos|pastas) (?:mais )?(?:grandes|pesad\w*|volumos\w*|ocupantes?)|(?:arquivos|pastas) (?:que )?(?:(?:esta|estao|estejam) )?ocupa\w*|(?:arquivos|pastas) (?:com|de) mais espaco|o que (?:(?:esta|estao) )?ocupa\w* (?:mais )?(?:o )?espaco)");
     private static readonly Regex StoragePath = new(@"configurac\w*\W+sistema\W+armazenamento");
     private static readonly Regex Guide = new(@"\b(?:explic\w*|orient\w*|ensin\w*|indic\w*|como|abra|abre|abrir|acess\w*|va|vai)\b");
     private static bool OffersFileSearch(string normalized) => Sentences(normalized).Any(sentence =>
@@ -492,10 +492,9 @@ public sealed class InvestigationEvidence
     // Os MB do processo que segura memória entram na resposta (#88): no PC, a resposta citou "NexoMemTeste PID 23132" e só
     // disse "memória em crescimento persistente", com "de 4375 MB para 13591 MB" no relatório. Quando a resposta cita o processo
     // (pelo nome ou pelo PID) ou fala de memória, o Nexo acrescenta a leitura do monitor. Na validação da 11fa078, a linha
-    // sumia diante de qualquer "<n> MB/GB": "a memória livre está em torno de 4,7 GB" bastava. Agora ela só fica de fora
-    // para o processo cuja frase (a que cita o nome ou o PID) já traz os MB dele: um valor até 10% longe da leitura atual ou
-    // do fim da subida. "Cerca de 10 GB" com 10806 MB (5% longe) conta como citado; "cerca de 9 GB" (15%) não. Um valor
-    // ligado a memória livre, total, disponível ou instalada nunca conta.
+    // sumia diante de qualquer "<n> MB/GB": "a memória livre está em torno de 4,7 GB" bastava. A linha só fica de fora
+    // para o processo cuja frase (a que cita o nome ou o PID) já traz o valor observado em MB. Um arredondamento em GB
+    // não substitui os MB medidos; um valor ligado a memória livre, total, disponível ou instalada também não conta.
     // Milhar com ponto, espaço ou espaço não separável ("12.055", "10 806"); decimal com vírgula ou ponto ("4,7", "10.5").
     private static readonly Regex Amount = new(@"(?<![\d.,])(?<value>\d{1,3}(?:[. \u00A0\u202F]\d{3})+(?![,.]\d)|\d+(?:[.,]\d+)?)[ \u00A0\u202F]*(?<unit>mb|gb|megabytes?|gigabytes?)\b");
     // "Livre", "total"... só contam ligados ao número: na mesma oração (sem "," ";" ":" ou parênteses no meio), até seis
@@ -510,8 +509,8 @@ public sealed class InvestigationEvidence
         var raw = match.Groups["value"].Value;
         var value = Regex.IsMatch(raw, @"^\d{1,3}([. \u00A0\u202F]\d{3})+$") ? double.Parse(Regex.Replace(raw, @"[. \u00A0\u202F]", ""), CultureInfo.InvariantCulture)
             : double.Parse(raw.Replace(',', '.'), CultureInfo.InvariantCulture);
-        var megabytes = match.Groups["unit"].Value.StartsWith('g') ? value * 1024 : value;
-        return new[] { holder.Now, holder.To }.Any(reading => reading is > 0 && Math.Abs(megabytes - reading.Value) <= 0.10 * reading.Value);
+        if (match.Groups["unit"].Value.StartsWith('g')) return false;
+        return new[] { holder.Now, holder.To }.Any(reading => reading is > 0 && Math.Abs(value - reading.Value) < 1);
     });
     // Na validação da 76d9028 (10/11, passo 1.3), a resposta citou "NexoMemTeste", sem o "-toca", sem PID e sem "memória",
     // e a linha não entrou. O processo também conta como citado por um começo do nome com pelo menos 6 caracteres
