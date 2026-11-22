@@ -19,6 +19,9 @@ public partial class MainWindow : Window
     private Conversation? conversation;
     private CancellationTokenSource? operation;
     private bool busy;
+    // #128: a janela "Restaurar configuração de rede anterior?" aberta, e o fechamento do Nexo pedido enquanto ela estava aberta.
+    private Window? postponableDialog;
+    private bool closeAfterPrompt;
     private string page = "chat";
     private WindowsTools? conversationTools;
     private WrapPanel? quickReplyPanel;
@@ -83,6 +86,16 @@ public partial class MainWindow : Window
         };
         Closing += (_, e) =>
         {
+            // #128: fechar o Nexo com a oferta de restauração aberta vale "Agora não": a janela é fechada sem escolha, nada é
+            // restaurado nem gravado como recusa, e o Nexo fecha assim que a etapa em andamento terminar.
+            if (postponableDialog is { } pending)
+            {
+                e.Cancel = true;
+                closeAfterPrompt = true;
+                operation?.Cancel();
+                pending.Close();
+                return;
+            }
             if (officeRunning || optimizationRunning || debloatRunning)
             {
                 e.Cancel = true;
@@ -661,7 +674,7 @@ public partial class MainWindow : Window
                     }
                 }
                 var events = new Progress<string>(UpdateProgress);
-                var executor = conversationTools ??= new WindowsTools(store, user, ConfirmChange, events, text => AddEntry("assistant", text));
+                var executor = conversationTools ??= new WindowsTools(store, user, ConfirmChange, events, text => AddEntry("assistant", text)) { ConversationId = conversation!.Id };
                 var agent = new AgentService(store, executor);
                 string answer;
                 try { answer = await agent.Run(user, conversation!, events, (label, result) => AddEntry("tool", label + "\n" + result), token); }
@@ -707,7 +720,7 @@ public partial class MainWindow : Window
         catch (OperationCanceledException) when (operation.IsCancellationRequested) { AddEntry("assistant", "Atendimento interrompido. As ações já concluídas permanecem registradas acima; cancelar não desfaz uma correção concluída." + InterruptedFacts(), "error"); UpdateProgress("Atendimento interrompido."); }
         catch (OperationCanceledException) { AddEntry("assistant", "A etapa expirou ou foi interrompida antes de confirmar o resultado. Confira os resultados registrados acima antes de tentar novamente ou encaminhar à TI." + InterruptedFacts(), "error"); UpdateProgress("Etapa não concluída: resultado não confirmado."); store.Log(user, "Operação interrompida sem cancelamento do usuário"); }
         catch (Exception ex) { AddEntry("assistant", "Não consegui concluir esta etapa. " + ex.Message + "\n\nVocê pode tentar novamente ou gerar um encaminhamento para a TI." + InterruptedFacts(), "error"); UpdateProgress("Etapa não concluída."); store.Log(user, "Operação não concluída: " + ex.GetType().Name); }
-        finally { interruptedFacts = null; busy = false; operation.Dispose(); operation = null; BusyBar.Visibility = Visibility.Collapsed; CancelButton.Visibility = Visibility.Collapsed; ProgressPanel.Visibility = Visibility.Collapsed; CancelButton.IsEnabled = true; SendButton.IsEnabled = Navigation.IsEnabled = NewChatButton.IsEnabled = Composer.IsEnabled = true; RefreshChatActions(); if (quickReplyPanel != null) quickReplyPanel.IsEnabled = true; ChatScroll.ScrollToEnd(); }
+        finally { interruptedFacts = null; busy = false; operation.Dispose(); operation = null; BusyBar.Visibility = Visibility.Collapsed; CancelButton.Visibility = Visibility.Collapsed; ProgressPanel.Visibility = Visibility.Collapsed; CancelButton.IsEnabled = true; SendButton.IsEnabled = Navigation.IsEnabled = NewChatButton.IsEnabled = Composer.IsEnabled = true; RefreshChatActions(); if (quickReplyPanel != null) quickReplyPanel.IsEnabled = true; ChatScroll.ScrollToEnd(); ResumePendingClose(); }
     }
     private void CancelClick(object sender, RoutedEventArgs e)
     {
@@ -727,15 +740,30 @@ public partial class MainWindow : Window
         {
             foreach (var item in interrupted)
             {
+                if (closeAfterPrompt) break;
                 string outcome;
-                try { outcome = await NetworkRecovery.Recover(item, ConfirmChange, NetworkRecovery.StartElevated, NetworkRecovery.DefaultTimeout, CancellationToken.None); }
+                try { outcome = await NetworkRecovery.Recover(item, ConfirmChange, NetworkRecovery.StartElevated, NetworkRecovery.DefaultTimeout, CancellationToken.None, NetworkRecovery.ReadCurrentState); }
                 catch (Exception ex) { outcome = System.Text.Json.JsonSerializer.Serialize(new { success = false, error = ex.Message }); }
                 var message = NetworkRecovery.Explain(outcome);
                 store.Log(user, "Transação de rede interrompida (" + Path.GetFileName(item.Directory) + "): " + message);
-                AddEntry("assistant", "Encontrei uma alteração de rede que não terminou.\n\n" + message, NetworkRecovery.Restored(outcome) ? "result" : "error");
+                // A conferência sem elevação já foi avisada numa abertura anterior: só o registro (#128).
+                if (NetworkRecovery.AlreadyRecorded(outcome)) continue;
+                // #128: o resultado também vai para a conversa em que a alteração começou, com a linha de fatos.
+                Conversation? origin = null;
+                try { origin = NetworkRecovery.AttachToOrigin(store, user, item.Directory, outcome, DateTimeOffset.Now); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { store.Log(user, "Resultado da recuperação de rede não anexado à conversa de origem: " + ex.Message); }
+                if (origin != null && ReferenceEquals(origin, conversation)) { RenderEntry(origin.Entries[^1]); continue; }
+                AddEntry("assistant", "Encontrei uma alteração de rede que não terminou.\n\n" + message
+                    + (origin != null ? "\n\nO resultado também foi registrado no atendimento “" + origin.Title + "”." : ""), NetworkRecovery.Restored(outcome) ? "result" : "error");
             }
         }
-        finally { busy = false; }
+        finally { busy = false; ResumePendingClose(); }
+    }
+    private void ResumePendingClose()
+    {
+        if (!closeAfterPrompt || busy) return;
+        closeAfterPrompt = false;
+        Dispatcher.BeginInvoke(new Action(Close));
     }
     private Task<bool> ConfirmChange(ChangeRequest request) => ConfirmChange(request, null);
     private Task<bool> ConfirmChange(ChangeRequest request, Action<Window>? onRendered)
@@ -751,8 +779,10 @@ public partial class MainWindow : Window
         var title = Text(request.Title, 23); title.FontWeight = FontWeights.SemiBold; title.Margin = new Thickness(0, 12, 0, 0);
         header.Children.Add(title); DockPanel.SetDock(header, Dock.Top); panel.Children.Add(header);
         var buttons = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 20, 0, 0) }; DockPanel.SetDock(buttons, Dock.Bottom);
-        buttons.Children.Add(Action(request.KeepNetwork ? "Restaurar configuração anterior" : "Cancelar ação", (_, _) => { if (request.KeepNetwork) request.OnExplicitRestore?.Invoke(); dialog.DialogResult = false; }));
-        var authorize = Action(request.KeepNetwork ? "Manter configuração" : "Autorizar e executar", (_, _) => dialog.DialogResult = true, true);
+        // #128: a janela fechada sem botão (X, Alt+F4 ou o Nexo encerrando) avisa quem pediu, para a oferta de restauração valer "Agora não".
+        var decided = false;
+        buttons.Children.Add(Action(request.KeepNetwork ? "Restaurar configuração anterior" : "Cancelar ação", (_, _) => { decided = true; if (request.KeepNetwork) request.OnExplicitRestore?.Invoke(); dialog.DialogResult = false; }));
+        var authorize = Action(request.KeepNetwork ? "Manter configuração" : "Autorizar e executar", (_, _) => { decided = true; dialog.DialogResult = true; }, true);
         authorize.IsEnabled = request.LicenseUrl == null;
         buttons.Children.Add(authorize); panel.Children.Add(buttons);
         var countdown = Text("", 12, "Warning"); countdown.Margin = new Thickness(0, 9, 0, 0);
@@ -777,16 +807,20 @@ public partial class MainWindow : Window
             CornerRadius = new CornerRadius(14), Margin = new Thickness(16), Child = panel };
         var seconds = 45;
         var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-        timer.Tick += (_, _) => { countdown.Text = $"Restauração automática em {--seconds} segundos."; if (seconds <= 0) { timer.Stop(); dialog.DialogResult = false; } };
+        timer.Tick += (_, _) => { countdown.Text = $"Restauração automática em {--seconds} segundos."; if (seconds <= 0) { timer.Stop(); decided = true; dialog.DialogResult = false; } };
         if (request.KeepNetwork) { countdown.Text = "Restauração automática em 45 segundos."; timer.Start(); }
         Exception? previewFailure = null;
         if (onRendered != null) dialog.ContentRendered += (_, _) =>
         {
             try { onRendered(dialog); }
             catch (Exception ex) { previewFailure = ex; }
-            finally { dialog.DialogResult = false; }
+            finally { decided = true; dialog.DialogResult = false; }
         };
-        var accepted = dialog.ShowDialog() == true; timer.Stop();
+        dialog.Closed += (_, _) => { if (!decided) request.OnDismissed?.Invoke(); };
+        if (request.Postponable) postponableDialog = dialog;
+        bool accepted;
+        try { accepted = dialog.ShowDialog() == true; }
+        finally { timer.Stop(); if (ReferenceEquals(postponableDialog, dialog)) postponableDialog = null; }
         if (previewFailure != null) throw new InvalidOperationException("Falha na prévia do diálogo de autorização.", previewFailure);
         return Task.FromResult(accepted);
     }
