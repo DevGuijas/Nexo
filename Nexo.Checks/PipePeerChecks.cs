@@ -153,6 +153,43 @@ internal static class PipePeerChecks
                 "#133: a Receive-Decision real devolve rollback sem servidor no pipe, sem PID do Nexo e com nome de pipe fora do padrão");
             check(broken.Contains("DECISAO:rollback", StringComparison.Ordinal),
                 "#133: se o tipo do pipe não puder ser criado, a Receive-Decision devolve rollback em vez de lançar ou manter a mudança");
+
+            // (@qa) Com um servidor de pipe conectado que nunca confirma, a decisão é rollback. No Windows, a chamada ao
+            // kernel32 confere o PID (este processo) e a leitura expira sem linha; fora dele, a chamada ao kernel32 lança
+            // e cai no catch genérico. Os dois caminhos de falha depois da conexão precisam devolver rollback, nunca keep.
+            var connectedName = "nexo-network-" + Guid.NewGuid().ToString("N");
+            using (var server = new System.IO.Pipes.NamedPipeServerStream(connectedName, System.IO.Pipes.PipeDirection.Out, 1,
+                System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous))
+            {
+                var waiting = server.WaitForConnectionAsync();
+                var silent = await Run(shell, decide, source, temp, connectedName, Environment.ProcessId.ToString(), "0");
+                check(waiting.IsCompleted && silent.Contains("DECISAO:rollback", StringComparison.Ordinal),
+                    "#133 (@qa): conectado ao servidor do pipe sem confirmação (leitura expirada ou falha na conferência do PID), a decisão é rollback");
+            }
+
+            // (@qa) Só a linha exata "keep" mantém a mudança. No Windows, o servidor (este processo, PID conferido) manda
+            // "KEEP": a leitura acontece e precisa devolver rollback; fora dele, a conferência do PID lança e também é rollback.
+            var otherLineName = "nexo-network-" + Guid.NewGuid().ToString("N");
+            using (var server = new System.IO.Pipes.NamedPipeServerStream(otherLineName, System.IO.Pipes.PipeDirection.Out, 1,
+                System.IO.Pipes.PipeTransmissionMode.Byte, System.IO.Pipes.PipeOptions.Asynchronous))
+            {
+                var writing = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await server.WaitForConnectionAsync();
+                        var line = new UTF8Encoding(false).GetBytes("KEEP\n");
+                        await server.WriteAsync(line);
+                        await server.FlushAsync();
+                    }
+                    catch (IOException) { } // o cliente pode fechar antes (fora do Windows a conferência do PID falha)
+                    catch (ObjectDisposedException) { }
+                });
+                var other = await Run(shell, decide, source, temp, otherLineName, Environment.ProcessId.ToString(), "0");
+                await Task.WhenAny(writing, Task.Delay(2000));
+                check(other.Contains("DECISAO:rollback", StringComparison.Ordinal),
+                    "#133 (@qa): uma linha diferente de \"keep\" exato (\"KEEP\") vinda do servidor do Nexo não mantém a mudança");
+            }
         }
         finally { try { Directory.Delete(root, recursive: true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
     }
