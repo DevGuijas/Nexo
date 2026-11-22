@@ -974,7 +974,7 @@ public partial class MainWindow : Window
         debloatListView = new StackPanel();
         panel.Children.Add(debloatListView);
         RenderDebloatList();
-        try { debloatCanUndo = DebloatUndo().LatestUndoable() != null; } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { debloatCanUndo = false; }
+        try { debloatCanUndo = DebloatServiceFor().UndoCandidate() != null; } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { debloatCanUndo = false; }
         var actions = new WrapPanel();
         debloatScanView = Action("Verificar este PC", async (_, _) => await GuardAsync(ScanDebloat));
         debloatApplyView = Action("Aplicar selecionados", async (_, _) => await GuardAsync(ApplyDebloat), true);
@@ -1051,7 +1051,7 @@ public partial class MainWindow : Window
     private async Task UndoDebloat()
     {
         if (debloatRunning) return;
-        var run = DebloatUndo().LatestUndoable();
+        var run = DebloatServiceFor().UndoCandidate();
         if (run == null) { debloatCanUndo = false; debloatStatus = "Não há aplicação para desfazer."; UpdateToolsView(); return; }
         var plan = string.Join("\n", DebloatServiceFor().DescribeUndo(run).Select(line => "• " + line));
         if (MessageBox.Show(this, $"Desfazer a aplicação de {run.At.ToLocalTime():g}? O Nexo vai mudar:\n\n{plan}\n\nO Windows pode pedir autorização de administrador. Continuar?",
@@ -1071,7 +1071,7 @@ public partial class MainWindow : Window
 
     private void RefreshDebloatUndo()
     {
-        try { debloatCanUndo = DebloatUndo().LatestUndoable() != null; }
+        try { debloatCanUndo = DebloatServiceFor().UndoCandidate() != null; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { debloatCanUndo = false; }
     }
 

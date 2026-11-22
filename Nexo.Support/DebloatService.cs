@@ -44,10 +44,25 @@ public sealed class DebloatRun
     public bool CanUndo => UndoneAt == null && (Entries.Count > 0 || ProtectedItems.Count > 0);
 }
 
-/// <summary>Estado anterior dos itens elevados lido da pasta protegida, ou o motivo de não usá-lo.</summary>
-public sealed record DebloatProtectedUndo(IReadOnlyList<DebloatUndoEntry> Entries, string? Problem)
+/// <summary>
+/// Estado anterior dos itens elevados lido da pasta protegida, ou o motivo de não usá-lo. Done são os alvos ("Id|Kind|Target")
+/// que um Desfazer elevado anterior já restaurou, pelo marcador undone.json; eles saem de Entries. AlreadyUndone: todos já
+/// foram restaurados, e a aplicação não deve ser oferecida de novo.
+/// </summary>
+public sealed record DebloatProtectedUndo(IReadOnlyList<DebloatUndoEntry> Entries, string? Problem, IReadOnlyList<string>? Done = null, bool AlreadyUndone = false)
 {
+    public const string AlreadyUndoneText = "Esta aplicação já foi desfeita";
+    public IReadOnlyList<string> DoneTargets => Done ?? [];
     public static DebloatProtectedUndo Refused(string problem) => new([], problem);
+    public static string Key(DebloatUndoEntry entry) => entry.ItemId + "|" + entry.Kind + "|" + entry.Target;
+
+    /// <summary>Tira de entries os alvos já restaurados; se sobrar nada de uma lista não vazia, a aplicação já foi desfeita.</summary>
+    public static DebloatProtectedUndo Filter(IReadOnlyList<DebloatUndoEntry> entries, IReadOnlyCollection<string> done)
+    {
+        if (done.Count == 0) return new(entries, null);
+        var left = entries.Where(e => !done.Contains(Key(e), StringComparer.Ordinal)).ToArray();
+        return entries.Count > 0 && left.Length == 0 ? new([], AlreadyUndoneText, done.ToArray(), true) : new(left, null, done.ToArray());
+    }
 }
 
 /// <summary>
@@ -58,6 +73,8 @@ public sealed record DebloatProtectedUndo(IReadOnlyList<DebloatUndoEntry> Entrie
 public static class DebloatProtectedStore
 {
     public const string FileName = "undo.json";
+    /// <summary>Marcador gravado pelo executor elevado depois de um Desfazer: os alvos já restaurados desta aplicação.</summary>
+    public const string DoneFileName = "undone.json";
     public static string Root { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexoSupport", "debloat");
     public static bool ValidRunId(string? id) => id != null && Regex.IsMatch(id, "^[0-9a-f]{32}$");
 
@@ -82,7 +99,20 @@ public static class DebloatProtectedStore
                     return DebloatProtectedUndo.Refused("o registro protegido tem um item de tipo desconhecido");
                 entries.Add(new(T("Id"), kind, T("Target"), T("Previous")));
             }
-            return new(entries, null);
+            // O marcador do Desfazer passa pela mesma conferência; marcador não confiável ou de outra aplicação recusa tudo.
+            var done = new List<string>();
+            if (File.Exists(Path.Combine(directory, DoneFileName)))
+            {
+                if (untrusted(directory, DoneFileName) is { } doneReason) return DebloatProtectedUndo.Refused(doneReason);
+                using var marker = JsonDocument.Parse(File.ReadAllText(Path.Combine(directory, DoneFileName)));
+                var m = marker.RootElement;
+                if (!m.TryGetProperty("RunId", out var markerId) || markerId.ValueKind != JsonValueKind.String || markerId.GetString() != runId)
+                    return DebloatProtectedUndo.Refused("o marcador do Desfazer é de outra aplicação");
+                if (m.TryGetProperty("Done", out var keys))
+                    foreach (var key in keys.ValueKind == JsonValueKind.Array ? keys.EnumerateArray().ToArray() : [keys])
+                        if (key.ValueKind == JsonValueKind.String) done.Add(key.GetString()!);
+            }
+            return DebloatProtectedUndo.Filter(entries, done);
         }
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException)
         { return DebloatProtectedUndo.Refused("o registro protegido não pôde ser lido (" + ex.Message + ")"); }
@@ -159,13 +189,33 @@ public sealed class DebloatService
 
     internal const string LocalElevatedIgnored = "ignorado: o estado anterior de serviços, tarefas e recursos só vale da pasta protegida, e o arquivo local não é usado; nada foi alterado.";
 
+    /// <summary>
+    /// A aplicação que o botão Desfazer oferece: a mais recente pendente no arquivo local cujo registro protegido não diz que
+    /// ela já foi desfeita. Apagar o UndoneAt local não reabre um Desfazer que o executor elevado marcou; a marca local é
+    /// refeita quando dá.
+    /// </summary>
+    public DebloatRun? UndoCandidate()
+    {
+        foreach (var run in undo.Load().Where(r => r.CanUndo).OrderByDescending(r => r.At))
+        {
+            if (run.ProtectedItems.Count == 0 || !system.ReadProtectedUndo(run.Id).AlreadyUndone) return run;
+            run.UndoneAt = time.GetUtcNow();
+            try { undo.Save(run); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or System.Security.SecurityException or ArgumentException)
+            { Log("UndoRecord", undo.Path, "NotSaved", ex.Message); }
+        }
+        return null;
+    }
+
     /// <summary>O que o Desfazer vai mudar, item a item, para a confirmação antes do UAC. Serviços, tarefas e recursos vêm da pasta protegida.</summary>
     public IReadOnlyList<string> DescribeUndo(DebloatRun run) => DescribeUndo(run, run.ProtectedItems.Count > 0 ? system.ReadProtectedUndo(run.Id) : null);
 
     public static IReadOnlyList<string> DescribeUndo(DebloatRun run, DebloatProtectedUndo? stored)
     {
         var lines = new List<string>();
-        if (stored?.Problem != null)
+        if (stored?.AlreadyUndone == true)
+            lines.Add("Serviços, tarefas e recursos: " + DebloatProtectedUndo.AlreadyUndoneText.ToLowerInvariant() + " pelo executor elevado; nada será alterado.");
+        else if (stored?.Problem != null)
             lines.Add("Serviços, tarefas e recursos: não serão restaurados, porque o registro protegido do Desfazer não é confiável (" + stored.Problem + ").");
         foreach (var entry in run.Entries.Where(e => IsElevated(e.Kind)))
             lines.Add($"{DebloatCatalog.Find(entry.ItemId)?.Title ?? entry.ItemId}: entrada local de {entry.Target} {LocalElevatedIgnored}");
@@ -322,7 +372,7 @@ public sealed class DebloatService
             var elevated = chosen.Where(c => c.Item.Elevated).ToList();
             progress?.Report("Criando o ponto de restauração. O Windows pode pedir autorização de administrador.");
             Log("RestorePoint", "", "Requested");
-            var (point, results, error) = await RunElevated(DebloatScripts.Apply(elevated.Select(e => e.Item), run.Id), token);
+            var (point, results, error, _) = await RunElevated(DebloatScripts.Apply(elevated.Select(e => e.Item), run.Id), token);
             restore = point;
             Log("RestorePoint", point.SequenceNumber?.ToString(CultureInfo.InvariantCulture) ?? "", point.Ready ? "Confirmed" : "NotConfirmed", point.Reason);
             foreach (var item in elevated)
@@ -432,6 +482,7 @@ public sealed class DebloatService
         var outcomes = new List<DebloatOutcome>();
         var status = "Completed";
         string? warning = null;
+        var settled = new HashSet<string>(StringComparer.Ordinal); // já restaurados por um Desfazer elevado anterior
         try
         {
             Log("DebloatUndo", run.Id, "Started");
@@ -453,7 +504,16 @@ public sealed class DebloatService
                 // O estado vem da pasta protegida, conferida aqui (antes do UAC) e de novo pelo executor elevado.
                 var stored = system.ReadProtectedUndo(run.Id);
                 var expected = run.ProtectedItems.Distinct(StringComparer.Ordinal).ToList();
-                if (stored.Problem != null)
+                if (stored.AlreadyUndone)
+                {
+                    Log("ProtectedUndo", run.Id, "AlreadyUndone");
+                    foreach (var id in expected)
+                    {
+                        settled.Add(id);
+                        outcomes.Add(new(id, DebloatCatalog.Find(id)?.Title ?? id, DebloatStatus.NotApplied, DebloatProtectedUndo.AlreadyUndoneText + " pelo executor elevado; nada foi alterado."));
+                    }
+                }
+                else if (stored.Problem != null)
                 {
                     Log("ProtectedUndo", run.Id, "Refused", stored.Problem);
                     foreach (var id in expected)
@@ -472,11 +532,20 @@ public sealed class DebloatService
                         restorable.Add(entry);
                     }
                     foreach (var id in expected.Where(id => stored.Entries.All(e => e.ItemId != id)))
+                    {
+                        if (stored.DoneTargets.Any(key => key.StartsWith(id + "|", StringComparison.Ordinal)))
+                        { settled.Add(id); outcomes.Add(new(id, DebloatCatalog.Find(id)?.Title ?? id, DebloatStatus.NotApplied, "Já restaurado num Desfazer anterior; nada foi alterado.")); continue; }
                         outcomes.Add(new(id, DebloatCatalog.Find(id)?.Title ?? id, DebloatStatus.Failed, "O registro protegido não tem o estado anterior deste item; nada foi alterado."));
+                    }
                     if (restorable.Count > 0)
                     {
                         progress?.Report("Restaurando serviços e tarefas. O Windows pode pedir autorização de administrador.");
-                        var (_, results, error) = await RunElevated(DebloatScripts.Undo(run.Id), token, restorePoint: false);
+                        var (_, results, error, output) = await RunElevated(DebloatScripts.Undo(run.Id), token, restorePoint: false);
+                        if (results != null && DebloatScripts.ParseMarker(output) is { } markError)
+                        {
+                            warning = "O Desfazer restaurou os itens elevados, mas o marcador na pasta protegida não foi gravado (" + markError + "); esta aplicação ainda pode ser oferecida para desfazer de novo.";
+                            Log("UndoMarker", run.Id, "NotSaved", markError);
+                        }
                         foreach (var group in restorable.GroupBy(e => e.ItemId))
                         {
                             var item = DebloatCatalog.Find(group.Key)!;
@@ -523,14 +592,18 @@ public sealed class DebloatService
         catch (OperationCanceledException) when (token.IsCancellationRequested) { status = "Canceled"; }
         finally { Interlocked.Exchange(ref running, 0); }
 
-        if (status != "Canceled" && outcomes.Any(o => o.Status is DebloatStatus.Partial or DebloatStatus.Failed || o.Status == DebloatStatus.NotApplied && DebloatCatalog.Find(o.Id)?.Kind != DebloatKind.App))
+        if (status != "Canceled" && outcomes.Any(o => o.Status is DebloatStatus.Partial or DebloatStatus.Failed
+                || o.Status == DebloatStatus.NotApplied && DebloatCatalog.Find(o.Id)?.Kind != DebloatKind.App && !settled.Contains(o.Id)))
             status = "Partial";
         if (status == "Completed")
         {
             run.UndoneAt = time.GetUtcNow();
             try { undo.Save(run); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException or System.Security.SecurityException or ArgumentException)
-            { warning = "O Desfazer foi concluído, mas o registro não foi atualizado (" + ex.Message + "); a aplicação ainda pode aparecer como pendente."; }
+            {
+                var local = "O Desfazer foi concluído, mas o registro não foi atualizado (" + ex.Message + "); a aplicação ainda pode aparecer como pendente.";
+                warning = warning == null ? local : warning + " " + local;
+            }
         }
         foreach (var outcome in outcomes) Log("UndoItem", outcome.Id, outcome.Status.ToString(), outcome.Detail);
         if (warning != null) Log("UndoRecord", undo.Path, "NotSaved", warning);
@@ -539,15 +612,16 @@ public sealed class DebloatService
         return new(status, null, outcomes, run.Id, warning);
     }
 
-    private async Task<(RecoveryPointResult Point, IReadOnlyList<DebloatScripts.TargetResult>? Results, string? Error)> RunElevated(string script, CancellationToken token, bool restorePoint = true)
+    private async Task<(RecoveryPointResult Point, IReadOnlyList<DebloatScripts.TargetResult>? Results, string? Error, string Output)> RunElevated(string script, CancellationToken token, bool restorePoint = true)
     {
         string output;
         try { output = await system.RunElevatedAsync(script, token); }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
-        { const string denied = "a autorização de administrador foi recusada"; return (new(false, null, denied), null, denied); }
-        catch (Exception ex) { return (new(false, null, ex.Message), null, ex.Message); }
-        return DebloatScripts.ParseElevated(output, restorePoint);
+        { const string denied = "a autorização de administrador foi recusada"; return (new(false, null, denied), null, denied, ""); }
+        catch (Exception ex) { return (new(false, null, ex.Message), null, ex.Message, ""); }
+        var (point, results, error) = DebloatScripts.ParseElevated(output, restorePoint);
+        return (point, results, error, output);
     }
 
     private void Log(string action, string target, string outcome, string detail = "") => audit(new(time.GetUtcNow(), action, target, outcome, detail));
@@ -682,6 +756,7 @@ public static class DebloatScripts
         $nxRoot=Join-Path ([Environment]::GetFolderPath('CommonApplicationData')) 'NexoSupport\debloat'
         $nxDir=Join-Path $nxRoot $nxRunId
         $nxFile=Join-Path $nxDir 'undo.json'
+        $nxDone=Join-Path $nxDir 'undone.json'
         function Open-DebloatStore {
           try {
             Use-ProtectedDirectory (Split-Path -Parent $nxRoot)
@@ -694,13 +769,27 @@ public static class DebloatScripts
         function Save-DebloatUndo($entries) {
           Write-ProtectedFile $nxFile (ConvertTo-Json -InputObject ([pscustomobject]@{RunId=$nxRunId;Items=@($entries)}) -Depth 5)
         }
+        function Read-DebloatDone {
+          if(-not (Test-Path -LiteralPath $nxDone)){ return @() }
+          Assert-Trusted $nxDone
+          $d=Get-Content -LiteralPath $nxDone -Raw -Encoding UTF8 | ConvertFrom-Json
+          if([string]$d.RunId -cne $nxRunId){ throw 'o marcador do Desfazer é de outra aplicação.' }
+          @($d.Done | ForEach-Object { [string]$_ })
+        }
+        function Save-DebloatDone($done) {
+          Write-ProtectedFile $nxDone (ConvertTo-Json -InputObject ([pscustomobject]@{RunId=$nxRunId;At=(Get-Date).ToUniversalTime().ToString('o');Done=@($done)}) -Depth 3)
+        }
         function Read-DebloatUndo {
           try {
             foreach($p in @((Split-Path -Parent $nxRoot),$nxRoot,$nxDir,$nxFile)){ if(-not (Test-Path -LiteralPath $p)){ throw ($p + ': não existe.') }; Assert-Trusted $p }
             $data=Get-Content -LiteralPath $nxFile -Raw -Encoding UTF8 | ConvertFrom-Json
             if([string]$data.RunId -cne $nxRunId){ throw 'o registro protegido é de outra aplicação.' }
-            @($data.Items)
+            $done=@(Read-DebloatDone)
           } catch { throw ('Pasta protegida do Desfazer recusada: ' + $_.Exception.Message + ' Nada foi restaurado.') }
+          $all=@($data.Items)
+          $left=@($all | Where-Object { $done -cnotcontains ([string]$_.Id+'|'+[string]$_.Kind+'|'+[string]$_.Target) })
+          if($all.Count -gt 0 -and $left.Count -eq 0){ throw 'Esta aplicação já foi desfeita; nada foi restaurado.' }
+          $left
         }
 
         """;
@@ -828,7 +917,9 @@ public static class DebloatScripts
         var allowed = DebloatCatalog.Items.Where(i => i.Elevated).SelectMany(i => i.Targets.Select(t => Q(i.Id + "|" + i.Kind + "|" + t)));
         return RunIdLine(runId) + StoreFunctions + "$allowed=@(" + string.Join(",", allowed) + ")\n" + """
             $items=@()
-            foreach($e in @(Read-DebloatUndo)){
+            $pending=@(Read-DebloatUndo)
+            $prev=@(Read-DebloatDone)
+            foreach($e in $pending){
               $id=[string]$e.Id; $kind=[string]$e.Kind; $t=[string]$e.Target; $p=[string]$e.Previous
               $ok=($allowed -ccontains ($id+'|'+$kind+'|'+$t)) -and (($kind -ceq 'Service' -and $p -cmatch '^(Automatic|AutomaticDelayed|Manual|Disabled)\|(True|False)$') -or
                 ($kind -ceq 'ScheduledTask' -and $p -cmatch '^(Ready|Running|Queued|Disabled|Unknown)$') -or
@@ -849,10 +940,14 @@ public static class DebloatScripts
                   if($p -ceq 'Enabled'){ Enable-WindowsOptionalFeature -Online -FeatureName $t -NoRestart -ErrorAction Stop | Out-Null }
                   $detail='restaurado; reinicie o Windows para concluir'
                 }
-                $items+=[pscustomobject]@{Id=$id;Target=$t;Status='Ok';Previous='';Detail=$detail}
+                $items+=[pscustomobject]@{Id=$id;Target=$t;Status='Ok';Previous='';Detail=$detail;Key=($id+'|'+$kind+'|'+$t)}
               } catch { $items+=[pscustomobject]@{Id=$id;Target=$t;Status='Failed';Previous='';Detail=$_.Exception.Message} }
             }
-            [pscustomobject]@{Items=$items}
+            # Marcador antes do resultado: o que foi restaurado não volta num 2º Desfazer; o que falhou continua pendente.
+            $marked=$true; $markError=''
+            $restoredKeys=@($items | Where-Object { $_.Status -ceq 'Ok' } | ForEach-Object { [string]$_.Key })
+            if($restoredKeys.Count -gt 0){ try { Save-DebloatDone (@($prev) + $restoredKeys) } catch { $marked=$false; $markError=$_.Exception.Message } }
+            [pscustomobject]@{Items=$items;Marked=$marked;MarkError=$markError}
             """;
     }
     /// <summary>
@@ -877,6 +972,25 @@ public static class DebloatScripts
                 return item.Targets.Contains(entry.Target, StringComparer.OrdinalIgnoreCase);
             default: return false;
         }
+    }
+
+    /// <summary>
+    /// Marcador do Desfazer na saída do executor elevado: null quando ele confirmou a gravação (Marked=true); senão, o
+    /// motivo. Sem o campo, o marcador não está confirmado.
+    /// </summary>
+    internal static string? ParseMarker(string output)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(output);
+            var data = document.RootElement.GetProperty("data");
+            using var nested = data.ValueKind == JsonValueKind.String ? JsonDocument.Parse(data.GetString()!) : null;
+            var body = nested?.RootElement ?? data;
+            if (body.TryGetProperty("Marked", out var marked) && marked.ValueKind == JsonValueKind.True) return null;
+            return body.TryGetProperty("MarkError", out var error) && error.ValueKind == JsonValueKind.String && error.GetString() is { Length: > 0 } text
+                ? text : "o executor elevado não confirmou o marcador";
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException) { return "o executor elevado não confirmou o marcador"; }
     }
 
     internal static (RecoveryPointResult Point, IReadOnlyList<TargetResult>? Results, string? Error) ParseElevated(string output, bool restorePoint)

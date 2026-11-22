@@ -368,13 +368,14 @@ internal static class DebloatChecks
             Entries = [new("sysmain", DebloatKind.Service, "SysMain", "Disabled|False"), new("recall", DebloatKind.OptionalFeature, "Recall", "Enabled"), new("sysmain", DebloatKind.Service, "WinDefend", "Disabled|False")],
         };
         tampered.Protected[tamperedRun.Id] = [new("sysmain", DebloatKind.Service, "SysMain", "Manual|False")];
+        // O plano é mostrado antes do Desfazer (depois dele, o marcador diz que a aplicação já foi desfeita).
+        var tamperedPlan = DebloatService.DescribeUndo(tamperedRun, tampered.ReadProtectedUndo(tamperedRun.Id));
         var tamperedResult = await new DebloatService(tampered, new DebloatUndoStore(Path.Combine(dir.Path, "tampered.json")), _ => { }).UndoAsync(tamperedRun, null, CancellationToken.None);
         check(tampered.Elevated.Count == 1 && tampered.Elevated[0] == DebloatScripts.Undo(tamperedRun.Id) && !tampered.Elevated[0].Contains("WinDefend")
             && tampered.Restored.Count == 1 && tampered.Restored[0] == new DebloatUndoEntry("sysmain", DebloatKind.Service, "SysMain", "Manual|False")
             && tamperedResult.Items.Count(i => i.Status == DebloatStatus.Failed && i.Detail.Contains("ignorado")) == 3
             && tamperedResult.Items.Any(i => i.Id == "sysmain" && i.Status == DebloatStatus.Ok),
             "Debloat: entradas de serviço ou recurso plantadas no arquivo local não mudam o que o Desfazer elevado restaura (" + culture + ")");
-        var tamperedPlan = DebloatService.DescribeUndo(tamperedRun, tampered.ReadProtectedUndo(tamperedRun.Id));
         check(tamperedPlan.Contains("SysMain: volta ao início manual.") && !tamperedPlan.Any(l => l.Contains("volta a ser ativado")) && tamperedPlan.Count(l => l.Contains("ignorado")) == 3,
             "Debloat: o plano do Desfazer mostra o estado da pasta protegida e marca as entradas locais ignoradas (" + culture + ")");
 
@@ -419,6 +420,54 @@ internal static class DebloatChecks
         check(deniedUndo.Status == "Partial" && deniedUndo.Items.Single(i => i.Id == "sysmain").Status == DebloatStatus.NotApplied
             && deniedUndo.Items.Single(i => i.Id == "file-extensions").Status == DebloatStatus.Ok && deniedRun.UndoneAt == null,
             "Debloat: Desfazer com UAC recusado restaura o registro e deixa o resto para outra tentativa (" + culture + ")");
+
+        // Marcador do Desfazer na pasta protegida: apagar o UndoneAt local não reabre um Desfazer que o executor marcou.
+        check(system.Done.TryGetValue(run.Id, out var marked) && marked.Contains("sysmain|Service|SysMain") && marked.Contains("recall|OptionalFeature|Recall"),
+            "Debloat: o Desfazer elevado bem-sucedido deixa o marcador com os alvos restaurados (" + culture + ")");
+        var reopened = store.Latest()!;
+        reopened.UndoneAt = null; store.Save(reopened);
+        var elevatedBefore = system.Elevated.Count;
+        var candidate = service.UndoCandidate();
+        check(candidate == null && store.Latest()!.UndoneAt != null,
+            "Debloat: com o UndoneAt local apagado, a aplicação marcada pelo executor não é oferecida e a marca local é refeita (" + culture + ")");
+        var replay = await service.UndoAsync(reopened, null, CancellationToken.None);
+        check(system.Elevated.Count == elevatedBefore && replay.Status == "Completed"
+            && replay.Items.Where(i => i.Id is "sysmain" or "recall").All(i => i.Status == DebloatStatus.NotApplied && i.Detail.Contains(DebloatProtectedUndo.AlreadyUndoneText) && !i.Detail.Contains("não é confiável"))
+            && DebloatService.DescribeUndo(reopened, system.ReadProtectedUndo(reopened.Id)).Any(l => l.Contains("já foi desfeita") && l.Contains("nada será alterado")),
+            "Debloat: Desfazer de aplicação já desfeita é recusado sem UAC, com a mensagem, também no plano (" + culture + ")");
+
+        // Desfazer parcial: só o que foi restaurado fica marcado; um 2º Desfazer cuida só do que falhou.
+        var partialSystem = new FakeSystem(Inventory()) { FailUndoTarget = "SysMain" };
+        var partialRun = new DebloatRun { At = DateTimeOffset.UtcNow, RestorePoint = 41, ProtectedItems = ["sysmain", "recall"] };
+        partialSystem.Protected[partialRun.Id] = [new("sysmain", DebloatKind.Service, "SysMain", "Manual|False"), new("recall", DebloatKind.OptionalFeature, "Recall", "Enabled")];
+        var partialStore = new DebloatUndoStore(Path.Combine(dir.Path, "partial-undo.json"));
+        partialStore.Save(partialRun);
+        var partialService = new DebloatService(partialSystem, partialStore, _ => { });
+        var first = await partialService.UndoAsync(partialRun, null, CancellationToken.None);
+        check(first.Status == "Partial" && partialSystem.Done[partialRun.Id].SequenceEqual(["recall|OptionalFeature|Recall"]) && partialService.UndoCandidate()?.Id == partialRun.Id,
+            "Debloat: Desfazer parcial marca só o restaurado e a aplicação continua oferecida (" + culture + ")");
+        partialSystem.FailUndoTarget = null;
+        partialSystem.Restored.Clear();
+        var second = await partialService.UndoAsync(partialRun, null, CancellationToken.None);
+        var sb = second.Items.ToDictionary(i => i.Id);
+        check(partialSystem.Restored.Count == 1 && partialSystem.Restored[0].Target == "SysMain" && sb["sysmain"].Status == DebloatStatus.Ok
+            && sb["recall"].Status == DebloatStatus.NotApplied && sb["recall"].Detail.Contains("Desfazer anterior") && second.Status == "Completed"
+            && partialService.UndoCandidate() == null,
+            "Debloat: o 2º Desfazer restaura só o que falhou, não reaplica o resto e conclui (" + culture + ")");
+
+        // Marcador não gravado: o resultado diz que o Desfazer foi feito, mas pode ser oferecido de novo.
+        var unmarked = new FakeSystem(Inventory()) { MarkFails = true };
+        var unmarkedRun = new DebloatRun { At = DateTimeOffset.UtcNow, ProtectedItems = ["sysmain"] };
+        unmarked.Protected[unmarkedRun.Id] = [new("sysmain", DebloatKind.Service, "SysMain", "Manual|False")];
+        var unmarkedResult = await new DebloatService(unmarked, new DebloatUndoStore(Path.Combine(dir.Path, "unmarked.json")), _ => { }).UndoAsync(unmarkedRun, null, CancellationToken.None);
+        check(unmarkedResult.Items.Single().Status == DebloatStatus.Ok && unmarkedResult.Warning is { } markWarning && markWarning.Contains("marcador") && markWarning.Contains("disco cheio") && markWarning.Contains("de novo"),
+            "Debloat: marcador não gravado aparece no resultado, sem esconder que o Desfazer pode ser oferecido de novo (" + culture + ")");
+        var silent = new FakeSystem(Inventory()) { ElevatedOutput = _ => "{\"success\":true,\"data\":{\"Items\":[{\"Id\":\"sysmain\",\"Target\":\"SysMain\",\"Status\":\"Ok\"}]}}" };
+        var silentRun = new DebloatRun { At = DateTimeOffset.UtcNow, ProtectedItems = ["sysmain"] };
+        silent.Protected[silentRun.Id] = [new("sysmain", DebloatKind.Service, "SysMain", "Manual|False")];
+        var silentResult = await new DebloatService(silent, new DebloatUndoStore(Path.Combine(dir.Path, "silent.json")), _ => { }).UndoAsync(silentRun, null, CancellationToken.None);
+        check(silentResult.Warning?.Contains("não confirmou o marcador") == true,
+            "Debloat: saída elevada sem confirmar o marcador conta como marcador não gravado (" + culture + ")");
     }
 
     private static async Task Store(Action<bool, string> check)
@@ -474,6 +523,34 @@ internal static class DebloatChecks
         var app = DebloatProtectedStore.Read(root, RunA, (_, _) => null).Problem;
         check(other != null && other.Contains("outra aplicação") && kind != null && app != null && broken != null && single.Problem == null && single.Entries.Count == 1,
             "Debloat: registro protegido de outra aplicação, com item do perfil ou de app, ou ilegível é recusado; item único do ConvertTo-Json é aceito");
+        // Marcador undone.json: alvos já restaurados saem; todos restaurados é "já foi desfeita"; marcador não confiável recusa.
+        Write("{\"RunId\":\"" + RunA + "\",\"Items\":[{\"Id\":\"sysmain\",\"Kind\":\"Service\",\"Target\":\"SysMain\",\"Previous\":\"Manual|True\"},{\"Id\":\"recall\",\"Kind\":\"OptionalFeature\",\"Target\":\"Recall\",\"Previous\":\"Enabled\"}]}");
+        var doneFile = Path.Combine(runDir, DebloatProtectedStore.DoneFileName);
+        void Mark(string json) => File.WriteAllText(doneFile, json, new UTF8Encoding(true));
+        Mark("{\"RunId\":\"" + RunA + "\",\"At\":\"2026-11-22T18:00:00Z\",\"Done\":[\"recall|OptionalFeature|Recall\"]}");
+        var checkedFiles = new List<string>();
+        var half = DebloatProtectedStore.Read(root, RunA, (_, f) => { checkedFiles.Add(f); return null; });
+        check(half.Problem == null && !half.AlreadyUndone && half.Entries.Single().Target == "SysMain" && half.DoneTargets.Single() == "recall|OptionalFeature|Recall"
+            && checkedFiles.SequenceEqual([DebloatProtectedStore.FileName, DebloatProtectedStore.DoneFileName]),
+            "Debloat: o marcador tira do Desfazer os alvos já restaurados e passa pela mesma conferência de confiança");
+        Mark("{\"RunId\":\"" + RunA + "\",\"Done\":[\"sysmain|Service|SysMain\",\"recall|OptionalFeature|Recall\"]}");
+        var whole = DebloatProtectedStore.Read(root, RunA, (_, _) => null);
+        Mark("{\"RunId\":\"" + RunA + "\",\"Done\":\"sysmain|Service|SysMain\"}");
+        var singleDone = DebloatProtectedStore.Read(root, RunA, (_, _) => null);
+        Mark("{\"RunId\":\"" + RunA + "\",\"Done\":[\"SYSMAIN|Service|SysMain\"]}");
+        var caseDone = DebloatProtectedStore.Read(root, RunA, (_, _) => null);
+        check(whole.AlreadyUndone && whole.Entries.Count == 0 && whole.Problem == DebloatProtectedUndo.AlreadyUndoneText
+            && singleDone.Entries.Single().Target == "Recall" && caseDone.Entries.Count == 2,
+            "Debloat: com todos os alvos no marcador, a aplicação já foi desfeita; item único e maiúsculas diferentes não marcam além do gravado");
+        Mark("{\"RunId\":\"" + RunB + "\",\"Done\":[]}");
+        var foreignMark = DebloatProtectedStore.Read(root, RunA, (_, _) => null).Problem;
+        Mark("{ quebrado");
+        var brokenMark = DebloatProtectedStore.Read(root, RunA, (_, _) => null).Problem;
+        Mark("{\"RunId\":\"" + RunA + "\",\"Done\":[]}");
+        var untrustedMark = DebloatProtectedStore.Read(root, RunA, (_, f) => f == DebloatProtectedStore.DoneFileName ? "undone.json: dono não confiável" : null);
+        check(foreignMark?.Contains("outra aplicação") == true && brokenMark != null && untrustedMark.Problem == "undone.json: dono não confiável" && untrustedMark.Entries.Count == 0 && !untrustedMark.AlreadyUndone,
+            "Debloat: marcador de outra aplicação, ilegível ou não confiável recusa o Desfazer elevado");
+        File.Delete(doneFile);
         check(DebloatScripts.ParseRemoval("{\"Package\":\"A_1\",\"Status\":\"Ok\",\"Detail\":\"\"}")["A_1"].Status == "Ok"
             && DebloatScripts.ParseRemoval("[{\"Package\":\"A_1\",\"Status\":\"Estranho\"}]")["A_1"].Status == "Failed",
             "Debloat: a remoção só conta Ok com evidência explícita");
@@ -588,9 +665,14 @@ internal static class DebloatChecks
         public Dictionary<string, List<DebloatUndoEntry>> Protected { get; } = [];
         public string? ProtectedProblem { get; init; }
         public List<DebloatUndoEntry> Restored { get; } = [];
+        // O marcador undone.json simulado: os alvos que o executor elevado falso já restaurou.
+        public Dictionary<string, List<string>> Done { get; } = [];
+        public string? FailUndoTarget { get; set; }
+        public bool MarkFails { get; set; }
 
         public DebloatProtectedUndo ReadProtectedUndo(string runId) => ProtectedProblem != null ? DebloatProtectedUndo.Refused(ProtectedProblem)
-            : Protected.TryGetValue(runId, out var entries) ? new(entries.ToArray(), null) : DebloatProtectedUndo.Refused(runId + @"\undo.json: não existe");
+            : Protected.TryGetValue(runId, out var entries) ? DebloatProtectedUndo.Filter(entries.ToArray(), Done.TryGetValue(runId, out var done) ? done : [])
+            : DebloatProtectedUndo.Refused(runId + @"\undo.json: não existe");
 
         public Task<string> RunUserScriptAsync(string script, int timeoutSeconds, CancellationToken token)
         {
@@ -629,9 +711,21 @@ internal static class DebloatChecks
             var runId = System.Text.RegularExpressions.Regex.Match(script, @"\$nxRunId='([0-9a-f]{32})'").Groups[1].Value;
             if (undo)
             {
-                if (!Protected.TryGetValue(runId, out var stored)) return JsonSerializer.Serialize(new { success = false, error = DebloatScripts.StoreRefusal + runId + ": não existe. Nada foi restaurado." });
-                Restored.AddRange(stored);
-                return JsonSerializer.Serialize(new { success = true, data = new { Items = stored.Select(e => new { Id = e.ItemId, e.Target, Status = "Ok", Previous = "", Detail = "restaurado" }) } });
+                if (!Protected.TryGetValue(runId, out var all)) return JsonSerializer.Serialize(new { success = false, error = DebloatScripts.StoreRefusal + runId + ": não existe. Nada foi restaurado." });
+                var read = ReadProtectedUndo(runId);
+                if (read.AlreadyUndone) return JsonSerializer.Serialize(new { success = false, error = "Esta aplicação já foi desfeita; nada foi restaurado." });
+                var ok = read.Entries.Where(e => e.Target != FailUndoTarget).ToArray();
+                Restored.AddRange(ok);
+                if (!MarkFails && ok.Length > 0) Done[runId] = [.. read.DoneTargets, .. ok.Select(DebloatProtectedUndo.Key)];
+                return JsonSerializer.Serialize(new
+                {
+                    success = true,
+                    data = new
+                    {
+                        Items = read.Entries.Select(e => new { Id = e.ItemId, e.Target, Status = e.Target == FailUndoTarget ? "Failed" : "Ok", Previous = "", Detail = e.Target == FailUndoTarget ? "Acesso negado" : "restaurado" }),
+                        Marked = !MarkFails, MarkError = MarkFails ? "disco cheio" : "",
+                    },
+                });
             }
             var saved = new List<DebloatUndoEntry>();
             var items = new List<object>();
@@ -798,7 +892,7 @@ internal static class DebloatScriptChecks
                 $script:calls=@()
                 function Use-ProtectedDirectory($path) { $script:calls+=('Use:'+(Split-Path -Leaf $path)); if($script:hostile -and (Split-Path -Leaf $path) -eq 'debloat'){ throw ('debloat: ACE de escrita para S-1-5-32-545') } }
                 function New-ProtectedDirectory($path) { $script:calls+=('New:'+(Split-Path -Leaf $path)); [void][IO.Directory]::CreateDirectory($path) }
-                function Assert-Trusted($path) { $script:calls+=('Trust:'+(Split-Path -Leaf $path)); if($script:untrusted -and $path -like '*undo.json'){ throw ($path + ': dono não confiável') } }
+                function Assert-Trusted($path) { $script:calls+=('Trust:'+(Split-Path -Leaf $path)); if($script:untrusted -and $path -like '*undo.json'){ throw ($path + ': dono não confiável') }; if($script:untrustedDone -and $path -like '*undone.json'){ throw ('undone.json: dono não confiável') } }
                 function Write-ProtectedFile($path, $text) { $script:calls+=('Write:'+(Split-Path -Leaf $path)); [IO.File]::WriteAllText($path, $text) }
                 """;
             string Own(string body, string setup = "") => "$nxRunId='" + RunId + "'\n" + networkFakes + "\n" + setup + "\n" + rooted + "\n"
@@ -819,6 +913,23 @@ internal static class DebloatScriptChecks
             var absent = await Run(shell, Own("@(Read-DebloatUndo)", "Remove-Item -LiteralPath " + WindowsTools.Quote(Path.Combine(temp, "NexoSupport")) + " -Recurse -Force -ErrorAction SilentlyContinue"));
             check(unreadable.Contains("dono não confiável") && unreadable.Contains("Nada foi restaurado") && foreign.Contains("outra aplicação") && absent.Contains("não existe") && absent.Contains("\"success\":false"),
                 "Debloat: o Desfazer elevado recusa registro protegido não confiável, de outra aplicação ou ausente: " + Short(unreadable + " | " + foreign + " | " + absent));
+            // Marcador: Save-DebloatDone grava pela função protegida; Read-DebloatUndo tira o já restaurado e recusa o todo desfeito.
+            string Seed(string done) => "Remove-Item -LiteralPath " + WindowsTools.Quote(Path.Combine(temp, "NexoSupport")) + " -Recurse -Force -ErrorAction SilentlyContinue; "
+                + "$d=Join-Path " + WindowsTools.Quote(temp) + " ('NexoSupport\\debloat\\" + RunId + "'); [void][IO.Directory]::CreateDirectory($d); "
+                + "[IO.File]::WriteAllText((Join-Path $d 'undo.json'), '{\"RunId\":\"" + RunId + "\",\"Items\":[{\"Id\":\"sysmain\",\"Kind\":\"Service\",\"Target\":\"SysMain\",\"Previous\":\"Manual|False\"},{\"Id\":\"recall\",\"Kind\":\"OptionalFeature\",\"Target\":\"Recall\",\"Previous\":\"Enabled\"}]}')"
+                + (done.Length == 0 ? "" : "; [IO.File]::WriteAllText((Join-Path $d 'undone.json'), '" + done + "')");
+            var saved = await Run(shell, Own("Save-DebloatDone @('recall|OptionalFeature|Recall'); @(Read-DebloatUndo)", Seed("")));
+            var allDone = await Run(shell, Own("@(Read-DebloatUndo)", Seed("{\"RunId\":\"" + RunId + "\",\"Done\":[\"sysmain|Service|SysMain\",\"recall|OptionalFeature|Recall\"]}")));
+            var foreignDone = await Run(shell, Own("@(Read-DebloatUndo)", Seed("{\"RunId\":\"fedcba9876543210fedcba9876543210\",\"Done\":[]}")));
+            var untrustedDone = await Run(shell, Own("@(Read-DebloatUndo)", "$script:untrustedDone=$true; " + Seed("{\"RunId\":\"" + RunId + "\",\"Done\":[]}")));
+            var caseOnly = await Run(shell, Own("@(Read-DebloatUndo)", Seed("{\"RunId\":\"" + RunId + "\",\"Done\":[\"SYSMAIN|Service|SysMain\",\"recall|OptionalFeature|Recall\"]}")));
+            check(caseOnly.Contains("\"success\":true") && caseOnly.Contains("\"Target\":\"SysMain\""),
+                "Debloat: no executor elevado, o marcador só tira o alvo gravado exatamente igual: " + Short(caseOnly));
+            check(saved.Contains("\"success\":true") && saved.Contains("Write:undone.json") && saved.Contains("Trust:undone.json") && saved.Contains("\"Target\":\"SysMain\"") && !saved.Contains("\"Target\":\"Recall\""),
+                "Debloat: o marcador é gravado pela função protegida e o Desfazer elevado seguinte só lê o que não foi restaurado: " + Short(saved));
+            check(allDone.Contains("\"success\":false") && allDone.Contains("Esta aplicação já foi desfeita") && foreignDone.Contains("marcador do Desfazer é de outra aplicação")
+                && untrustedDone.Contains("undone.json: dono não confiável") && untrustedDone.Contains("Nada foi restaurado"),
+                "Debloat: o executor elevado recusa aplicação já desfeita e marcador de outra aplicação ou não confiável: " + Short(allDone + " | " + foreignDone + " | " + untrustedDone));
         }
         finally { try { Directory.Delete(temp, true); } catch (IOException) { } }
 
@@ -870,6 +981,8 @@ internal static class DebloatScriptChecks
               [pscustomobject]@{Id='recall';Kind='OptionalFeature';Target='Microsoft-Hyper-V-All';Previous='Enabled'},
               [pscustomobject]@{Id='ceip-tasks';Kind='ScheduledTask';Target='\Microsoft\Windows\Customer Experience Improvement Program\|Consolidator';Previous='Ready;Start-Process calc'},
               [pscustomobject]@{Id='sysmain';Kind='Service';Target='SYSMAIN';Previous='Manual|False'}) }
+            function Read-DebloatDone { @('xbox-services|Service|XboxNetApiSvc') }
+            function Save-DebloatDone($done) { $script:calls+=('Done:'+(@($done) -join ',')) }
 
             """;
         var undoScript = DebloatScripts.Undo(RunId);
@@ -878,10 +991,19 @@ internal static class DebloatScriptChecks
         try { using var doc = JsonDocument.Parse(undoJson); restoredCalls = doc.RootElement.GetProperty("calls").EnumerateArray().Select(c => c.GetString()!).ToArray(); }
         catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { }
         check(undoScript.Contains(DebloatScripts.StoreFunctions)
-            && restoredCalls.SequenceEqual(["Set:SysMain:Automatic", "sc:config SysMain start= delayed-auto", "Start:SysMain", "Set:XblGameSave:Manual", "EnableTask:Consolidator", "EnableFeature:Recall"]),
+            && restoredCalls.SequenceEqual(["Set:SysMain:Automatic", "sc:config SysMain start= delayed-auto", "Start:SysMain", "Set:XblGameSave:Manual", "EnableTask:Consolidator", "EnableFeature:Recall",
+                @"Done:xbox-services|Service|XboxNetApiSvc,sysmain|Service|SysMain,xbox-services|Service|XblGameSave,ceip-tasks|ScheduledTask|\Microsoft\Windows\Customer Experience Improvement Program\|Consolidator,ceip-tasks|ScheduledTask|\Microsoft\Windows\Autochk\|Proxy,recall|OptionalFeature|Recall"]),
             "Debloat: o script real do Desfazer restaura início, execução, tarefa e recurso do registro protegido: " + string.Join(",", restoredCalls) + " " + Short(undoJson));
         check(undoJson.Split("fora do catálogo").Length - 1 == 6 && undoJson.Split("\"Status\":\"Ok\"").Length - 1 == 5,
             "Debloat: o script elevado do Desfazer recusa alvo fora do catálogo, tipo trocado, maiúsculas diferentes e estado que o Nexo não grava: " + Short(undoJson));
+        check(undoJson.Contains("\"Marked\":true") && DebloatScripts.ParseMarker("{\"success\":true,\"data\":" + JsonDocument.Parse(undoJson).RootElement.GetProperty("data").GetRawText() + "}") == null,
+            "Debloat: o script real do Desfazer confirma o marcador na saída: " + Short(undoJson));
+        var markFailJson = await Run(shell, undoFakes + "\n" + Elevated(undoScript, readFake.Replace("{ $script:calls+=('Done:'", "{ throw 'disco cheio'; $script:calls+=('Done:'")));
+        check(markFailJson.Contains("\"success\":true") && DebloatScripts.ParseMarker(ResultOf(markFailJson)) == "disco cheio" && markFailJson.Contains("\"Status\":\"Ok\""),
+            "Debloat: falha ao gravar o marcador não esconde o resultado e chega ao aplicativo com o motivo: " + Short(markFailJson));
+        var nothingJson = await Run(shell, undoFakes + "\n" + Elevated(undoScript, "function Read-DebloatUndo { @([pscustomobject]@{Id='sysmain';Kind='Service';Target='WinDefend';Previous='Disabled|False'}) }\nfunction Read-DebloatDone { @() }\nfunction Save-DebloatDone($done) { throw 'não devia gravar' }\n"));
+        check(DebloatScripts.ParseMarker(ResultOf(nothingJson)) == null && nothingJson.Contains("fora do catálogo") && !nothingJson.Contains("não devia gravar"),
+            "Debloat: sem nada restaurado, o Desfazer não grava marcador e não falha por isso: " + Short(nothingJson));
         var refusedJson = await Run(shell, undoFakes + "\n" + Elevated(undoScript, "function Read-DebloatUndo { throw 'Pasta protegida do Desfazer recusada: undo.json: não existe. Nada foi restaurado.' }\n"));
         check(refusedJson.Contains("\"success\":false") && refusedJson.Contains("undo.json: não existe") && !refusedJson.Contains("Set:"),
             "Debloat: sem registro protegido confiável, o script elevado do Desfazer não restaura nada: " + Short(refusedJson));
@@ -897,7 +1019,7 @@ internal static class DebloatScriptChecks
                 + "ConvertTo-Json -InputObject ([pscustomobject]@{errors=@($e).Count;names=$names}) -Compress");
         }
         finally { File.Delete(block); }
-        check(parseJson.Contains("\"errors\":0") && ProtectedFolderScript.Functions.Concat(["Open-DebloatStore", "Save-DebloatUndo", "Read-DebloatUndo"]).All(f => parseJson.Contains("\"" + f + "\"")),
+        check(parseJson.Contains("\"errors\":0") && ProtectedFolderScript.Functions.Concat(["Open-DebloatStore", "Save-DebloatUndo", "Read-DebloatUndo", "Read-DebloatDone", "Save-DebloatDone"]).All(f => parseJson.Contains("\"" + f + "\"")),
             "Debloat: o bloco da pasta protegida é PowerShell válido e define as funções da rede e as do Desfazer: " + Short(parseJson));
         const string reasonCases = """
 
@@ -919,6 +1041,13 @@ internal static class DebloatScriptChecks
     }
 
     private static string Short(string text) => text.Length <= 400 ? text : text[..400] + "…";
+
+    // A saída do embrulho Elevated traz {result, calls}; o executor real devolve só o result.
+    private static string ResultOf(string json)
+    {
+        try { using var doc = JsonDocument.Parse(json); return doc.RootElement.GetProperty("result").GetRawText(); }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { return json; }
+    }
 
     private static async Task<string> Run(string shell, string script)
     {
