@@ -11,6 +11,12 @@ if (args.Contains("--embedded-temperature"))
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
+if (args.Contains("--module-path"))
+{
+    await ModulePathGuardChecks.Run(Assert);
+    Console.WriteLine($"{count} verificações aprovadas.");
+    return;
+}
 if (args.Contains("--optimization")) { await BasicOptimizationChecks.Run(Assert); return; }
 if (args.Contains("--network-decision"))
 {
@@ -36,6 +42,7 @@ if (args.Contains("--network-recovery"))
 try
 {
     EmbeddedTemperatureChecks.Run(Assert);
+    await ModulePathGuardChecks.Run(Assert);
     await BasicOptimizationChecks.Run(Assert);
     await NetworkDecisionChecks.Run(Assert);
     HealthDataChecks.Run(Path.Combine(root, "operational"), Assert);

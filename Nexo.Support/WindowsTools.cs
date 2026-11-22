@@ -1159,8 +1159,11 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     internal const int CommandLineLimit = 32767;
     internal static string ElevatedShell => Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
 
-    /// <summary>Argumentos do powershell.exe elevado: o script vai inteiro, em UTF-16 e Base64, em -EncodedCommand.</summary>
-    internal static string[] ElevatedArguments(string script) => ["-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(script))];
+    /// <summary>
+    /// Argumentos do powershell.exe elevado: o script vai inteiro, em UTF-16 e Base64, em -EncodedCommand, e começa
+    /// restringindo o PSModulePath aos módulos do Windows (#131).
+    /// </summary>
+    internal static string[] ElevatedArguments(string script) => ["-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(PowerShellModulePath.Prefix(script)))];
 
     /// <summary>Tamanho da linha de comando que o Windows recebe: caminho entre aspas e argumentos separados por espaço.</summary>
     internal static int CommandLength(IReadOnlyList<string> arguments) => ElevatedShell.Length + 2 + arguments.Sum(argument => argument.Length + 1);
@@ -1173,9 +1176,16 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         if (length > CommandLineLimit) throw new InvalidOperationException($"O comando elevado tem {length} caracteres e passa do limite de {CommandLineLimit} da linha de comando do Windows. A operação não foi iniciada e nada foi alterado.");
     }
 
-    internal static Process StartElevated(IReadOnlyList<string> arguments)
+    // Antes do UAC: o comando cabe na linha de comando e o script começa com a fixação do PSModulePath (#131).
+    internal static void CheckElevatedLaunch(IReadOnlyList<string> arguments)
     {
         EnsureFits(arguments);
+        PowerShellModulePath.Require(arguments);
+    }
+
+    internal static Process StartElevated(IReadOnlyList<string> arguments)
+    {
+        CheckElevatedLaunch(arguments);
         var start = new ProcessStartInfo(ElevatedShell) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         return Process.Start(start) ?? throw new IOException("O Windows não iniciou a operação elevada.");
