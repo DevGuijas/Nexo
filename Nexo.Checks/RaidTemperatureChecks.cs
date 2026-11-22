@@ -43,6 +43,9 @@ internal static class RaidTemperatureChecks
                 TaskManagerTemperature(assert, culture);
                 Questions(assert, culture);
                 QaEdges(assert, culture);
+                RaidInAnswer(assert, culture);
+                ClosedDiskUsageRetest(assert, culture);
+                SensorDriverOffer(assert, culture);
             }
             await DiskHealthFlow(store, actor, assert);
             await TemperatureFlow(store, actor, assert);
@@ -222,8 +225,137 @@ internal static class RaidTemperatureChecks
             "#135: pedido que não é de temperatura nem de saúde dos discos não ganha consulta nem linha do monitor");
     }
 
+    // Revalidação no PC (afeefb7, 22/11, #135 reaberta): as duas respostas reais sobre a saúde dos discos resumiram com "sem
+    // alertas informados" e não citaram o limite do RAID; o CitesStorage dava o estado por citado e a nota do RAID, que só ia
+    // junto com a linha do estado, se perdia.
+    private const string Answer21 = "Os discos físicos do seu sistema estão sem alertas informados pelo Windows, o que indica que eles estão em bom estado. Aqui está um resumo:\n\n"
+        + "1. **Estado dos discos**: sem alertas.\n2. **Espaço livre**: o C: tem 77,9% livre.\n3. **Limitações do relatório**:\n"
+        + "   - A temperatura da CPU não está disponível devido ao driver PawnIO não estar instalado.\n"
+        + "   - O estado dos discos é informado pelo Windows Storage, que não é uma leitura SMART completa.\n\nSe precisar de mais alguma coisa, estou à disposição.";
+    private const string Answer21bStart = "Os discos do seu computador estão sem alertas informados pelo Windows. Ambos os discos físicos (USB e SSD em RAID) estão em bom estado, com status \"Healthy\" e \"OperationalStatus OK\".\n\n"
+        + "**Volume T:_**: Há um alerta de pouco espaço (7,0% livre), mas ele já foi resolvido em leituras recentes.";
+    private const string Answer21bSuggestion = " Continue a monitorar esse volume… pode ser útil verificar o uso do disco com o gerenciador de armazenamento do Windows ou revisar o conteúdo dos volumes.";
+
+    private static void RaidInAnswer(Action<bool, string> assert, string culture)
+    {
+        var disks = Observed(PcReport()); disks.AsksDiskHealth = true;
+        var wrong = new List<string>();
+        foreach (var text in new[] { Answer21, Answer21bStart, Answer21.Replace("\n", "\r\n") })
+        {
+            var shown = disks.WithSensorFigures(text).ReplaceLineEndings("\n");
+            if (Occurrences(shown, HealthReportPresentation.RaidScope) != 1 || shown.Contains("Pelo monitor de saúde: discos físicos", StringComparison.Ordinal)
+                || !shown.Contains("“AMD-RAID Array 1”", StringComparison.Ordinal) || shown.Contains("“USB DISK 2.0”", StringComparison.Ordinal) || !shown.StartsWith(text.ReplaceLineEndings("\n")[..40], StringComparison.Ordinal))
+                wrong.Add("sem o limite: " + shown.Replace("\n", " "));
+        }
+        // A resposta que já cita o limite fica como está.
+        const string cites = "O AMD-RAID Array 1 está sem alertas informados pelo Windows. Por ser um volume RAID, o estado dos discos-membro não aparece no Windows.";
+        if (disks.WithSensorFigures(cites) != cites) wrong.Add("já citava: " + disks.WithSensorFigures(cites));
+        const string driver = "O AMD-RAID Array 1 está Healthy; o estado vem do driver do controlador RAID.";
+        if (disks.WithSensorFigures(driver) != driver) wrong.Add("RAID e driver: " + disks.WithSensorFigures(driver));
+        // "Volume RAID" sozinho e o driver do RAID atualizado não dizem o limite: a nota entra (@qa).
+        foreach (var loose in new[] { "O volume RAID AMD-RAID Array 1 está sem alertas informados pelo Windows.", "O driver do RAID está atualizado e os discos estão sem alertas informados pelo Windows." })
+            if (Occurrences(disks.WithSensorFigures(loose), HealthReportPresentation.RaidScope) != 1) wrong.Add("frouxo: " + disks.WithSensorFigures(loose));
+        // Sem RAID no relatório, o resumo genérico sem alerta continua bastando.
+        var plain = Observed(PcReport(storage: [Usb, Nvme])); plain.AsksDiskHealth = true;
+        if (plain.WithSensorFigures(Answer21) != Answer21) wrong.Add("sem RAID: " + plain.WithSensorFigures(Answer21));
+        // Com disco em alerta, "sem alertas informados" sozinho não cita o estado de quem tem alerta: a linha do monitor entra.
+        var warning = Raid with { Health = "Warning", OperationalStatus = ["Degraded"], State = "warning" };
+        var alerted = Observed(PcReport(storage: [Usb, warning], storageStatus: "warning")); alerted.AsksDiskHealth = true;
+        var alertShown = alerted.WithSensorFigures("Os discos estão sem alertas informados pelo Windows.");
+        if (!alertShown.Contains("Pelo monitor de saúde: discos físicos", StringComparison.Ordinal) || Occurrences(alertShown, HealthReportPresentation.RaidScope) != 1)
+            wrong.Add("alerta: " + alertShown.Replace("\n", " "));
+        // Nomeando o disco com alerta, a linha do estado não entra; o limite do RAID, sim.
+        var named = alerted.WithSensorFigures("O AMD-RAID Array 1 está com alerta Warning informado pelo Windows.");
+        if (named.Contains("Pelo monitor de saúde: discos físicos", StringComparison.Ordinal) || Occurrences(named, HealthReportPresentation.RaidScope) != 1) wrong.Add("nomeado: " + named);
+        // Pedido de temperatura: o limite só entra quando a resposta fala dos discos.
+        var heat = Observed(PcReport()); heat.AsksTemperature = true;
+        const string onlyHeat = "A temperatura da CPU está indisponível porque o driver PawnIO não está instalado.";
+        if (heat.WithSensorFigures(onlyHeat) != onlyHeat) wrong.Add("temperatura: " + heat.WithSensorFigures(onlyHeat));
+        if (Occurrences(heat.WithSensorFigures(onlyHeat + " Os discos estão sem alertas informados pelo Windows."), HealthReportPresentation.RaidScope) != 1) wrong.Add("temperatura com discos");
+        // Pedido de outro assunto: nada muda.
+        var other = Observed(PcReport());
+        if (other.WithSensorFigures(Answer21) != Answer21) wrong.Add("outro pedido");
+        assert(wrong.Count == 0, "#135 (PC afeefb7), " + culture + ": com RAID, a resposta sobre os discos que não cita o limite ganha a nota do RAID uma vez, sem repetir a linha do estado; sem RAID, nada muda; com alerta, o resumo genérico não basta"
+            + (wrong.Count > 0 ? " · erradas: " + string.Join(" | ", wrong) : ""));
+    }
+
+    // "verificar o uso do disco… ou revisar o conteúdo dos volumes" sobre o T: encerrado passou na revalidação: é sugestão de
+    // olhar o espaço de um disco cuja ocorrência acabou. Explicações genéricas continuam aceitas.
+    private static void ClosedDiskUsageRetest(Action<bool, string> assert, string culture)
+    {
+        var closed = Observed(PcReport());
+        var plain = new InvestigationEvidence();
+        (string Text, string? Closed, string? Plain)[] cases =
+        [
+            (Answer21bStart + Answer21bSuggestion, InvestigationEvidence.ClosedDiskReason, null),
+            (Answer21bStart, null, null),
+            ("Vale verificar o uso do disco no T:.", InvestigationEvidence.ClosedDiskReason, null),
+            ("Revise o conteúdo dos volumes para liberar espaço.", InvestigationEvidence.ClosedDiskReason, null),
+            ("Revise o conteúdo dos volumes no T:.", InvestigationEvidence.ClosedDiskReason, null),
+            ("O uso do disco aparece em Configurações > Sistema > Armazenamento.", null, null),
+            ("Os arquivos temporários ocupam espaço no disco.", null, null),
+            ("O alerta do T: foi resolvido; não é preciso verificar o uso do disco.", null, null),
+            // A orientação do Armazenamento continua aceita; a vírgula depois da dispensa e o "não deixe de" mandam verificar (@qa).
+            ("Para ver o uso do disco, abra Configurações > Sistema > Armazenamento.", null, null),
+            ("Não é preciso, verifique o uso do disco no T:.", InvestigationEvidence.ClosedDiskReason, null),
+            ("Não deixe de verificar o uso do disco no T:.", InvestigationEvidence.ClosedDiskReason, null),
+        ];
+        var wrong = cases.Where(c => closed.ValidateStatement(c.Text, false) != c.Closed || plain.ValidateStatement(c.Text, false) != c.Plain)
+            .Select(c => c.Text + " → " + closed.ValidateStatement(c.Text, false) + " / " + plain.ValidateStatement(c.Text, false)).ToList();
+        var repeated = closed.RepeatedGuidance(InvestigationEvidence.ClosedDiskReason, Answer21bStart + Answer21bSuggestion);
+        if (!repeated.Contains("verificar o uso do disco", StringComparison.Ordinal) || repeated.Contains("já foi resolvido", StringComparison.Ordinal)) wrong.Add("2ª recusa: " + repeated);
+        assert(wrong.Count == 0, "#135 (PC afeefb7), " + culture + ": sugerir verificar o uso do disco ou revisar o conteúdo dos volumes com o T: encerrado é recusado pelo motivo do disco encerrado; o estado resolvido e explicações genéricas passam"
+            + (wrong.Count > 0 ? " · erradas: " + string.Join(" | ", wrong) : ""));
+    }
+
+    // Na revalidação, a resposta de temperatura ofereceu "posso ajudar a verificar se o driver está instalado ou buscar
+    // informações adicionais sobre ele": nenhuma ferramenta confere o PawnIO.
+    private static void SensorDriverOffer(Action<bool, string> assert, string culture)
+    {
+        var heat = Observed(PcReport()); heat.AsksTemperature = true;
+        var plain = Observed(PcReport());
+        var gpu = Observed(PcReport()); gpu.AsksTemperature = true; gpu.UserRequest = "minha placa de vídeo está esquentando, qual a temperatura?";
+        const string real = "A temperatura da CPU está indisponível no momento, pois o driver PawnIO não está instalado. Para obter essa informação, seria necessário instalar ou verificar o status desse driver. "
+            + "Se você deseja, posso ajudar a verificar se o driver está instalado ou buscar informações adicionais sobre ele.";
+        (InvestigationEvidence Evidence, string Text, string? Expected)[] cases =
+        [
+            (heat, real, InvestigationEvidence.SensorDriverOfferReason),
+            (heat, real.Replace(". Se", ".\r\nSe"), InvestigationEvidence.SensorDriverOfferReason),
+            (heat, "Quer que eu instale o driver para você?", InvestigationEvidence.SensorDriverOfferReason),
+            (plain, "Posso verificar se o PawnIO está instalado.", InvestigationEvidence.SensorDriverOfferReason),
+            (plain, "Deseja que eu procure o instalador do PawnIO?", InvestigationEvidence.SensorDriverOfferReason),
+            // A resposta real da 2.3 e a explicação passam.
+            (heat, "A temperatura do processador não está disponível no momento, pois o driver PawnIO não está instalado. Para obter essa informação, seria necessário instalar o driver apropriado. Se você precisar de mais ajuda com isso, posso orientar você.", null),
+            (heat, "Posso explicar como instalar o driver PawnIO, se você decidir instalá-lo.", null),
+            (heat, "Posso consultar de novo o relatório de saúde para ver a temperatura.", null),
+            (heat, "Não posso verificar se o driver está instalado.", null),
+            // Drivers que o Nexo consulta (dispositivo, vídeo, impressora) não são o driver do sensor.
+            (heat, "Posso verificar o driver da placa de vídeo, se quiser.", null),
+            (plain, "Posso verificar se o driver da impressora está instalado.", null),
+            (plain, "Posso verificar o driver do dispositivo com erro.", null),
+            // Sem pedido de temperatura, "o driver" sozinho não é o do sensor.
+            (plain, "Posso verificar se o driver está instalado.", null),
+            // O "não" depois do driver não nega a oferta; o driver longe do verbo não é o objeto dela; a temperatura da placa de
+            // vídeo faz "o driver" ser o dela (@qa).
+            (heat, "Posso verificar por que o driver PawnIO não está instalado.", InvestigationEvidence.SensorDriverOfferReason),
+            (heat, "Se quiser, posso verificar a temperatura novamente quando o driver PawnIO for instalado.", null),
+            (gpu, "Posso verificar se o driver está atualizado.", null),
+            (gpu, "Posso verificar se o PawnIO está instalado.", InvestigationEvidence.SensorDriverOfferReason),
+            (plain, "Posso instalar o driver PawnIO para você.", InvestigationEvidence.SensorDriverOfferReason),
+            (plain, "Posso verificar o driver da impressora, que não depende do PawnIO.", null),
+        ];
+        var wrong = cases.Where(c => c.Evidence.ValidateStatement(c.Text, false) != c.Expected).Select(c => c.Text + " → " + c.Evidence.ValidateStatement(c.Text, false)).ToList();
+        var repeated = heat.RepeatedGuidance(InvestigationEvidence.SensorDriverOfferReason, real);
+        if (!repeated.Contains("posso ajudar a verificar se o driver está instalado", StringComparison.Ordinal) || repeated.Contains("Para obter", StringComparison.Ordinal)) wrong.Add("2ª recusa: " + repeated);
+        assert(wrong.Count == 0 && InvestigationEvidence.SensorDriverOfferReason.Contains("PawnIO") && InvestigationEvidence.SensorDriverOfferReason.Contains("decisão do usuário"),
+            "#135 (PC afeefb7), " + culture + ": oferecer verificar, instalar ou procurar o driver do sensor (PawnIO) é recusado; explicação, nova consulta e drivers que o Nexo consulta passam"
+            + (wrong.Count > 0 ? " · erradas: " + string.Join(" | ", wrong) : ""));
+    }
+
+    private static int Occurrences(string text, string part) => (text.Length - text.Replace(part, "", StringComparison.Ordinal).Length) / part.Length;
+
     // Relatório como o HealthReportPresentation monta no PC: AMD-RAID e pendrive, temperatura sem PawnIO e o T: encerrado.
-    private static string PcReport(TemperatureReading? temperature = null)
+    private static string PcReport(TemperatureReading? temperature = null, PhysicalDiskReading[]? storage = null, string storageStatus = "healthy")
     {
         var root = Path.Combine(Path.GetTempPath(), "nexo-raid-" + Guid.NewGuid().ToString("N"));
         try
@@ -234,7 +366,7 @@ internal static class RaidTemperatureChecks
             {
                 Time = at, CpuPercent = 12, MemoryUsedPercent = 40, CollectionStatus = "complete", Disks = [.. disks],
                 CpuTemperature = temperature ?? new TemperatureReading("no_source", Time: at, Detail: PawnIo),
-                StorageHealth = "healthy", Storage = new StorageReading("healthy", HardwareSensors.StorageSource, at, 2, [Usb, Raid])
+                StorageHealth = storageStatus, Storage = new StorageReading(storageStatus, HardwareSensors.StorageSource, at, (storage ?? [Usb, Raid]).Length, [.. storage ?? [Usb, Raid]])
             };
             var low = new[] { Sample(now.AddSeconds(-120), new("C:\\", 389_000, 500_000), new("T:\\", 140, 2_000)), Sample(now.AddSeconds(-90), new("C:\\", 389_000, 500_000), new("T:\\", 140, 2_000)) };
             var found = HealthRules.Evaluate(low, new HealthThresholds());

@@ -36,7 +36,7 @@ public sealed class InvestigationEvidence
     // Temperatura e discos físicos do último relatório de saúde do turno (#135), como o relatório os escreveu.
     private string? temperatureReport;
     private string? storageReport;
-    private readonly List<(string Name, string Line)> physicalDisks = [];
+    private readonly List<(string Name, string Line, bool Healthy, bool Raid)> physicalDisks = [];
     private bool raidReported;
     private readonly List<(string Name, ControlBlock Kind, string? Topic)> blocks = [];
     private readonly Dictionary<string, (string Host, bool Dns, bool Tcp)> connections = [];
@@ -269,6 +269,7 @@ public sealed class InvestigationEvidence
         if (OffersFileSearch(text)) return FileSearchReason;
         if (ClaimsDriveContents(text)) return SuggestsClosedDiskUsage(text) ? ClosedDiskReason : DriveContentsReason;
         if (OffersUnsupportedAction(text)) return UnsupportedActionReason;
+        if (OffersSensorDriverCheck(text)) return SensorDriverOfferReason;
         if (SendsToTaskManagerForTemperature(text)) return TemperatureSourceReason;
         if (PresentsClosedDisk(text)) return ClosedDiskReason;
         if (SuggestsMalware(text)) return MalwareReason;
@@ -288,6 +289,7 @@ public sealed class InvestigationEvidence
             FileSearchReason => OffersFileSearch,
             DriveContentsReason => ClaimsDriveContents,
             UnsupportedActionReason => OffersUnsupportedAction,
+            SensorDriverOfferReason => OffersSensorDriverCheck,
             ClosedDiskReason => PresentsClosedDisk,
             MalwareReason => SuggestsMalware,
             TemperatureSourceReason => SendsToTaskManagerForTemperature,
@@ -366,6 +368,28 @@ public sealed class InvestigationEvidence
         return Sentences(normalized).Any(sentence => UnsupportedOffer.Matches(sentence).Any(offer => !Negated(sentence, offer) && !Orientation.IsMatch(offer.Groups["lead"].Value)
             && (!offer.Groups["target"].Success || names.Any(name => Cites(offer.Groups["target"].Value, name)))));
     }
+
+    // Revalidação no PC (afeefb7, 22/11): na resposta de temperatura, "posso ajudar a verificar se o driver está instalado ou
+    // buscar informações adicionais sobre ele". Nenhuma ferramenta confere, instala ou procura o PawnIO; o relatório de saúde já
+    // diz que ele não está instalado. A oferta em 1ª pessoa de verificar, instalar, baixar ou procurar o PawnIO é recusada; com
+    // pedido de temperatura, "o driver" sem outro dispositivo também é o do sensor. Drivers que o Nexo consulta (vídeo,
+    // impressora, rede, dispositivo) não contam, e a explicação ("posso explicar como instalar…") e a negação passam.
+    // O driver é o objeto do verbo, a até quatro palavras dele (@qa): "posso verificar a temperatura novamente quando o driver
+    // PawnIO for instalado" oferece nova consulta, não verificar o driver. O PawnIO conta no próprio objeto ("o driver PawnIO",
+    // "o PawnIO"), não no resto da frase: "posso verificar o driver da impressora, que não depende do PawnIO" passa. A negação vale só antes do verbo: em "posso verificar
+    // por que o driver PawnIO não está instalado", o "não" é do driver, não da oferta.
+    private static readonly Regex DriverOffer = new(@"(?<head>\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo)\b(?<lead>[^:;.]*?)"
+        + @"\b(?:verific\w*|confer\w*|chec\w*|instal\w*|baix\w*|busc\w*|procur\w*|pesquis\w*)\b)(?<obj>(?<target>\s+(?:[^\s:;.]+\s+){0,4}?(?:drivers?|pawnio)\b(?:\s+(?:d[oe]\s+)?pawnio\b)?)[^:;.]{0,40})");
+    private static readonly Regex OtherDevice = new(@"\b(?:video|grafic\w*|gpu|nvidia|radeon|geforce|impressora|rede|wi-?fi|ethernet|audio|som|camera|webcam|bluetooth|dispositivo|placa|chipset|usb|teclado|mouse|monitor de video)\b");
+    // Com pedido de temperatura de outro dispositivo ("a placa de vídeo está esquentando"), "o driver" sozinho é o dele, que o Nexo
+    // consulta, e não o do sensor da CPU (@qa).
+    private bool OffersSensorDriverCheck(string normalized) => Sentences(normalized).Any(sentence => DriverOffer.Matches(sentence).Any(offer =>
+        !NegatedHead(sentence, offer) && !Orientation.IsMatch(offer.Groups["lead"].Value)
+        && (Regex.IsMatch(offer.Groups["target"].Value, @"\bpawnio\b") || AsksTemperature && Regex.IsMatch(offer.Groups["obj"].Value, @"\bdrivers?\b")
+            && !OtherDevice.IsMatch(offer.Groups["obj"].Value) && !OtherDevice.IsMatch(AgentProtocol.Normalize(UserRequest)))));
+    private static bool NegatedHead(string sentence, Match offer) =>
+        Regex.Matches(sentence[..offer.Index], @"[\p{L}\p{N}]+").TakeLast(3).Concat(Regex.Matches(offer.Groups["head"].Value, @"[\p{L}\p{N}]+"))
+            .Any(word => word.Value is "nao" or "nem" or "nunca");
 
     // Resposta pobre (validação da e7a69a2, 22/11): sem nenhum fato do turno (número, processo conhecido ou letra de unidade)
     // e curta (menos de 6 palavras, como "Posso ajudar?") ou começando por uma condição solta ("Se a lentidão continuar…").
@@ -474,6 +498,7 @@ public sealed class InvestigationEvidence
     // Gerenciador de Tarefas não mostra a temperatura da CPU, e o relatório de saúde já traz a leitura ou o motivo de ela estar
     // indisponível. A frase que nega ("o Gerenciador de Tarefas não mostra a temperatura") e a que usa o Gerenciador para outra
     // coisa passam. Programa de terceiros (HWMonitor) não é recusado: a linha do monitor garante a informação do Nexo na resposta.
+    internal const string SensorDriverOfferReason = "O Nexo não tem ferramenta para verificar, instalar ou procurar o driver PawnIO (o driver do sensor de temperatura): não ofereça isso. Diga que, segundo o relatório de saúde, o driver PawnIO não está instalado e que instalá-lo é decisão do usuário.";
     internal const string TemperatureSourceReason = "O Gerenciador de Tarefas do Windows não mostra a temperatura da CPU. Cite a temperatura do relatório de saúde (get_health_report) ou, se ela estiver indisponível, o motivo informado nele, sem mandar o usuário procurar essa leitura no Gerenciador de Tarefas.";
     // O Gerenciador de Tarefas precisa aparecer como o lugar de ver a temperatura, e a negação vale dentro desse trecho (@qa): "a
     // temperatura está indisponível e o Gerenciador de Tarefas mostra o uso de memória" passa, e "abra o Gerenciador de Tarefas
@@ -580,14 +605,19 @@ public sealed class InvestigationEvidence
             var parts = Contrast.Split(sentence);
             return parts.Where((part, index) => !parts.Skip(index + 1).Any(StateExempt));
         }).Any(sentence => ClosedDiskSentence(sentence, LowSpace, sentence)
-            || UsageSuggestion.IsMatch(sentence) && ClosedDiskSentence(sentence, OccupiedSpace, IndirectQuestion.Replace(sentence, " ")));
+            || UsageSuggestion.IsMatch(sentence) && (ClosedDiskSentence(sentence, OccupiedSpace, IndirectQuestion.Replace(sentence, " "))
+                || ClosedDiskSentence(sentence, DiskUsage, IndirectQuestion.Replace(sentence, " ")) && !StoragePath.IsMatch(sentence)));
     }
     // A frase só conta sem pergunta, condição, passado ou isenção de estado; "verificar se há…" é pergunta indireta, não condição,
     // e só é lida assim para o que ocupa espaço (#135): a leitura da falta de espaço não muda.
     private static bool ClosedDiskSentence(string sentence, Regex pattern, string conditionText) =>
         !sentence.Contains('?') && !Regex.IsMatch(PoliteCondition.Replace(conditionText, " "), @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve|teve|tinha|tiveram)\b|\bnormal|\bja foi\b|\bantes\b")
         && !StateExempt(sentence) && !NoNeed.IsMatch(sentence)
-        && pattern.Matches(sentence).Any(match => !Negated(sentence, match) && !NotNeeded.IsMatch(sentence[(match.Index + match.Length)..]));
+        && pattern.Matches(sentence).Any(match => !Negated(sentence, match) && !NotNeeded.IsMatch(sentence[(match.Index + match.Length)..])
+            && !NeedlessBefore.IsMatch(sentence[..match.Index]));
+    // "não é preciso verificar o uso do disco": a dispensa vem antes do trecho, a até três palavras dele (#135, revalidação).
+    // Só espaço separa a dispensa do trecho (@qa): "não é preciso, verifique o uso do disco" tem vírgula e manda verificar.
+    private static readonly Regex NeedlessBefore = new(@"\bnao (?:e|sera|seria|esta) (?:necessari\w*|precis\w*)(?: \w+){0,3} ?$");
     private static readonly Regex IndirectQuestion = new(@"\b(?:verificar|verifique|ver|veja|conferir|confira|checar|cheque|avaliar|avalie|identificar|descobrir|saber)\s+se\b");
     // Validação da #19 no PC (22/11, #135): com o alerta do T: encerrado, "recomendo verificar se há arquivos ou aplicativos que
     // possam estar ocupando espaço no T:" foi recusada 4 vezes pelo motivo do conteúdo de unidade ("há arquivos"), e o modelo
@@ -597,7 +627,12 @@ public sealed class InvestigationEvidence
     // ocupando espaço no D:") continua com o motivo do conteúdo de unidade (@qa).
     // Só a sugestão de olhar ou mexer no que ocupa espaço conta (@qa): "os arquivos temporários ocupam espaço no disco" é
     // explicação genérica, não falta de espaço apresentada como atual, e continua aceita como antes da #135.
-    private static readonly Regex UsageSuggestion = new(@"\b(?:verifi\w*|ver|veja|confer\w*|confira|chec\w*|cheque|identific\w*|descobr\w*|avali\w*|remov\w*|apag\w*|exclu\w*|limp\w*|desinstal\w*)\b");
+    private static readonly Regex UsageSuggestion = new(@"\b(?:verifi\w*|ver|veja|confer\w*|confira|chec\w*|cheque|identific\w*|descobr\w*|avali\w*|revis\w*|remov\w*|apag\w*|exclu\w*|limp\w*|desinstal\w*)\b");
+    // Revalidação no PC (afeefb7, 22/11): "pode ser útil verificar o uso do disco com o gerenciador de armazenamento do Windows
+    // ou revisar o conteúdo dos volumes", sobre o T: com o alerta resolvido, passou. Olhar o uso do disco ou o conteúdo dos
+    // volumes também é sugestão de mexer em espaço; vale só junto da sugestão (UsageSuggestion), como o que ocupa espaço:
+    // "o uso do disco aparece em Configurações > Sistema > Armazenamento" é explicação e continua aceita.
+    private static readonly Regex DiskUsage = new(@"\b(?:uso|ocupacao|consumo)\s+(?:d[oa]s?|de)\s+(?:discos?|espaco|armazenamento|volumes?|unidades?)\b|\bconteudo\s+(?:d[oa]s?\s+)?(?:volumes?|discos?|unidades?)\b");
     private static readonly Regex OccupiedSpace = new(@"\b(?:ocupand\w*|ocupa|ocupam|ocupar|consumind\w*|consome|consomem)\s+(?:\w+\s+){0,2}?espaco\b");
     private bool SuggestsClosedDiskUsage(string normalized) => PresentsClosedDisk(normalized)
         && Sentences(normalized).Where(ClaimsDriveContents).All(sentence => OccupiedSpace.IsMatch(sentence) && IndirectQuestion.IsMatch(sentence));
@@ -1174,8 +1209,11 @@ public sealed class InvestigationEvidence
         if (Regex.Match(report, @"^Discos físicos: (?<value>[^\n]+?)\.?\r?$", RegexOptions.Multiline) is { Success: true } drives) storageReport = Clean(drives.Groups["value"].Value);
         foreach (Match disk in Regex.Matches(report, @"^Disco \S+ “(?<name>[^”\n]*)”(?<kind> \([^)\n]*\))?: (?<state>[^;\n]+);[^\n]*$", RegexOptions.Multiline))
         {
-            physicalDisks.Add((disk.Groups["name"].Value, Quoted(disk.Groups["name"].Value) + disk.Groups["kind"].Value + ": " + Clean(disk.Groups["state"].Value)));
-            raidReported |= disk.Value.Contains(HealthReportPresentation.RaidScope, StringComparison.Ordinal);
+            var raid = disk.Value.Contains(HealthReportPresentation.RaidScope, StringComparison.Ordinal);
+            var state = Clean(disk.Groups["state"].Value);
+            physicalDisks.Add((disk.Groups["name"].Value, Quoted(disk.Groups["name"].Value) + disk.Groups["kind"].Value + ": " + state,
+                state.StartsWith(HealthReportPresentation.StorageLabel("healthy"), StringComparison.Ordinal), raid));
+            raidReported |= raid;
         }
         if (AsksTemperature && temperatureReport != null) Finding("health:temperature", "Temperatura da CPU, pelo monitor de saúde: " + temperatureReport + ".");
         if (AsksDiskHealth && StorageLine() is { } storageLine) Finding("health:storage", storageLine, StorageNote());
@@ -1194,6 +1232,11 @@ public sealed class InvestigationEvidence
         if (AsksTemperature && temperatureReport != null && !CitesTemperature(text)) lines.Add("temperatura da CPU " + temperatureReport);
         if (AsksDiskHealth && StorageLine() is { } storageLine && !CitesStorage(text))
             lines.Add("discos físicos " + storageLine["Discos físicos: ".Length..].TrimEnd('.') + "." + StorageNote());
+        // Revalidação no PC (afeefb7, 22/11): as respostas resumiram com "sem alertas informados" e o limite do RAID, que só ia
+        // junto com a linha do estado, se perdeu. Com RAID no relatório e a resposta falando dos discos (pedido sobre eles, ou
+        // de temperatura que menciona discos), o limite entra sozinho quando ela não o cita; a linha do estado não se repete.
+        else if (raidReported && (AsksDiskHealth || AsksTemperature && MentionsDisks.IsMatch(text)) && !CitesRaidScope.IsMatch(text))
+            lines.Add(string.Join(" e ", physicalDisks.Where(disk => disk.Raid).Select(disk => Quoted(disk.Name))) + " — " + HealthReportPresentation.RaidScope);
         return lines.Count == 0 ? answer : BeforeQuestions(answer, "Pelo monitor de saúde: " + string.Join(" ", lines.Select(line => line.TrimEnd('.') + ".")));
     }
     private bool CitesTemperature(string normalized)
@@ -1205,8 +1248,21 @@ public sealed class InvestigationEvidence
         var reason = Regex.Match(report, @"^indisponivel, (?<why>[^.]+)").Groups["why"].Value.Trim();
         return reason.Length > 0 && (normalized.Contains(reason, StringComparison.Ordinal) || reason.Contains("pawnio", StringComparison.Ordinal) && normalized.Contains("pawnio", StringComparison.Ordinal));
     }
-    private bool CitesStorage(string normalized) => Regex.IsMatch(normalized, @"\b(?:sem alertas? informad|atencao informada|falha informada|healthy|unhealthy|warning)")
-        || physicalDisks.Any(disk => disk.Name.Length >= 3 && normalized.Contains(AgentProtocol.Normalize(disk.Name), StringComparison.Ordinal));
+    // O estado conta como citado pelo nome de um disco ou, com todos sem alerta, pelo resumo genérico ("sem alertas informados",
+    // "healthy"), que é o que o relatório diz de todos. Com algum disco em alerta ou não confirmado, o resumo genérico não diz de
+    // quem é o alerta: só o nome de cada disco nessa situação conta (#135, revalidação no PC).
+    private bool CitesStorage(string normalized)
+    {
+        bool Named((string Name, string Line, bool Healthy, bool Raid) disk) => disk.Name.Length >= 3 && normalized.Contains(AgentProtocol.Normalize(disk.Name), StringComparison.Ordinal);
+        var attention = physicalDisks.Where(disk => !disk.Healthy).ToArray();
+        if (attention.Length > 0) return attention.All(Named);
+        return Regex.IsMatch(normalized, @"\b(?:sem alertas? informad|atencao informada|falha informada|healthy|unhealthy|warning)") || physicalDisks.Any(Named);
+    }
+    private static readonly Regex MentionsDisks = new(@"\b(?:discos?|hds?|ssds?|nvme|raid|armazenamento)\b");
+    // O limite do RAID: os discos-membro ("discos-membro", "membros do array", "discos que formam o volume") ou o estado vindo do
+    // driver ("informado pelo driver", "vem do driver"). "Volume RAID" sozinho e "o driver do RAID está atualizado" não dizem
+    // o limite (@qa).
+    private static readonly Regex CitesRaidScope = new(@"\bdiscos?[- ]?membros?\b|\bmembros? (?:do|da|de) (?:raid|array|volume)\b|\bdiscos? (?:que (?:formam|compoem)|do array)\b|\b(?:informad\w*|reportad\w*|fornecid\w*|vem|vindo|lido) (?:do|pelo) driver\b");
 
     // Estado atual e informativo: só o rótulo do patamar estável da #71, pelo começo exato e compartilhado com quem o monta.
     // Um "(informativo" no meio de outro estado não conta.
