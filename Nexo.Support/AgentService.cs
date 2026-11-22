@@ -218,6 +218,8 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         var readOnly = !actor.Repair || AgentProtocol.RequestsReadOnly(conversation.Entries.Last(e => e.Role == "user").Text);
         var userRequest = conversation.Entries.Last(e => e.Role == "user").Text;
         evidence.Focus = SupportIntake.SystemFocus(userRequest);
+        evidence.AsksTemperature = SupportIntake.AsksTemperature(userRequest);
+        evidence.AsksDiskHealth = SupportIntake.AsksDiskHealth(userRequest);
         // Tópicos do incidente: os da última mensagem do usuário que tinha tópico. Uma continuação genérica do sistema
         // ("continua lento", "ainda tá demorando") soma o sistema aos tópicos anteriores, em vez de trocá-los.
         var incidentTopics = SupportIntake.ConversationTopics(conversation.Entries.Where(e => e.Role == "user").Reverse().Select(e => e.Text));
@@ -276,6 +278,11 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             if (initialObserved && evidence.AmbiguityQuestion(initialTopic, userRequest) is { } question)
                 return Finish(question);
         }
+        // Pergunta sobre a temperatura ou a saúde dos discos (#135): na validação da #19 no PC, "qual a temperatura da CPU?" foi
+        // respondida sem consulta. O relatório de saúde traz a leitura, a origem e o motivo da indisponibilidade; o Nexo o consulta
+        // (somente leitura) quando a observação inicial ainda não o trouxe.
+        if ((evidence.AsksTemperature || evidence.AsksDiskHealth) && (initialTopic == null || !InitialObservations(initialTopic).Any(o => o.Name == "get_health_report")))
+            await ControllerCall("Observação inicial", "get_health_report", JsonSerializer.SerializeToElement(new { }));
         if (!readOnly && NetworkWorkflow.Matches(userRequest))
         {
             var answer = await NetworkWorkflow.Run(async (name, args) =>
@@ -646,7 +653,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         // depois do que as consultas mostraram.
         string ModelAnswer(string text) => refusedMutations.Count > 0 ? evidence.Report("")
             : refusals.Count > 0 && evidence.HasFindings && evidence.IsThinAnswer(text) ? evidence.Report(text.Trim())
-            : evidence.WithStorageGuidance(evidence.WithMemoryFigures(text));
+            : evidence.WithSensorFigures(evidence.WithStorageGuidance(evidence.WithMemoryFigures(text)));
         // Cada recusa do controle fica na auditoria com o motivo (#83): na validação no PC, o "[error]" não dizia qual regra recusou.
         // O motivo é sempre um texto fixo dos validadores; o texto do modelo não entra no registro.
         void Rejected(string what, string reason) => store.Log(actor, "Controle de execução recusou " + what + ": " + reason);

@@ -33,6 +33,11 @@ public sealed class InvestigationEvidence
     private double? memoryPercent;
     private bool memoryProblemActive;
     private double? lowestFreePercent;
+    // Temperatura e discos físicos do último relatório de saúde do turno (#135), como o relatório os escreveu.
+    private string? temperatureReport;
+    private string? storageReport;
+    private readonly List<(string Name, string Line)> physicalDisks = [];
+    private bool raidReported;
     private readonly List<(string Name, ControlBlock Kind, string? Topic)> blocks = [];
     private readonly Dictionary<string, (string Host, bool Dns, bool Tcp)> connections = [];
     private readonly List<string> changes = [];
@@ -262,8 +267,9 @@ public sealed class InvestigationEvidence
         if (PresentsStaleProcess(text)) return StaleProcessReason;
         if (InventsProcessPurpose(text)) return ProcessPurposeReason;
         if (OffersFileSearch(text)) return FileSearchReason;
-        if (ClaimsDriveContents(text)) return DriveContentsReason;
+        if (ClaimsDriveContents(text)) return SuggestsClosedDiskUsage(text) ? ClosedDiskReason : DriveContentsReason;
         if (OffersUnsupportedAction(text)) return UnsupportedActionReason;
+        if (SendsToTaskManagerForTemperature(text)) return TemperatureSourceReason;
         if (PresentsClosedDisk(text)) return ClosedDiskReason;
         if (SuggestsMalware(text)) return MalwareReason;
         if (BlamesStablePlateau(text)) return StablePlateauReason;
@@ -284,6 +290,7 @@ public sealed class InvestigationEvidence
             UnsupportedActionReason => OffersUnsupportedAction,
             ClosedDiskReason => PresentsClosedDisk,
             MalwareReason => SuggestsMalware,
+            TemperatureSourceReason => SendsToTaskManagerForTemperature,
             AgentProtocol.PendingActionReason => part => AgentProtocol.PendingActionPhrase(part) != null,
             _ => null
         };
@@ -372,6 +379,9 @@ public sealed class InvestigationEvidence
     internal const string MalwareReason = "A resposta sugere que um processo pode ser malicioso (vírus, malware), mas nenhuma ferramenta do Nexo traz evidência de segurança. Fale só do consumo medido; se o usuário não reconhece o programa, oriente conferir o nome e o local do arquivo no Gerenciador de Tarefas, sem chamá-lo de malicioso ou suspeito.";
     // O usuário perguntou sobre vírus ou malware neste turno: responder sobre isso não é sugestão do modelo.
     public bool UserRaisedSecurity { get; set; }
+    // O pedido do turno é sobre a temperatura ou sobre a saúde dos discos (#135, SupportIntake).
+    public bool AsksTemperature { get; set; }
+    public bool AsksDiskHealth { get; set; }
     internal static bool MentionsMalware(string text) => AskedTerm.IsMatch(SecurityNames.Replace(AgentProtocol.Normalize(text), " "));
 
     // Na validação da 11fa078 (#93), a resposta sobre memória sugeriu verificar se o NexoMemTeste "é um processo malicioso",
@@ -460,6 +470,14 @@ public sealed class InvestigationEvidence
 
     internal const string FileSearchReason = "O Nexo não lista nem procura arquivos ou pastas: não ofereça identificar os maiores arquivos nem o que ocupa espaço. No lugar, diga o espaço livre medido e indique que o usuário vê o que ocupa espaço em Configurações > Sistema > Armazenamento no Windows.";
     internal const string DriveContentsReason = "O Nexo não lista o conteúdo de unidades: o inventário mostra hardware e metadados, não arquivos ou pastas. Não afirme que a unidade está vazia, que não há arquivos nela, nem ofereça verificar seu conteúdo. Diga apenas o que a ferramenta mediu e indique o Explorador de Arquivos para ver o conteúdo.";
+    // Validação da #19 no PC (22/11, #135): "Para verificar a temperatura da CPU, você pode usar o Gerenciador de Tarefas". O
+    // Gerenciador de Tarefas não mostra a temperatura da CPU, e o relatório de saúde já traz a leitura ou o motivo de ela estar
+    // indisponível. A frase que nega ("o Gerenciador de Tarefas não mostra a temperatura") e a que usa o Gerenciador para outra
+    // coisa passam. Programa de terceiros (HWMonitor) não é recusado: a linha do monitor garante a informação do Nexo na resposta.
+    internal const string TemperatureSourceReason = "O Gerenciador de Tarefas do Windows não mostra a temperatura da CPU. Cite a temperatura do relatório de saúde (get_health_report) ou, se ela estiver indisponível, o motivo informado nele, sem mandar o usuário procurar essa leitura no Gerenciador de Tarefas.";
+    private static bool SendsToTaskManagerForTemperature(string normalized) => Sentences(normalized).Any(sentence =>
+        Regex.IsMatch(sentence, @"\bgerenciador de tarefas\b") && Regex.IsMatch(sentence, @"\btemperatura")
+        && !Regex.IsMatch(sentence, @"\bnao (?:mostra|exibe|informa|tem|traz|apresenta)\b"));
     internal const string ClosedDiskReason = "A resposta apresenta como atual a falta de espaço em disco, mas o relatório de saúde só mostra essa ocorrência encerrada (resolvida ou com estado atual desconhecido) e nenhuma leitura atual tem pouco espaço. Cite o espaço livre atual por volume, ou diga que essa ocorrência não está ativa.";
     // Caminho real para ver o uso do disco (#88): o Nexo não lista arquivos nem pastas.
     internal const string StorageGuidance = "Para ver o que ocupa espaço, abra Configurações > Sistema > Armazenamento no Windows.";
@@ -554,11 +572,22 @@ public sealed class InvestigationEvidence
         {
             var parts = Contrast.Split(sentence);
             return parts.Where((part, index) => !parts.Skip(index + 1).Any(StateExempt));
-        }).Any(sentence =>
-            !sentence.Contains('?') && !Regex.IsMatch(PoliteCondition.Replace(sentence, " "), @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve|teve|tinha|tiveram)\b|\bnormal|\bja foi\b|\bantes\b")
-            && !StateExempt(sentence) && !NoNeed.IsMatch(sentence)
-            && LowSpace.Matches(sentence).Any(match => !Negated(sentence, match) && !NotNeeded.IsMatch(sentence[(match.Index + match.Length)..])));
+        }).Any(sentence => ClosedDiskSentence(sentence, LowSpace, sentence) || ClosedDiskSentence(sentence, OccupiedSpace, IndirectQuestion.Replace(sentence, " ")));
     }
+    // A frase só conta sem pergunta, condição, passado ou isenção de estado; "verificar se há…" é pergunta indireta, não condição,
+    // e só é lida assim para o que ocupa espaço (#135): a leitura da falta de espaço não muda.
+    private static bool ClosedDiskSentence(string sentence, Regex pattern, string conditionText) =>
+        !sentence.Contains('?') && !Regex.IsMatch(PoliteCondition.Replace(conditionText, " "), @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve|teve|tinha|tiveram)\b|\bnormal|\bja foi\b|\bantes\b")
+        && !StateExempt(sentence) && !NoNeed.IsMatch(sentence)
+        && pattern.Matches(sentence).Any(match => !Negated(sentence, match) && !NotNeeded.IsMatch(sentence[(match.Index + match.Length)..]));
+    private static readonly Regex IndirectQuestion = new(@"\b(?:verificar|verifique|ver|veja|conferir|confira|checar|cheque|avaliar|avalie|identificar|descobrir|saber)\s+se\b");
+    // Validação da #19 no PC (22/11, #135): com o alerta do T: encerrado, "recomendo verificar se há arquivos ou aplicativos que
+    // possam estar ocupando espaço no T:" foi recusada 4 vezes pelo motivo do conteúdo de unidade ("há arquivos"), e o modelo
+    // não entendia o que corrigir. É a falta de espaço apresentada como atual: o que ocupa espaço também conta para o disco
+    // encerrado, e a frase de conteúdo que só fala do que ocupa espaço recebe o motivo do disco encerrado. A recusa continua.
+    private static readonly Regex OccupiedSpace = new(@"\b(?:ocupand\w*|ocupa|ocupam|ocupar|consumind\w*|consome|consomem)\s+(?:\w+\s+){0,2}?espaco\b");
+    private bool SuggestsClosedDiskUsage(string normalized) => PresentsClosedDisk(normalized)
+        && Sentences(normalized).Where(ClaimsDriveContents).All(sentence => OccupiedSpace.IsMatch(sentence));
     private static readonly Regex AlertState = new(@"\b(?:alerta|ocorrencia|aviso)s?\b.*(?:\bnao (?:esta|estao|e|sao|fica|ficou)(?: mais)? (?:ativ\w*|atua(?:l|is))\b|\bsaiu do relatorio\b|\bnao aparece(?:m)? mais\b)");
     private static readonly Regex NotNeeded = new(@"^\W*(?:\w+\W+){0,2}?nao (?:(?:e|sera|seria|esta) (?:necessari\w*|precis\w*)|precis\w*|dev\w*)\b");
     private static bool StateExempt(string part) => Regex.IsMatch(part, "resolvid|encerrad") || AlertState.IsMatch(part);
@@ -1049,7 +1078,8 @@ public sealed class InvestigationEvidence
     private void RememberHealth(string report)
     {
         // Cada relatório substitui as três linhas do anterior; uma parte ausente agora não pode sobrar da leitura velha.
-        findings.RemoveAll(f => f.Key is "health" or "health:unknown" or "health:informative" or "health:volumes");
+        findings.RemoveAll(f => f.Key is "health" or "health:unknown" or "health:informative" or "health:volumes" or "health:temperature" or "health:storage");
+        temperatureReport = storageReport = null; physicalDisks.Clear(); raidReported = false;
         memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear();
         diskActive = diskClosed = false; lowestFreePercent = null; memoryPercent = null; memoryProblemActive = false;
         if (report.StartsWith("Nenhuma amostra", StringComparison.Ordinal)) { Finding("health", "O relatório de saúde não tem leituras das últimas 24 horas."); return; }
@@ -1126,7 +1156,44 @@ public sealed class InvestigationEvidence
         if (informative.Length > 0) Finding("health:informative", "Informação do monitor de saúde, sem falha ativa: " + Within(informative.Take(3), informative.Length) + ".");
         if (unknown.Length > 0) Finding("health:unknown", "Ocorrências do monitor com estado atual desconhecido: " + Within(unknown.Take(3), unknown.Length) + ".");
         if (volumes.Length > 0) Finding("health:volumes", (stale ? "Espaço livre por volume naquela amostra: " : "Espaço livre por volume: ") + Within(volumes.Take(4), volumes.Length) + ".");
+        // Temperatura e discos físicos (#135): entram no fim do turno quando o pedido é sobre eles.
+        if (Regex.Match(report, @"^Temperatura da CPU: (?<value>[^\n]+?)\.?\r?$", RegexOptions.Multiline) is { Success: true } heat) temperatureReport = Clean(heat.Groups["value"].Value);
+        if (Regex.Match(report, @"^Discos físicos: (?<value>[^\n]+?)\.?\r?$", RegexOptions.Multiline) is { Success: true } drives) storageReport = Clean(drives.Groups["value"].Value);
+        foreach (Match disk in Regex.Matches(report, @"^Disco \S+ “(?<name>[^”\n]*)”(?<kind> \([^)\n]*\))?: (?<state>[^;\n]+);[^\n]*$", RegexOptions.Multiline))
+        {
+            physicalDisks.Add((disk.Groups["name"].Value, Quoted(disk.Groups["name"].Value) + disk.Groups["kind"].Value + ": " + Clean(disk.Groups["state"].Value)));
+            raidReported |= disk.Value.Contains(HealthReportPresentation.RaidScope, StringComparison.Ordinal);
+        }
+        if (AsksTemperature && temperatureReport != null) Finding("health:temperature", "Temperatura da CPU, pelo monitor de saúde: " + temperatureReport + ".");
+        if (AsksDiskHealth && StorageLine() is { } storageLine) Finding("health:storage", storageLine, StorageNote());
     }
+    private string? StorageLine() => storageReport == null ? null
+        : "Discos físicos: " + storageReport + (physicalDisks.Count == 0 ? "." : "; " + Within(physicalDisks.Take(4).Select(d => d.Line), physicalDisks.Count) + ".");
+    private string StorageNote() => (raidReported ? " " + HealthReportPresentation.RaidScope + "." : "") + " Não é uma leitura SMART completa.";
+
+    // Pedido sobre a temperatura ou a saúde dos discos (#135): a resposta aceita que não cita a leitura ganha a linha do monitor,
+    // como os MB do processo (#88). Temperatura: o valor em °C ou o motivo da indisponibilidade. Discos: o estado ou o nome.
+    public string WithSensorFigures(string answer)
+    {
+        if (string.IsNullOrWhiteSpace(answer)) return answer;
+        var text = AgentProtocol.Normalize(answer);
+        var lines = new List<string>();
+        if (AsksTemperature && temperatureReport != null && !CitesTemperature(text)) lines.Add("temperatura da CPU " + temperatureReport);
+        if (AsksDiskHealth && StorageLine() is { } storageLine && !CitesStorage(text))
+            lines.Add("discos físicos " + storageLine["Discos físicos: ".Length..].TrimEnd('.') + "." + StorageNote());
+        return lines.Count == 0 ? answer : BeforeQuestions(answer, "Pelo monitor de saúde: " + string.Join(" ", lines.Select(line => line.TrimEnd('.') + ".")));
+    }
+    private bool CitesTemperature(string normalized)
+    {
+        var report = AgentProtocol.Normalize(temperatureReport!);
+        if (Regex.Match(report, @"^(?<value>\d{1,3}) °c") is { Success: true } value)
+            return Regex.IsMatch(normalized, @"\b" + value.Groups["value"].Value + @"\s*(?:°|º|graus\b|c\b)");
+        // Indisponível: o motivo é o trecho depois de "indisponível, " até o primeiro ponto.
+        var reason = Regex.Match(report, @"^indisponivel, (?<why>[^.]+)").Groups["why"].Value.Trim();
+        return reason.Length > 0 && (normalized.Contains(reason, StringComparison.Ordinal) || reason.Contains("pawnio", StringComparison.Ordinal) && normalized.Contains("pawnio", StringComparison.Ordinal));
+    }
+    private bool CitesStorage(string normalized) => Regex.IsMatch(normalized, @"\b(?:sem alertas? informad|atencao informada|falha informada|healthy|unhealthy|warning)")
+        || physicalDisks.Any(disk => disk.Name.Length >= 3 && normalized.Contains(AgentProtocol.Normalize(disk.Name), StringComparison.Ordinal));
 
     // Estado atual e informativo: só o rótulo do patamar estável da #71, pelo começo exato e compartilhado com quem o monta.
     // Um "(informativo" no meio de outro estado não conta.
