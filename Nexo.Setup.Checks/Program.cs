@@ -75,6 +75,23 @@ try
     try { await Installer.InstallModelArchive(corruptArchive, corruptRoot); throw new Exception("FAIL: blob inválido aceito"); }
     catch (InvalidDataException) { Check(!File.Exists(Path.Combine(corruptRoot, "manifests", "registry.ollama.ai", "library", "qwen3", "8b")), "Blob inválido bloqueia publicação do manifesto do modelo"); }
     ReleaseChecks.Run(Check);
+    // Sem pwsh no PATH (e fora do CI), a checagem de assinatura avisa e pula, sem exceção e sem contar como aprovada.
+    var savedPath = Environment.GetEnvironmentVariable("PATH");
+    var savedCi = Environment.GetEnvironmentVariable("CI");
+    var before = count;
+    var skipped = new StringWriter();
+    var savedOut = Console.Out;
+    try
+    {
+        Environment.SetEnvironmentVariable("PATH", Path.Combine(root, "sem-pwsh"));
+        Environment.SetEnvironmentVariable("CI", null);
+        Console.SetOut(skipped);
+        CodeSigningChecks.Run(Check);
+    }
+    finally { Console.SetOut(savedOut); Environment.SetEnvironmentVariable("PATH", savedPath); Environment.SetEnvironmentVariable("CI", savedCi); }
+    Check(count == before && skipped.ToString().Contains("PULADO: Assinatura: pwsh (PowerShell 7) não encontrado no PATH")
+        && CodeSigningChecks.FindPwsh(null) == null,
+        "Assinatura: sem pwsh no PATH, as verificações do script são puladas com aviso e não contam como aprovadas");
     CodeSigningChecks.Run(Check);
     Console.WriteLine($"{count} verificações do instalador aprovadas.");
 }
