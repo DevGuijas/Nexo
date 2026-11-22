@@ -18,6 +18,15 @@ if (args.Contains("--network-decision"))
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
+if (args.Contains("--network-followup"))
+{
+    var followUpStore = new Store(Path.Combine(root, "followup"));
+    var followUpAdmin = followUpStore.Login("Guisbz", "1234");
+    followUpAdmin.MustChangePassword = false; followUpStore.Save();
+    await NetworkFollowUpChecks.Run(followUpStore, followUpAdmin, Assert);
+    Console.WriteLine($"{count} verificações aprovadas.");
+    return;
+}
 if (args.Contains("--network-recovery"))
 {
     await NetworkRecoveryChecks.Run(Assert);
@@ -249,6 +258,7 @@ try
     await ValidationAnswerChecks.Run(store, admin, Assert);
     await PcValidationChecks.Run(store, admin, Assert);
     await PcRetestChecks.Run(store, admin, Assert);
+    await NetworkFollowUpChecks.Run(store, admin, Assert);
     await NetworkRecoveryChecks.Run(Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);

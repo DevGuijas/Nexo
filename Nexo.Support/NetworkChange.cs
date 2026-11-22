@@ -39,10 +39,10 @@ public static class NetworkChange
         return new NetworkRequest(action, index, mode, [], address, prefix, gateway);
     }
 
-    public static Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token)
-        => Apply(request, store, confirm, progress, token, NetworkRecovery.StartElevated);
+    public static Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token, NetworkOrigin? origin = null)
+        => Apply(request, store, confirm, progress, token, NetworkRecovery.StartElevated, origin: origin, readCurrent: NetworkRecovery.ReadCurrentState);
 
-    public static async Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token, Func<string, IElevatedProcess> start, NetworkDeadlines? deadlines = null, NetworkRecoveryTrust? trust = null, Func<string, int, string, TimeSpan, CancellationToken, Task<bool>>? deliverDecision = null)
+    public static async Task<string> Apply(NetworkRequest request, Store store, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, CancellationToken token, Func<string, IElevatedProcess> start, NetworkDeadlines? deadlines = null, NetworkRecoveryTrust? trust = null, Func<string, int, string, TimeSpan, CancellationToken, Task<bool>>? deliverDecision = null, NetworkOrigin? origin = null, Func<InterruptedNetworkTransaction, CancellationToken, Task<string?>>? readCurrent = null)
     {
         deadlines ??= NetworkDeadlines.Default;
         trust ??= NetworkRecoveryTrust.Default;
@@ -51,6 +51,8 @@ public static class NetworkChange
         var pipeName = NetworkDecisionChannel.PipeName(id);
         deliverDecision ??= NetworkDecisionChannel.SendAsync;
         var dir = Path.Combine(store.Root, "operations", id); Directory.CreateDirectory(dir);
+        // #128: a conversa de origem, para a recuperação feita na abertura seguinte responder nela.
+        if (origin != null) NetworkRecovery.WriteOrigin(dir, origin);
         var parameters = Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(request)));
         using var source = typeof(NetworkChange).Assembly.GetManifestResourceStream("Nexo.NetworkTransaction.ps1") ?? throw new IOException("Executor de rede ausente.");
         using var reader = new StreamReader(source);
@@ -129,14 +131,14 @@ public static class NetworkChange
         var interrupted = NetworkRecovery.Inspect(dir, DateTimeOffset.UtcNow, _ => false, exited: true, trust: trust);
         if (interrupted == null) return JsonSerializer.Serialize(new { success = false, reverted = false, error = "Executor encerrado sem resultado. Verifique a rede; estado não confirmado.", backup, recoveryFolder = dir });
         if (interrupted.Resolution == null) progress.Report("O executor de rede terminou sem resultado. Oferecendo a restauração da configuração anterior…");
-        var recovery = await NetworkRecovery.Recover(interrupted, confirm, start, NetworkRecovery.DefaultTimeout, CancellationToken.None);
+        var recovery = await NetworkRecovery.Recover(interrupted, confirm, start, NetworkRecovery.DefaultTimeout, CancellationToken.None, readCurrent);
         using var recoveryResult = JsonDocument.Parse(recovery);
         var unchanged = recoveryResult.RootElement.TryGetProperty("unchanged", out var flag) && flag.ValueKind == JsonValueKind.True;
         // #97: a cadeia pode estar bloqueada mesmo se alguém criou a pasta da operação antes do executor.
         var hostile = unchanged ? trust.ChainProblem?.Invoke(trust.ProtectedRoot) : null;
         var error = hostile != null ? NetworkRecovery.HostileChainMessage(hostile) : "Executor encerrado sem resultado. " + NetworkRecovery.Explain(recovery);
         if (hostile != null) return JsonSerializer.Serialize(new { success = false, changed = (bool?)null, reverted = false, error, protectedFolderProblem = true, backup, recoveryFolder = dir });
-        return JsonSerializer.Serialize(new { success = false, changed = !unchanged, reverted = NetworkRecovery.Restored(recovery), error, backup, recoveryFolder = dir, recovery = recoveryResult.RootElement.Clone() });
+        return JsonSerializer.Serialize(new { success = false, changed = !unchanged, reverted = NetworkRecovery.Restored(recovery), phase = interrupted.Phase, error, backup, recoveryFolder = dir, recovery = recoveryResult.RootElement.Clone() });
     }
 
     // #98: o executor grava a mesma mensagem para "restaurar" escolhido na janela, prazo esgotado e cancelamento. Só o
@@ -165,18 +167,23 @@ public static class NetworkChange
         return text;
     }
 
+    internal static string UnconfirmedError(string phase, int seconds, bool cancelled)
+        => (cancelled ? "Cancelamento registrado. " : "") + phase switch
+        {
+            "keeping" => $"Você confirmou manter a nova configuração, mas o executor de rede não registrou o resultado em {seconds} segundos e ainda está em execução. A configuração atual não foi conferida; consulte a rede antes de outra alteração.",
+            "restoring" => $"A restauração da configuração anterior não terminou em {seconds} segundos e o executor de rede ainda está em execução. Não há confirmação de que a configuração anterior voltou; o estado da rede não pôde ser confirmado.",
+            _ => $"O executor de rede não chegou à confirmação em {seconds} segundos e ainda está em execução. A mudança pode ter sido aplicada parcialmente; o estado da rede não pôde ser confirmado e nenhuma restauração foi confirmada. Se o executor ainda chegar à confirmação, ele restaura a configuração anterior."
+        } + (phase == "keeping"
+            // #128: depois de "Manter", a abertura seguinte não oferece restaurar (NetworkRecovery.Inspect, fase keeping).
+            ? " Se o executor terminar sem resultado, a sua escolha de manter continua valendo e o Nexo não altera a rede por conta própria."
+            : " Se o executor terminar sem resultado, a restauração será oferecida na próxima abertura do Nexo.");
+
     private static async Task<string> Unconfirmed(string dir, string backup, string decision, string ready, bool keepDelivered, bool cancelled, TimeSpan elapsed)
     {
         if (!keepDelivered) await File.WriteAllTextAsync(decision, "rollback", CancellationToken.None);
         var applied = File.Exists(ready);
         var phase = keepDelivered ? "keeping" : applied ? "restoring" : "applying";
-        var seconds = (int)Math.Round(elapsed.TotalSeconds);
-        var error = (cancelled ? "Cancelamento registrado. " : "") + phase switch
-        {
-            "keeping" => $"Você confirmou manter a nova configuração, mas o executor de rede não registrou o resultado em {seconds} segundos e ainda está em execução. A configuração atual não foi conferida; consulte a rede antes de outra alteração.",
-            "restoring" => $"A restauração da configuração anterior não terminou em {seconds} segundos e o executor de rede ainda está em execução. Não há confirmação de que a configuração anterior voltou; o estado da rede não pôde ser confirmado.",
-            _ => $"O executor de rede não chegou à confirmação em {seconds} segundos e ainda está em execução. A mudança pode ter sido aplicada parcialmente; o estado da rede não pôde ser confirmado e nenhuma restauração foi confirmada. Se o executor ainda chegar à confirmação, ele restaura a configuração anterior."
-        } + " Se o executor terminar sem resultado, a restauração será oferecida na próxima abertura do Nexo.";
+        var error = UnconfirmedError(phase, (int)Math.Round(elapsed.TotalSeconds), cancelled);
         var outcome = JsonSerializer.Serialize(new { success = false, reverted = false, state = "unknown", timedOut = true, processRunning = true, cancelled, phase, error, backup, recoveryFolder = dir, recordedAt = DateTimeOffset.UtcNow });
         var temporary = Path.Combine(dir, UnconfirmedFile + ".tmp");
         await File.WriteAllTextAsync(temporary, outcome, CancellationToken.None);

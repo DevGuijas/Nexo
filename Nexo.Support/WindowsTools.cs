@@ -11,6 +11,9 @@ namespace Nexo.Support;
 public sealed record ChangeRequest(string Title, string Details, bool KeepNetwork = false, string? LicenseUrl = null)
 {
     public Action? OnExplicitRestore { get; init; }
+    // #128: a janela fechada sem escolha (X, Alt+F4 ou o Nexo sendo encerrado). Só a oferta de restauração usa: ela vale "Agora não".
+    public Action? OnDismissed { get; init; }
+    public bool Postponable { get; init; }
 }
 public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, Action<string>? inform = null) : IAgentTools
 {
@@ -51,6 +54,8 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
     // Consulta da rede, aplicação da mudança de rede e início do processo elevado; os testes trocam por versões sem Windows.
     internal Func<string, CancellationToken, Task<string>> NetworkReader { get; init; } = (script, token) => SupportService.Powershell(script, token);
     internal Func<NetworkRequest, Func<ChangeRequest, Task<bool>>, CancellationToken, Task<string>>? NetworkApplier { get; init; }
+    // Conversa em que esta instância executa as ferramentas: a alteração de rede grava a origem para a recuperação (#128).
+    public string? ConversationId { get; init; }
     internal Func<string, Process> ElevatedStarter { get; init; } = StartElevated;
     // Leitura das impressoras e do diagnóstico de dispositivos; os testes trocam pelo resultado do PowerShell (#84).
     internal Func<string, CancellationToken, Task<string>> PrinterReader { get; init; } = (script, token) => SupportService.Powershell(script, token);
@@ -589,7 +594,8 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 if (!configurableInterfaces.GetValueOrDefault(index)) throw new InvalidOperationException("Esta interface é gerenciada pelo Windows ou por VPN; reconfiguração de IP/DNS não permitida.");
                 var request = NetworkChange.Parse(name, args) with { ExpectedGuid = observedAdapters[index].Guid };
                 if (!await Approve(new ChangeRequest("Alterar configuração de rede", observedInterfaces[index] + "\n" + request.Description + "\nA conexão pode ser interrompida. O estado anterior será salvo e restaurado se você não confirmar a nova configuração."), token)) return Denied();
-                var change = NetworkApplier is { } apply ? await apply(request, next => Approve(next, token), token) : await NetworkChange.Apply(request, store, next => Approve(next, token), progress, token);
+                var change = NetworkApplier is { } apply ? await apply(request, next => Approve(next, token), token)
+                    : await NetworkChange.Apply(request, store, next => Approve(next, token), progress, token, ConversationId is { } origin ? new NetworkOrigin(origin, actor.Id) : null);
                 using (var changeResult = JsonDocument.Parse(change))
                 {
                     if (!changeResult.RootElement.GetProperty("success").GetBoolean()) return change;

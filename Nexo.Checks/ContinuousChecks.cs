@@ -126,6 +126,9 @@ internal static class ContinuousChecks
     }
     private sealed class FailedTransaction(bool restored) : IAgentTools
     {
-        public Task<string> Execute(string name, JsonElement args, CancellationToken token) => Task.FromResult(JsonSerializer.Serialize(new { success = false, changed = true, error = "DHCP sem concessão.", reverted = restored, rollbackError = restored ? null : "MSFT_NetIPAddress não encontrado", backup = "before.json" }));
+        // #128: a alteração de rede só chega ao executor com o índice da consulta do turno; o Nexo consulta a rede antes.
+        public Task<string> Execute(string name, JsonElement args, CancellationToken token) => Task.FromResult(name == "get_network"
+            ? WindowsTools.Ok(new { Adapters = new[] { new { Index = 3, Guid = "00000000-0000-0000-0000-000000000003", Name = "Ethernet", Status = "Up", Disabled = false, Hardware = true, Virtual = false, Dhcp = "Disabled" } } })
+            : JsonSerializer.Serialize(new { success = false, changed = true, error = "DHCP sem concessão.", reverted = restored, rollbackError = restored ? null : "MSFT_NetIPAddress não encontrado", backup = "before.json" }));
     }
 }

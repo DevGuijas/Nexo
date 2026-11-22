@@ -14,6 +14,10 @@ namespace Nexo.Support;
 
 public sealed record NetworkTransactionRecord(string Action, int Index, string ExpectedGuid, DateTimeOffset Created, int? ProcessId = null, int? RecoveryProcessId = null, string? Phase = null, string? LocalDirectory = null);
 
+/// <summary>Conversa e usuário em que a alteração de rede começou (#128). Fica só na pasta local da operação: indica onde anexar o
+/// resultado da recuperação e não autoriza nada.</summary>
+public sealed record NetworkOrigin(string ConversationId, string UserId);
+
 public sealed record InterruptedNetworkTransaction(string Directory, NetworkTransactionRecord Record, string Phase, string? Before, string? Resolution, string? ProtectedDirectory = null);
 
 /// <summary>
@@ -315,7 +319,141 @@ public static class NetworkRecovery
         return $"Uma alteração de rede iniciada em {item.Record.Created.ToLocalTime():g} foi interrompida {phase}, sem resultado registrado. A configuração atual pode estar diferente da anterior.\n\nConfiguração anterior salva para a interface #{item.Record.Index} {name}:{ipv4}\nDNS: {dns}\n\nAntes de restaurar, o Nexo confere se a interface ainda é a mesma e lê o estado atual. Se ele já corresponder ao anterior, nada é alterado. A restauração pede permissão de administrador.";
     }
 
-    public static async Task<string> Recover(InterruptedNetworkTransaction item, Func<ChangeRequest, Task<bool>> confirm, Func<string, IElevatedProcess> start, TimeSpan timeout, CancellationToken token)
+    public const string OriginFile = "origin.json";
+    public const string PostponedMessage = "A janela de restauração foi fechada sem uma escolha. Nada foi alterado; a restauração da configuração anterior será oferecida de novo na próxima abertura do Nexo.";
+    public const string VerifiedWithoutElevationMessage = "A configuração atual da rede já corresponde ao estado anterior salvo. Nenhuma alteração foi feita, e não foi preciso pedir permissão de administrador.";
+
+    /// <summary>Grava, na pasta local da operação, a conversa em que a alteração de rede começou (#128). Sem a gravação, a
+    /// recuperação continua: o resultado só deixa de ir para a conversa de origem.</summary>
+    internal static void WriteOrigin(string directory, NetworkOrigin origin)
+    {
+        try { WriteJson(Path.Combine(directory, OriginFile), origin); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+    }
+
+    /// <summary>A origem gravada por <see cref="WriteOrigin"/>, ou null. O arquivo é da pasta do usuário e pode ter sido alterado:
+    /// ele só diz onde anexar o resultado, e <see cref="AttachToOrigin"/> confere que a conversa é do mesmo usuário.</summary>
+    internal static NetworkOrigin? ReadOrigin(string directory)
+    {
+        try
+        {
+            var path = Path.Combine(directory, OriginFile);
+            if (!File.Exists(path)) return null;
+            var origin = JsonSerializer.Deserialize<NetworkOrigin>(File.ReadAllText(path));
+            static bool Valid(string? id) => id is { Length: > 0 and <= 64 } && id.All(c => char.IsAsciiLetterOrDigit(c) || c == '-');
+            return origin != null && Valid(origin.ConversationId) && Valid(origin.UserId) ? origin : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException) { return null; }
+    }
+
+    /// <summary>O texto que vai para a conversa de origem: o resultado da recuperação e a linha de fatos, sem afirmar restauração
+    /// que não foi conferida (#128).</summary>
+    internal static string ConversationNote(string outcome, DateTimeOffset when)
+    {
+        var stamp = when.ToLocalTime().ToString("dd/MM 'às' HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+        var already = false;
+        try
+        {
+            using var json = JsonDocument.Parse(outcome);
+            already = json.RootElement.TryGetProperty("alreadyRestored", out var a) && a.ValueKind == JsonValueKind.True;
+        }
+        catch (JsonException) { }
+        var restored = Restored(outcome);
+        var facts = restored && !already ? "configuração de rede anterior restaurada e conferida na abertura do Nexo de " + stamp + "."
+            : restored ? "nenhuma; na abertura do Nexo de " + stamp + ", a configuração já correspondia à anterior."
+            : "nenhuma confirmada na abertura do Nexo de " + stamp + ".";
+        return "Resultado desta alteração de rede, que tinha sido interrompida (retomada em " + stamp + "):\n\n" + Explain(outcome) + "\n\n" + TurnFacts.Prefix + " " + facts;
+    }
+
+    /// <summary>Anexa o resultado da recuperação à conversa de origem, se ela existe e é do usuário da sessão. Devolve a conversa
+    /// ou null quando não há origem válida.</summary>
+    internal static Conversation? AttachToOrigin(Store store, Account user, string directory, string outcome, DateTimeOffset when)
+    {
+        if (ReadOrigin(directory) is not { } origin || origin.UserId != user.Id) return null;
+        var conversation = store.Data.Conversations.FirstOrDefault(c => c.Id == origin.ConversationId && c.UserId == user.Id);
+        if (conversation == null) return null;
+        var entry = new Entry { Role = "assistant", Text = ConversationNote(outcome, when), Presentation = Restored(outcome) ? "result" : "error" };
+        conversation.Entries.Add(entry);
+        try { store.Save(); }
+        catch { conversation.Entries.Remove(entry); throw; }
+        return conversation;
+    }
+
+    /// <summary>
+    /// Se o estado atual, lido sem elevação, já corresponde ao backup protegido, pelas mesmas regras do Assert-Restored do
+    /// NetworkTransaction.ps1 (#128): a interface no índice é a mesma (GUID); no set_ipv4, o modo DHCP é o mesmo e, com IP fixo antes,
+    /// cada endereço manual (IP e prefixo) e cada gateway anterior estão presentes; o DNS automático antes exige nenhum DNS fixo agora,
+    /// e o DNS fixo antes exige os mesmos servidores na mesma ordem. Leitura incompleta ou ilegível não corresponde.
+    /// </summary>
+    internal static bool MatchesBefore(string before, string current, NetworkTransactionRecord record)
+    {
+        try
+        {
+            if (record.Action is not ("set_dns" or "set_ipv4")) return false;
+            if (JsonNode.Parse(before) is not JsonObject saved || JsonNode.Parse(current) is not JsonObject now) return false;
+            foreach (var key in new[] { "Index", "Guid", "Dhcp", "StaticDns", "Dns", "Addresses", "Routes" }) if (!now.ContainsKey(key)) return false;
+            if (Number(now["Index"]) != record.Index || Number(saved["Index"]) != record.Index) return false;
+            if (!System.Guid.TryParse(Text(now["Guid"]), out var currentGuid) || !System.Guid.TryParse(Text(saved["Guid"]), out var savedGuid)
+                || !System.Guid.TryParse(record.ExpectedGuid, out var expectedGuid) || currentGuid != savedGuid || savedGuid != expectedGuid) return false;
+            static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+            if (record.Action == "set_ipv4")
+            {
+                if (!Same(Text(now["Dhcp"]), Text(saved["Dhcp"]))) return false;
+                if (Same(Text(saved["Dhcp"]), "Disabled"))
+                {
+                    foreach (var address in Items(saved["Addresses"]).Where(a => Text(a?["PrefixOrigin"]) is var origin && (Same(origin, "Manual") || origin == "1")))
+                        if (!Items(now["Addresses"]).Any(a => Same(Text(a?["IPAddress"]), Text(address?["IPAddress"])) && Number(a?["PrefixLength"]) == Number(address?["PrefixLength"]))) return false;
+                    foreach (var route in Items(saved["Routes"]))
+                        if (!Items(now["Routes"]).Any(r => Same(Text(r?["NextHop"]), Text(route?["NextHop"])))) return false;
+                }
+            }
+            if (string.IsNullOrWhiteSpace(Text(saved["StaticDns"]))) return string.IsNullOrWhiteSpace(Text(now["StaticDns"]));
+            return Same(string.Join(",", Items(now["Dns"]).Select(Text)), string.Join(",", Items(saved["Dns"]).Select(Text)));
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidDataException or InvalidOperationException or FormatException or ArgumentException) { return false; }
+    }
+
+    /// <summary>Lê, sem elevação, o mesmo retrato que o Snapshot do executor monta para a interface da transação (#128).</summary>
+    internal static async Task<string?> ReadCurrentState(InterruptedNetworkTransaction item, CancellationToken token)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        var index = item.Record.Index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return await SupportService.Powershell(CurrentStateScript(index), token, 30).ConfigureAwait(false);
+    }
+
+    internal static string CurrentStateScript(string index)
+        => "$i=" + index + "; $a=Get-NetAdapter -InterfaceIndex $i -ErrorAction Stop; $ip=Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Stop; "
+        + "$s=(Get-ItemProperty -LiteralPath ('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\'+$a.InterfaceGuid) -ErrorAction SilentlyContinue).NameServer; "
+        + "[pscustomobject]@{Index=$i;Guid=[string]$a.InterfaceGuid;Dhcp=[string]$ip.Dhcp;StaticDns=[string]$s;"
+        + "Dns=@((Get-DnsClientServerAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses | ForEach-Object {[string]$_});"
+        + "Addresses=@(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object {$_.InterfaceIndex -eq $i} | ForEach-Object {[pscustomobject]@{IPAddress=[string]$_.IPAddress;PrefixLength=[int]$_.PrefixLength}});"
+        + "Routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop | Where-Object {$_.InterfaceIndex -eq $i -and $_.DestinationPrefix -eq '0.0.0.0/0'} | ForEach-Object {[pscustomobject]@{NextHop=[string]$_.NextHop}})} | ConvertTo-Json -Compress -Depth 4";
+
+    /// <summary>O resultado diz que a conferência sem elevação já tinha sido registrada numa abertura anterior (#128).</summary>
+    internal static bool AlreadyRecorded(string outcome)
+    {
+        try
+        {
+            using var json = JsonDocument.Parse(outcome);
+            return json.RootElement.TryGetProperty("alreadyRecorded", out var recorded) && recorded.ValueKind == JsonValueKind.True;
+        }
+        catch (JsonException) { return false; }
+    }
+
+    private static bool PreviouslyVerified(string resultPath)
+    {
+        try
+        {
+            if (!File.Exists(resultPath)) return false;
+            using var json = JsonDocument.Parse(File.ReadAllText(resultPath));
+            var root = json.RootElement;
+            return root.TryGetProperty("alreadyRestored", out var a) && a.ValueKind == JsonValueKind.True
+                && root.TryGetProperty("verifiedWithoutElevation", out var v) && v.ValueKind == JsonValueKind.True;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { return false; }
+    }
+
+    public static async Task<string> Recover(InterruptedNetworkTransaction item, Func<ChangeRequest, Task<bool>> confirm, Func<string, IElevatedProcess> start, TimeSpan timeout, CancellationToken token, Func<InterruptedNetworkTransaction, CancellationToken, Task<string?>>? readCurrent = null)
     {
         try
         {
@@ -323,9 +461,30 @@ public static class NetworkRecovery
         if (item.Before == null) throw new InvalidOperationException("Transação sem backup validado.");
         var resultPath = Path.Combine(item.Directory, ResultFile);
         var backup = Path.Combine(item.ProtectedDirectory ?? item.Directory, "before.json");
+        // #128: o estado atual, lido sem elevação, já corresponde ao backup protegido: nada a restaurar, nem janela nem UAC.
+        // Só com a cópia protegida confiável que o Inspect validou; leitura que falha ou difere segue o caminho de antes.
+        if (readCurrent != null && item.ProtectedDirectory != null)
+        {
+            string? current;
+            try { current = await readCurrent(item, token).ConfigureAwait(false); }
+            catch (Exception ex) when (ex is not OperationCanceledException) { current = null; }
+            if (current != null && MatchesBefore(item.Before, current, item.Record))
+            {
+                // A marca local só evita repetir o aviso a cada abertura: ela vale apenas quando a leitura de agora também confere.
+                if (PreviouslyVerified(resultPath))
+                    return Serialize(new { success = true, restored = false, alreadyRestored = true, verifiedWithoutElevation = true, alreadyRecorded = true, message = VerifiedWithoutElevationMessage, backup });
+                var verified = Serialize(new { success = true, restored = false, alreadyRestored = true, verifiedWithoutElevation = true, message = VerifiedWithoutElevationMessage, backup, recordedAt = DateTimeOffset.UtcNow });
+                try { await WriteTextAtomic(resultPath, verified).ConfigureAwait(false); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                return verified;
+            }
+        }
         bool accepted;
-        try { accepted = await confirm(new ChangeRequest("Restaurar configuração de rede anterior?", Describe(item))); }
+        var dismissed = false;
+        try { accepted = await confirm(new ChangeRequest("Restaurar configuração de rede anterior?", Describe(item)) { Postponable = true, OnDismissed = () => dismissed = true }); }
         catch (Exception ex) { return Serialize(new { success = false, restored = false, uncertain = true, error = "Confirmação indisponível: " + ex.Message + ". Nada foi alterado; a restauração será oferecida novamente.", backup }); }
+        // #128: a janela fechada sem escolha (inclusive ao encerrar o Nexo) é "Agora não": nada gravado, a oferta volta na próxima abertura.
+        if (!accepted && dismissed) return Serialize(new { success = false, restored = false, postponed = true, message = PostponedMessage, backup });
         if (!accepted)
         {
             var declined = Serialize(new { success = false, restored = false, declined = true, message = "Você optou por não restaurar a configuração anterior. A configuração atual não foi alterada nem conferida; o backup continua salvo.", backup, recordedAt = DateTimeOffset.UtcNow });

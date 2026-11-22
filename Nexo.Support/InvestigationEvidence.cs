@@ -40,6 +40,9 @@ public sealed class InvestigationEvidence
     private readonly HashSet<string> successfulChanges = [];
     private readonly HashSet<string> observedTopics = [];
     private readonly Dictionary<string, (string Topic, string Name, int Code, string[] HardwareIds, string[] CompatibleIds)> observedDevices = [];
+    // Interfaces que get_network devolveu neste turno (#128): set_dns, set_ipv4 e enable_network_adapter só aceitam um desses índices.
+    private readonly SortedDictionary<int, string> networkInterfaces = [];
+    public bool NetworkQueried { get; private set; }
     private readonly Dictionary<string, bool> observedPrinters = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, (string Title, string HardwareId)> observedUpdates = [];
     private readonly HashSet<string> failedTools = [];
@@ -206,8 +209,26 @@ public sealed class InvestigationEvidence
             "clear_print_queue" => Argument("printer_name") is { } printer && observedPrinters.ContainsKey(printer),
             "install_driver_update" => Argument("update_id") is { } id && observedUpdates.TryGetValue(id, out var update) && observedDevices.Values.Any(device
                 => device.HardwareIds.Concat(device.CompatibleIds).Any(hardwareId => string.Equals(hardwareId, update.HardwareId, StringComparison.OrdinalIgnoreCase))),
+            "set_dns" or "set_ipv4" or "enable_network_adapter" => NetworkTargetProblem(name, args) == null,
             _ => true
         };
+    }
+    /// <summary>
+    /// #128: na validação no PC da #10, set_dns(mode=automatic, interface_index=1) chegou ao executor sem consulta de rede, e o turno
+    /// terminou como falha da alteração. O índice precisa ser de uma interface que get_network devolveu neste turno; a recusa diz o
+    /// motivo e quais índices a consulta trouxe. Devolve null quando o índice é aceito.
+    /// </summary>
+    public string? NetworkTargetProblem(string name, JsonElement args)
+    {
+        if (name is not ("set_dns" or "set_ipv4" or "enable_network_adapter")) return null;
+        int? index = args.ValueKind == JsonValueKind.Object && args.TryGetProperty("interface_index", out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var parsed) ? parsed : null;
+        if (!NetworkQueried)
+            return "A rede não foi consultada neste turno, então o índice " + (index is { } asked ? "#" + asked.ToString(CultureInfo.InvariantCulture) : "informado")
+                + " não pode ser conferido. Chame get_network e use o interface_index exato de uma interface que ela devolver. Nenhuma alteração foi feita.";
+        if (index is { } known && networkInterfaces.ContainsKey(known)) return null;
+        var listed = networkInterfaces.Count == 0 ? "nenhuma" : string.Join(", ", networkInterfaces.Select(item => "#" + item.Key.ToString(CultureInfo.InvariantCulture) + " " + Quoted(item.Value, 40)));
+        return "A interface " + (index is { } missing ? "#" + missing.ToString(CultureInfo.InvariantCulture) : "sem índice") + " não apareceu na consulta de rede deste turno. Interfaces consultadas: "
+            + listed + ". Use o interface_index exato de uma delas, como get_network devolveu; não repita esta chamada nem invente um índice. Nenhuma alteração foi feita.";
     }
     public bool HasSuccessfulTool(string name) => successfulTools.Contains(name);
     public bool HasSuccessfulMutation => successfulChanges.Count > 0;
@@ -1013,6 +1034,12 @@ public sealed class InvestigationEvidence
     private void RememberNetwork(JsonElement data)
     {
         if (data.ValueKind != JsonValueKind.Object || !data.TryGetProperty("Adapters", out var adapters) || adapters.ValueKind != JsonValueKind.Array) return;
+        // Cada consulta substitui a anterior: um índice que sumiu da rede deixa de ser aceito (#128).
+        networkInterfaces.Clear();
+        NetworkQueried = true;
+        foreach (var adapter in adapters.EnumerateArray())
+            if (adapter.ValueKind == JsonValueKind.Object && adapter.TryGetProperty("Index", out var number) && number.ValueKind == JsonValueKind.Number && number.TryGetInt32(out var index))
+                networkInterfaces[index] = Text(adapter, "Name") ?? "";
         var connected = adapters.EnumerateArray().Where(adapter => adapter.ValueKind == JsonValueKind.Object && Text(adapter, "Status") == "Up").ToArray();
         Finding("network", connected.Length == 0 ? "Nenhum adaptador de rede aparece conectado na consulta."
             : "Rede: " + Within(connected.Take(3).Select(adapter => $"{Quoted(Text(adapter, "Name") ?? "")} conectada, gateway {Addresses(adapter, "Gateways")}, DNS {Addresses(adapter, "Dns")}"
