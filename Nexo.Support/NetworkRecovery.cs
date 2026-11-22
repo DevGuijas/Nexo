@@ -88,7 +88,7 @@ public static class NetworkRecovery
     {
         using var buffer = new MemoryStream();
         using (var gzip = new GZipStream(buffer, CompressionLevel.SmallestSize, true)) gzip.Write(Encoding.UTF8.GetBytes(script));
-        return "$nexoScript=(New-Object System.IO.StreamReader((New-Object System.IO.Compression.GZipStream((New-Object System.IO.MemoryStream(,[Convert]::FromBase64String('"
+        return PowerShellModulePath.Guard + " $nexoScript=(New-Object System.IO.StreamReader((New-Object System.IO.Compression.GZipStream((New-Object System.IO.MemoryStream(,[Convert]::FromBase64String('"
             + Convert.ToBase64String(buffer.ToArray()) + "'))),[System.IO.Compression.CompressionMode]::Decompress)),[System.Text.Encoding]::UTF8)).ReadToEnd(); " + LoaderRun;
     }
 
@@ -425,7 +425,7 @@ public static class NetworkRecovery
     }
 
     internal static string CurrentStateScript(string index)
-        => "$env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules'); $i=" + index + "; $a=Get-NetAdapter -InterfaceIndex $i -ErrorAction Stop; $ip=Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Stop; "
+        => PowerShellModulePath.Guard + " $i=" + index + "; $a=Get-NetAdapter -InterfaceIndex $i -ErrorAction Stop; $ip=Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Stop; "
         + "$s=(Get-ItemProperty -LiteralPath ('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\'+$a.InterfaceGuid) -ErrorAction SilentlyContinue).NameServer; "
         + "[pscustomobject]@{Index=$i;Guid=[string]$a.InterfaceGuid;Dhcp=[string]$ip.Dhcp;StaticDns=[string]$s;"
         + "Dns=@((Get-DnsClientServerAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses | ForEach-Object {[string]$_});"

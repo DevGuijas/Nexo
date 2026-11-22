@@ -45,8 +45,8 @@ internal static class OptimizationDiskExecutor
         if (!System.Text.RegularExpressions.Regex.IsMatch(userSid, @"^S-1-5(?:-\d+)+$"))
             throw new ArgumentException("SID de usuário inválido.", nameof(userSid));
         return $$$"""
+            {{{PowerShellModulePath.Guard}}}
             $ErrorActionPreference='Stop'
-            $env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules')
             $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
             if(-not (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){throw 'Elevação necessária'}
             $base=[Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)

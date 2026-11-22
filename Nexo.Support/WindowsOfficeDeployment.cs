@@ -99,7 +99,7 @@ public sealed class WindowsOfficeDeployment : IOfficeDeploymentPlatform
     }
     public async Task<bool> IsMicrosoftSignedAsync(string path, CancellationToken token)
     {
-        var script = "$env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules');$s=Get-AuthenticodeSignature -LiteralPath '" + path.Replace("'", "''") + "'; if($s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -match '(^|, )O=Microsoft Corporation(,|$)'){exit 0}; exit 1";
+        var script = PowerShellModulePath.Guard + "$s=Get-AuthenticodeSignature -LiteralPath '" + path.Replace("'", "''") + "'; if($s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -match '(^|, )O=Microsoft Corporation(,|$)'){exit 0}; exit 1";
         return await RunAsync(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"), ["-NoProfile", "-NonInteractive", "-Command", script], token) == 0;
     }
     public async Task<int> RunAsync(string executable, IReadOnlyList<string> arguments, CancellationToken token)
@@ -126,7 +126,9 @@ public sealed class WindowsOfficeDeployment : IOfficeDeploymentPlatform
                 UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden,
                 WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System)
             };
-            foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-Command", BuildBootstrap(odt, hash) }) start.ArgumentList.Add(argument);
+            string[] arguments = ["-NoProfile", "-NonInteractive", "-Command", BuildBootstrap(odt, hash)];
+            PowerShellModulePath.Require(arguments);
+            foreach (var argument in arguments) start.ArgumentList.Add(argument);
             token.ThrowIfCancellationRequested();
             // Never cancel this wait: the elevated helper owns staging and waits for the real ODT.
             return await runProcess(start, CancellationToken.None);
@@ -139,8 +141,8 @@ public sealed class WindowsOfficeDeployment : IOfficeDeploymentPlatform
         var xml = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(OfficeDeploymentService.Configuration));
         var quotedSource = source.Replace("'", "''");
         return $$$"""
+            {{{PowerShellModulePath.Guard}}}
             $ErrorActionPreference='Stop'
-            $env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules')
             $staging=$null
             $installerLaunched=$false
             $installerKnown=$false
