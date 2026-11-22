@@ -17,6 +17,12 @@ if (args.Contains("--module-path"))
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
+if (args.Contains("--pipe-peer"))
+{
+    await PipePeerChecks.Run(Assert);
+    Console.WriteLine($"{count} verificações aprovadas.");
+    return;
+}
 if (args.Contains("--optimization")) { await BasicOptimizationChecks.Run(Assert); return; }
 if (args.Contains("--debloat")) { await DebloatChecks.Run(Assert); Console.WriteLine($"{count} verificações aprovadas."); return; }
 if (args.Contains("--network-decision"))
@@ -46,6 +52,7 @@ try
     await ModulePathGuardChecks.Run(Assert);
     await BasicOptimizationChecks.Run(Assert);
     await DebloatChecks.Run(Assert);
+    await PipePeerChecks.Run(Assert);
     await NetworkDecisionChecks.Run(Assert);
     HealthDataChecks.Run(Path.Combine(root, "operational"), Assert);
     MonitoringChecks.Run(Assert);

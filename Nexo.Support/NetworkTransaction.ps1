@@ -9,17 +9,24 @@ $failureState = $null
 # decision.txt fica na pasta do usuário: ele pode pedir rollback, mas nunca autoriza manter a mudança (#11).
 # O pipe só é lido depois de applied.json; o PID do servidor vem do kernel, não do nome público do pipe.
 function Receive-Decision {
-    if ([int]$appProcessId -le 0 -or [string]$decisionPipeName -cnotmatch '^nexo-network-[0-9a-f]{32}$') { return 'rollback' }
-    if (-not ('NexoNetworkPipePeer' -as [type])) {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class NexoNetworkPipePeer {
-    [DllImport("kernel32.dll", SetLastError=true)]
-    public static extern bool GetNamedPipeServerProcessId(IntPtr pipe, out uint processId);
-}
-'@
+    # #133: o P/Invoke do GetNamedPipeServerProcessId é definido por Reflection.Emit num assembly dinâmico só em memória
+    # (AssemblyBuilderAccess.Run). Compilar o tipo a partir de código C# no Windows PowerShell 5.1 gravaria o código e a DLL
+    # no TEMP deste processo elevado, que vem de HKCU\Environment e o usuário grava sem elevação: daria para trocar a DLL
+    # antes de ela ser carregada com admin. Nada aqui grava arquivo nem chama compilador.
+    function New-NexoPipePeer {
+        if ($script:nexoPipePeer) { return $script:nexoPipePeer }
+        $assembly = [System.Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly((New-Object System.Reflection.AssemblyName 'NexoNetworkPipePeer'), [System.Reflection.Emit.AssemblyBuilderAccess]::Run)
+        $builder = $assembly.DefineDynamicModule('NexoNetworkPipePeer').DefineType('NexoNetworkPipePeer', [System.Reflection.TypeAttributes]'Public, Abstract, Sealed')
+        $method = $builder.DefinePInvokeMethod('GetNamedPipeServerProcessId', 'kernel32.dll', [System.Reflection.MethodAttributes]'Public, Static, PinvokeImpl', [System.Reflection.CallingConventions]::Standard, [bool], [Type[]]@([IntPtr], [uint32].MakeByRefType()), [System.Runtime.InteropServices.CallingConvention]::Winapi, [System.Runtime.InteropServices.CharSet]::Unicode)
+        $method.SetImplementationFlags([System.Reflection.MethodImplAttributes]::PreserveSig)
+        [void]$method.DefineParameter(1, [System.Reflection.ParameterAttributes]::None, 'pipe')
+        [void]$method.DefineParameter(2, [System.Reflection.ParameterAttributes]::Out, 'processId')
+        $script:nexoPipePeer = $builder.CreateType()
+        return $script:nexoPipePeer
     }
+    if ([int]$appProcessId -le 0 -or [string]$decisionPipeName -cnotmatch '^nexo-network-[0-9a-f]{32}$') { return 'rollback' }
+    # Sem o tipo, não há como conferir quem está do outro lado do pipe: a mudança não é mantida.
+    try { $peer = New-NexoPipePeer } catch { return 'rollback' }
     $decisionPath = Join-Path $operationDir 'decision.txt'
     $deadline = (Get-Date).AddSeconds(60)
     while ((Get-Date) -lt $deadline) {
@@ -30,7 +37,7 @@ public static class NexoNetworkPipePeer {
         try {
             $pipe.Connect(250)
             [uint32]$serverPid = 0
-            if (-not [NexoNetworkPipePeer]::GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(), [ref]$serverPid) -or $serverPid -ne [uint32]$appProcessId) { continue }
+            if (-not $peer::GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(), [ref]$serverPid) -or $serverPid -ne [uint32]$appProcessId) { continue }
             $reader = New-Object System.IO.StreamReader($pipe)
             $remaining = [int][Math]::Max(1, ($deadline - (Get-Date)).TotalMilliseconds)
             $line = $reader.ReadLineAsync()
