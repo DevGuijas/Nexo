@@ -53,7 +53,8 @@ internal static class ContinuousChecks
             Call("get_network", new { }),
             Call("finish_support", new { message = "Configuração consultada, nenhuma alteração aplicada." })]);
         assert((await RunModel(approval, fake, Conversation(actor))).Contains("consultada") && approval.Calls == 3, "Pedido de Ok para consulta é substituído por execução");
-        using var loop = new ScriptedModel(Enumerable.Repeat(Text("Vou fazer o teste."), 4).ToArray());
+        // Textos diferentes: o mesmo texto recusado 3 vezes encerra antes, pela regra da repetição (validação de 22/11).
+        using var loop = new ScriptedModel(Enumerable.Range(1, 4).Select(i => Text("Vou fazer o teste " + i + ".")).ToArray());
         assert((await RunModel(loop, fake, Conversation(actor))).Contains("não conseguiu") && loop.Calls == 4, "Modelo sem chamadas termina com limitação explícita e limite de tentativas");
         using var readOnlyModel = new ScriptedModel([Call("restart_service", new { service = "bthserv" }), Call("finish_support", new { message = "Consulta encerrada sem alteração." })]);
         var readOnlyConversation = Conversation(actor); readOnlyConversation.Entries[0].Text = "Verifique meu Bluetooth. Apenas consulte; não faça alterações.";

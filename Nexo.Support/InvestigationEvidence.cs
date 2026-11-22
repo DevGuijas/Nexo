@@ -242,6 +242,7 @@ public sealed class InvestigationEvidence
         if (InventsProcessPurpose(text)) return ProcessPurposeReason;
         if (OffersFileSearch(text)) return FileSearchReason;
         if (ClaimsDriveContents(text)) return DriveContentsReason;
+        if (OffersUnsupportedAction(text)) return UnsupportedActionReason;
         if (PresentsClosedDisk(text)) return ClosedDiskReason;
         if (SuggestsMalware(text)) return MalwareReason;
         if (BlamesStablePlateau(text)) return StablePlateauReason;
@@ -259,6 +260,7 @@ public sealed class InvestigationEvidence
             ProcessPurposeReason => InventsProcessPurpose,
             FileSearchReason => OffersFileSearch,
             DriveContentsReason => ClaimsDriveContents,
+            UnsupportedActionReason => OffersUnsupportedAction,
             ClosedDiskReason => PresentsClosedDisk,
             MalwareReason => SuggestsMalware,
             AgentProtocol.PendingActionReason => part => AgentProtocol.PendingActionPhrase(part) != null,
@@ -271,13 +273,24 @@ public sealed class InvestigationEvidence
         var text = "Esta é a mesma recusa da tentativa anterior: não reenvie o mesmo texto.";
         if (passages.Length == 0) return text + " Escreva a resposta de novo, do zero, sem o ponto indicado no motivo.";
         text += (passages.Length == 1 ? " Remova ou reescreva este trecho: " : " Remova ou reescreva estes trechos: ") + string.Join(" ", passages.Select(part => Quoted(part, 240))) + ".";
-        var names = (reason == StaleProcessReason ? staleProcesses : ProcessNames()).Where(name => passages.Any(part => Cites(AgentProtocol.Normalize(part), name)))
+        var names = (reason == StaleProcessReason ? staleProcesses : ProcessNames().Concat(MentionedNames())).Where(name => passages.Any(part => Cites(AgentProtocol.Normalize(part), name)))
             .Distinct(StringComparer.OrdinalIgnoreCase).Take(2).Select(name => Quoted(name)).ToArray();
         if (names.Length > 0)
             text += reason == StaleProcessReason ? " Não apresente " + string.Join(" nem ", names) + " como consumo atual: a ocorrência está encerrada."
                 : reason == MalwareReason ? " Não chame " + string.Join(" nem ", names) + " de malicioso, vírus ou suspeito." : "";
         return text;
     }
+
+    // Respostas anteriores do assistente nesta conversa (as mais recentes), definidas pelo AgentService.
+    public string[] PriorAnswers { get; set; } = [];
+    // Na validação da e7a69a2 (22/11, passo 2.2), "o que é esse NexoMemTeste?" não chamou nenhuma ferramenta e "O NexoMemTeste
+    // é um teste de memória RAM…" passou: a trava só conhecia os nomes das consultas do turno. Contam também o processo da
+    // linha "Pelo monitor de saúde: “nome” (PID n)" de uma resposta anterior e o nome que o usuário escreveu no pedido, quando
+    // tem cara de executável: maiúscula no meio da palavra ("NexoMemTeste", "OneDrive") ou ".exe" no fim.
+    private static readonly Regex MonitorName = new(@"“(?<name>[^”\r\n]{1,80})” \(PID \d+\)");
+    private static readonly Regex TypedName = new(@"(?<![\w.-])(?<name>[\p{L}\p{N}_-]*\p{Ll}\p{Lu}[\p{L}\p{N}_-]*|[\p{L}\p{N}_-]+(?=\.exe\b))");
+    private IEnumerable<string> MentionedNames() => PriorAnswers.SelectMany(answer => MonitorName.Matches(answer).Select(match => match.Groups["name"].Value))
+        .Concat(TypedName.Matches(UserRequest).Select(match => match.Groups["name"].Value.Trim('-', '_'))).Where(name => name.Length >= 3);
 
     // Processos que o turno conhece (consulta de processos e relatório de saúde), pelo nome.
     private IEnumerable<string> ProcessNames() => topProcesses.Select(p => p.Name).Concat(currentProcesses).Concat(staleProcesses).Concat(memoryHolders.Select(h => h.Name));
@@ -287,16 +300,52 @@ public sealed class InvestigationEvidence
     internal const string ProcessPurposeReason = "A resposta atribui ao processo uma função ou categoria que nenhuma ferramenta informou. Fale só do nome e do consumo medido; se o usuário não reconhece o programa, oriente conferir o nome e o local do arquivo no Gerenciador de Tarefas.";
     // Inventário e monitor informam nome, PID e consumo, não a finalidade de um executável. O nome do processo não é prova
     // de que ele seja um teste, um diagnóstico ou um componente essencial do Windows.
+    // Na validação da e7a69a2 (22/11), "é um teste de memória RAM que verifica se a memória…" e "é usado para identificar
+    // problemas" passaram: valem também "é/seria/pode ser um teste (diagnóstico, benchmark…)", "que verifica/testa/mede…",
+    // "usado/utilizado/feito para identificar/detectar/analisar…" e "ferramenta de verificação/análise". "Não tenho
+    // informação" passa, como "não sei".
     private bool InventsProcessPurpose(string normalized)
     {
-        var names = ProcessNames().ToArray();
+        var names = ProcessNames().Concat(MentionedNames()).ToArray();
         return Sentences(normalized).Any(sentence =>
             !sentence.Contains('?')
-            && !Regex.IsMatch(sentence, @"\b(?:nao sei|nao da para (?:saber|afirmar)|nao e possivel (?:saber|afirmar)|nenhuma ferramenta informa)\b")
+            && !Regex.IsMatch(sentence, @"\b(?:nao sei|nao da para (?:saber|afirmar)|nao e possivel (?:saber|afirmar)|nenhuma ferramenta informa|nao (?:tenho|temos|ha) (?:essa |nenhuma )?informac\w*)\b")
             && (Regex.IsMatch(sentence, @"\b(?:processo|programa|aplicativo|software)\b") || names.Any(name => Cites(sentence, name)))
-            && (Regex.IsMatch(sentence, @"\b(?:serve|executad[oa]|criad[oa]|desenvolvid[oa]|usad[oa]|iniciad[oa])\b.{0,50}\bpara\s+(?:testar|verificar|diagnosticar|monitorar|avaliar|medir|gerenciar|otimizar|atualizar|proteger)\b")
-                || Regex.IsMatch(sentence, @"\b(?:ferramenta|programa|aplicativo|software)\s+de\s+(?:diagnostico|teste|monitoramento|otimizacao|seguranca)\b")
+            && (Regex.IsMatch(sentence, @"\b(?:serve|executad[oa]|criad[oa]|desenvolvid[oa]|usad[oa]|utilizad[oa]|feit[oa]|projetad[oa]|iniciad[oa])\b.{0,50}\bpara\s+(?:testar|verificar|diagnosticar|monitorar|avaliar|medir|gerenciar|otimizar|atualizar|proteger|identificar|detectar|checar|analisar)\b")
+                || Regex.IsMatch(sentence, @"\b(?:ferramenta|programa|aplicativo|software|utilitario)\s+de\s+(?:diagnostico|teste|monitoramento|otimizacao|seguranca|verificacao|analise|benchmark)\b")
+                || Regex.IsMatch(sentence, @"\b(?:e|seria|parece ser|pode ser|deve ser)\s+(?:um|uma)\s+(?:teste|diagnostico|benchmark|verificador)\b")
+                || Regex.IsMatch(sentence, @"\bque\s+(?:verifica|testa|identifica|diagnostica|monitora|mede|analisa|detecta|checa|avalia)\b")
                 || Regex.IsMatch(sentence, @"\b(?:e|nao e|parece|pode ser)\s+(?:um|uma)?\s*(?:processo do sistema(?: operacional)?|software essencial(?: do windows)?)\b")));
+    }
+
+    internal const string SecurityGuidance = "O Nexo não tem verificação de segurança e não sabe dizer se um programa é malicioso. Para isso, faça uma verificação na Segurança do Windows (Proteção contra vírus e ameaças) e confira o nome e o local do arquivo no Gerenciador de Tarefas.";
+
+    internal const string UnsupportedActionReason = "O Nexo não tem ferramenta para fechar programas ou processos nem para aumentar, expandir ou redimensionar discos, volumes ou arquivos VHD/VHDX: não ofereça nem prometa essas ações. Diga o que as consultas mostraram e oriente o caminho manual: para fechar um programa, o Gerenciador de Tarefas (Ctrl+Shift+Esc); para o tamanho de um volume ou VHD/VHDX, o Gerenciamento de Disco do Windows.";
+    // Na validação da e7a69a2 (22/11), o modelo ofereceu "posso ajudar a aumentar o tamanho do arquivo VHD/VHDX. Deseja que
+    // eu faça isso?" e, com a RAM acima de 80%, "posso ajudar a fechá-los". Nenhuma ferramenta faz isso, então a oferta em 1ª
+    // pessoa é recusada, como a de procurar arquivos. Fechar exige o objeto logo depois do verbo (programas, processos,
+    // aplicativos, janelas, "-los" ou um processo conhecido do turno): "vou encerrar este atendimento" passa. A explicação ao
+    // usuário ("posso explicar como fechar…", "posso te orientar a…") e a negação também passam.
+    // O verbo de aumentar precisa ter o disco, o volume ou o tamanho logo como objeto (@qa): "posso ampliar a verificação para o
+    // disco C:" e "posso estender a análise ao volume D:" são consultas que o Nexo faz, não redimensionamento.
+    private static readonly Regex UnsupportedOffer = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo)\b(?<lead>[^:;]*?)"
+        + @"\b(?:(?:aument|expand|redimension|estend|ampli)\w*\s+(?:(?:o|a|os|as|esse|essa|este|esta|seu|sua|meu|minha)\s+)?(?:arquivo\s+)?(?:\b(?:tamanho|capacidade|disco|volume|particao|vhdx?)\b|(?<![\w:])[a-z]:)"
+        + @"|(?:fech|encerr|finaliz)\w*(?:-(?:lo|la|los|las)\b|\s+(?:(?:os|as|o|a|esses|essas|esse|essa|este|esta|estes|estas|alguns|algumas|seus|suas|todos os|todas as|aquele|aqueles)\s+)?(?:(?<object>programas?|processos?|aplicativos?|apps?|janelas?|abas?)\b|(?<target>[\p{L}\p{N}._-]+))))");
+    private static readonly Regex Orientation = new(@"\b(?:explic\w*|orient\w*|ensin\w*|(?:mostrar|indicar|dizer) como|passo a passo)\b");
+    private bool OffersUnsupportedAction(string normalized)
+    {
+        var names = ProcessNames().Concat(MentionedNames()).ToArray();
+        return Sentences(normalized).Any(sentence => UnsupportedOffer.Matches(sentence).Any(offer => !Negated(sentence, offer) && !Orientation.IsMatch(offer.Groups["lead"].Value)
+            && (!offer.Groups["target"].Success || names.Any(name => Cites(offer.Groups["target"].Value, name)))));
+    }
+
+    // Resposta pobre (validação da e7a69a2, 22/11): sem nenhum fato do turno (número, processo conhecido ou letra de unidade)
+    // e curta (menos de 6 palavras, como "Posso ajudar?") ou começando por uma condição solta ("Se a lentidão continuar…").
+    public bool IsThinAnswer(string answer)
+    {
+        var text = AgentProtocol.Normalize(answer);
+        if (Regex.IsMatch(text, @"\d|(?<![\w:])[a-z]:(?!\w)") || ProcessNames().Concat(MentionedNames()).Any(name => Cites(text, name))) return false;
+        return Regex.Matches(text, @"[\p{L}\p{N}]+").Count < 6 || Regex.IsMatch(text, @"^\W*(?:se|caso|quando)\b");
     }
 
     internal const string MalwareReason = "A resposta sugere que um processo pode ser malicioso (vírus, malware), mas nenhuma ferramenta do Nexo traz evidência de segurança. Fale só do consumo medido; se o usuário não reconhece o programa, oriente conferir o nome e o local do arquivo no Gerenciador de Tarefas, sem chamá-lo de malicioso ou suspeito.";
@@ -328,7 +377,7 @@ public sealed class InvestigationEvidence
     private bool SuggestsMalware(string normalized)
     {
         if (UserRaisedSecurity) return false;
-        var names = ProcessNames().ToArray();
+        var names = ProcessNames().Concat(MentionedNames()).ToArray();
         return Sentences(normalized).Select(sentence => SecurityNames.Replace(sentence, " ")).Any(sentence => MalwareTerm.Matches(sentence).Any(term =>
             (ProcessWord.IsMatch(sentence) || names.Any(name => Cites(sentence, name)))
             && !(DeniesTerm(sentence, term) && !Verification.IsMatch(sentence))));
@@ -423,6 +472,13 @@ public sealed class InvestigationEvidence
         OfferedSearch.Matches(sentence).Any(offer => !Negated(sentence, offer)
             && !(StoragePath.IsMatch(sentence) && Guide.IsMatch(offer.Groups["lead"].Value))));
 
+    // Na validação da e7a69a2 (22/11, passo 1.3), "posso ajudar você a verificar o que há dentro dessa unidade" passou: a oferta
+    // só era reconhecida com "conteúdo", "arquivos" ou "pastas". Numa resposta que fala de unidade, conta também a oferta de
+    // ver "o que há/tem/existe/está" dentro, guardado, salvo ou na unidade. "Posso verificar o que está causando a lentidão no
+    // disco" passa: o que vem depois de "o que está" não é o lugar. Entre o verbo e o lugar só cabe um advérbio ("o que há
+    // atualmente no D:"): "posso verificar o que está errado no disco C:" e "o que há de errado no disco" são diagnóstico (@qa).
+    private static readonly Regex InsideOffer = new(@"\b(?:posso|podemos|poderia|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu)\b[^:;]{0,45}?\b(?:verific\w*|inspecion\w*|analis\w*|list\w*|mostr\w*|ver|veja|olh\w*|confer\w*|confir\w*|chec\w*|abr\w*|explor\w*)\b[^:;]{0,30}?"
+        + @"\bo que (?:ha|tem|existe|existem|esta|estao|foi|ficou)(?:\s+(?:atualmente|agora|hoje|realmente|exatamente|mesmo|la))?\s+(?:dentro|guardad\w*|salv\w*|armazenad\w*|gravad\w*|nel[ae]s?|ali|n[ao]s?\s+(?:unidade|disco|volume|pendrive|pen drive|(?<![\w:])[a-z]:)|nessa|nesse|nesta|neste|dess[ae]\s+(?:unidade|disco|volume|pendrive))");
     // O inventário informa discos e volumes, nunca o conteúdo dos arquivos. Avaliar cada oração evita que
     // "não consigo ver..." ou "você pode abrir..." isente uma afirmação/oferta diferente na mesma frase.
     private static bool ClaimsDriveContents(string normalized)
@@ -438,7 +494,8 @@ public sealed class InvestigationEvidence
                 || driveInAnswer && !Regex.IsMatch(clause, @"\b(?:relatorio|inventario|registro)\b")
                     && Regex.IsMatch(clause, @"\b(?:contem|possui|tem|ha)\s+(?:\w+\s+){0,4}(?:arquivos?|pastas?|fotos?|documentos?|videos?|imagens?|musicas?|dados)\b")))
                 return true;
-            var offers = Regex.Matches(clause, @"\b(?:posso|podemos|consigo|vou|irei)\b[^:;]{0,45}?\b(?:verific\w*|inspecion\w*|analis\w*|list\w*|mostr\w*|ver)\b[^:;]{0,50}?\b(?:conteudo|arquivos?|pastas?)\b");
+            var offers = Regex.Matches(clause, @"\b(?:posso|podemos|consigo|vou|irei)\b[^:;]{0,45}?\b(?:verific\w*|inspecion\w*|analis\w*|list\w*|mostr\w*|ver)\b[^:;]{0,50}?\b(?:conteudo|arquivos?|pastas?)\b")
+                .Concat(driveInAnswer ? InsideOffer.Matches(clause) : Enumerable.Empty<Match>());
             if (offers.Any(offer => !Negated(clause, offer)
                 && !Regex.IsMatch(offer.Value, @"\b(?:te orientar a|orientar (?:voce|o usuario) a|explicar como|mostrar como|ensinar (?:voce )?a)\b")))
                 return true;
