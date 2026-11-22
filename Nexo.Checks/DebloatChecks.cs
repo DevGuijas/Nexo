@@ -794,6 +794,7 @@ internal static class DebloatScriptChecks
             function Get-CimInstance { param($ClassName,$Filter,$ErrorAction) [pscustomobject]@{InstallState=1} }
             $env:SystemDrive='C:'
             """;
+        await LongScript(shell, check);
         var inventoryJson = await Run(shell, inventoryFakes + "\n" + DebloatScripts.Inventory(DebloatCatalog.ForBuild(22631)));
         DebloatInventory? inventory = null;
         try { inventory = DebloatScripts.ParseInventory(inventoryJson); } catch (JsonException) { }
@@ -1049,16 +1050,50 @@ internal static class DebloatScriptChecks
         catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { return json; }
     }
 
+    // O script vai num .ps1 temporário com -File, não em -EncodedCommand: com os cmdlets falsos, o Aplicar sem compactar
+    // passa de 32.767 caracteres em Base64 (UTF-16) e o Windows recusa iniciar o processo (Win32Exception 206, CI do PR
+    // #130). O pwsh fora do Windows não tem esse limite, por isso a suíte passava no Mac. O arquivo leva BOM UTF-8 para o
+    // Windows PowerShell 5.1 ler os acentos, e é apagado mesmo quando o processo falha ao iniciar.
+    internal static IReadOnlyList<string> FileArguments(string path) => ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path];
+    internal const string Prelude = "$ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.Encoding]::UTF8\n";
+
     private static async Task<string> Run(string shell, string script)
     {
-        var start = new ProcessStartInfo(shell) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, StandardOutputEncoding = Encoding.UTF8 };
-        foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[Text.Encoding]::UTF8\n" + script)) })
-            start.ArgumentList.Add(argument);
-        using var process = Process.Start(start)!;
-        var output = process.StandardOutput.ReadToEndAsync();
-        var error = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        var text = (await output).Trim();
-        return text.Length > 0 ? text : "ERRO: " + (await error).Trim();
+        var path = Path.Combine(Path.GetTempPath(), "nexo-debloat-check-" + Guid.NewGuid().ToString("N") + ".ps1");
+        try
+        {
+            File.WriteAllText(path, Prelude + script, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+            var start = new ProcessStartInfo(shell) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, StandardOutputEncoding = Encoding.UTF8 };
+            foreach (var argument in FileArguments(path)) start.ArgumentList.Add(argument);
+            using var process = Process.Start(start)!;
+            var output = process.StandardOutput.ReadToEndAsync();
+            var error = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            var text = (await output).Trim();
+            return text.Length > 0 ? text : "ERRO: " + (await error).Trim();
+        }
+        finally { try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
+    }
+
+    // O harness precisa aguentar scripts maiores que a linha de comando do Windows; a linha passada ao processo não cresce
+    // com o script. Fora do Windows o limite não existe, então a prova é dupla: o script longo roda e devolve o marcador, e
+    // os argumentos ficam muito abaixo do limite, ao contrário do que o -EncodedCommand daria com o mesmo texto.
+    private static async Task LongScript(string shell, Action<bool, string> check)
+    {
+        var filler = "# " + new string('x', 120) + "\n";
+        var script = string.Concat(Enumerable.Repeat(filler, 400)) + "$v='ação'; Write-Output ('longo-ok:' + $v)";
+        var encoded = WindowsTools.CommandLength(["-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(Prelude + script))]);
+        var viaFile = WindowsTools.CommandLength(FileArguments(Path.Combine(Path.GetTempPath(), "nexo-debloat-check-" + new string('0', 32) + ".ps1")));
+        check(script.Length > 32_000 && encoded > 32_767 && viaFile < 1_000,
+            $"Debloat: o harness passa o script por arquivo, sem depender do tamanho dele ({script.Length} caracteres; {encoded} em -EncodedCommand; {viaFile} por arquivo)");
+        var before = Directory.GetFiles(Path.GetTempPath(), "nexo-debloat-check-*.ps1").Length;
+        var output = await Run(shell, script);
+        check(output == "longo-ok:ação", "Debloat: o harness roda um script acima de 32 mil caracteres e preserva os acentos: " + Short(output));
+        check(Directory.GetFiles(Path.GetTempPath(), "nexo-debloat-check-*.ps1").Length <= before, "Debloat: o harness apaga o script temporário depois de rodar");
+        var missing = Path.Combine(Path.GetTempPath(), "nexo-debloat-check-shell-inexistente-" + Guid.NewGuid().ToString("N"));
+        var failedBefore = Directory.GetFiles(Path.GetTempPath(), "nexo-debloat-check-*.ps1").Length;
+        var failed = false;
+        try { await Run(missing, "Write-Output 1"); } catch (System.ComponentModel.Win32Exception) { failed = true; }
+        check(failed && Directory.GetFiles(Path.GetTempPath(), "nexo-debloat-check-*.ps1").Length <= failedBefore, "Debloat: o harness apaga o script temporário mesmo quando o processo não inicia");
     }
 }
