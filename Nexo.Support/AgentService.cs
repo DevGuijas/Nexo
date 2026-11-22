@@ -478,6 +478,12 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                         var component = InvestigationEvidence.Component(missing);
                         throw new InvalidOperationException("O pedido do usuário não cita " + component + ", então nenhuma alteração desse componente será executada neste turno. Não repita esta chamada nem tente outra alteração do mesmo componente: conclua com finish_support dizendo o que as consultas mostraram e peça ao usuário que diga, com as palavras dele, se o problema é com " + component + ".");
                     }
+                    // #128: o índice da interface precisa ter vindo da consulta de rede deste turno; a recusa chega antes do executor.
+                    if (evidence.NetworkTargetProblem(name, arguments) is { } networkTarget)
+                    {
+                        if (failedCalls.Contains(signature)) { repeatedFailure = true; lockStop = true; }
+                        throw new InvalidOperationException(networkTarget);
+                    }
                     // DNS manual só com servidores que o usuário escreveu na conversa (#63): o cenário 3 tentou DNS manual numa
                     // interface que antes usava o DNS do DHCP. A segunda tentativa no turno encerra, como na trava de tópico.
                     if (name == "set_dns" && UninformedDnsServers(arguments))
@@ -541,13 +547,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     // #98: restaurar na janela "Manter a configuração de rede?" é escolha do usuário, não falha da etapa.
                     if (name is "set_ipv4" or "set_dns" && RestoredByUser(root)) networkRestoredByUser = true;
                     else if (name is "set_ipv4" or "set_dns" && root.TryGetProperty("success", out var ok) && ok.ValueKind == JsonValueKind.False && root.TryGetProperty("backup", out _))
-                    {
-                        var restored = root.TryGetProperty("reverted", out var rv) && rv.ValueKind == JsonValueKind.True;
-                        var changed = !root.TryGetProperty("changed", out var ch) || ch.ValueKind != JsonValueKind.False;
-                        var unknown = root.TryGetProperty("state", out var st) && st.ValueKind == JsonValueKind.String && st.GetString() == "unknown";
-                        networkFailure = "A alteração de rede não foi concluída. " + (root.TryGetProperty("error", out var err) ? err.GetString() : "Confira o resultado acima.") + "\n\n" +
-                            (restored ? "A configuração anterior foi restaurada e conferida." : root.TryGetProperty("protectedFolderProblem", out var problem) && problem.ValueKind == JsonValueKind.True ? "O estado da rede não foi confirmado. Confira a configuração antes de tentar outra mudança." : unknown ? "O estado da rede não pôde ser confirmado e nenhuma restauração foi confirmada. O caminho do backup está no cartão acima; consulte a rede antes de tentar outra mudança." : changed ? "A restauração automática não foi confirmada. O erro e o caminho do backup estão no cartão acima; é necessário conferir a configuração antes de tentar outra mudança." : "A operação foi interrompida antes de alterar a configuração.");
-                    }
+                        networkFailure = NetworkFailureText(root);
                     if (ToolCatalog.IsMutation(name))
                     {
                         if (root.TryGetProperty("success", out var reached) && reached.ValueKind == JsonValueKind.True) refusedMutations.Remove(signature);
@@ -717,6 +717,9 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         // A consulta que observa o alvo de uma alteração de impressora ou dispositivo, quando o componente está no incidente.
         (string Name, JsonElement Arguments)? AutoObservation(string name)
         {
+            // #128: uma alteração de rede sem consulta no turno leva o Nexo a consultar a rede antes de conferir o índice.
+            if (name is "set_dns" or "set_ipv4" or "enable_network_adapter")
+                return evidence.NetworkQueried ? null : ("get_network", JsonSerializer.SerializeToElement(new { }));
             if (name == "clear_print_queue")
                 return incidentTopics.Contains("printer") ? InitialObservation("printer") : null;
             if (name is not ("enable_camera" or "enable_device" or "restart_device")) return null;
@@ -787,6 +790,22 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             var context = string.Join(", ", safeParameters);
             store.Log(actor, stage + ": " + name + (context.Length > 0 ? " (" + context + ")" : "") + " · " + status + ", " + change + rollback + ", tempo=" + elapsedMs + "ms");
         }
+    }
+
+    // Texto da resposta quando set_dns/set_ipv4 termina sem sucesso e com backup. A fase "keeping" (o usuário escolheu manter e o
+    // executor terminou ou não respondeu antes de registrar o resultado) não teve restauração tentada: o texto fala só da
+    // permanência não conferida (#128).
+    internal static string NetworkFailureText(JsonElement root)
+    {
+        var restored = root.TryGetProperty("reverted", out var rv) && rv.ValueKind == JsonValueKind.True;
+        var changed = !root.TryGetProperty("changed", out var ch) || ch.ValueKind != JsonValueKind.False;
+        var unknown = root.TryGetProperty("state", out var st) && st.ValueKind == JsonValueKind.String && st.GetString() == "unknown";
+        var error = root.TryGetProperty("error", out var detail) && detail.ValueKind == JsonValueKind.String ? detail.GetString() : null;
+        if (!restored && root.TryGetProperty("phase", out var phase) && phase.ValueKind == JsonValueKind.String && phase.GetString() == "keeping")
+            return "Você escolheu manter a nova configuração de rede, mas o resultado não foi conferido. " + (error ?? "Confira o resultado acima.")
+                + "\n\nConsulte a rede antes de outra alteração; o caminho do backup está no cartão acima.";
+        return "A alteração de rede não foi concluída. " + (root.TryGetProperty("error", out var err) ? err.GetString() : "Confira o resultado acima.") + "\n\n" +
+            (restored ? "A configuração anterior foi restaurada e conferida." : root.TryGetProperty("protectedFolderProblem", out var problem) && problem.ValueKind == JsonValueKind.True ? "O estado da rede não foi confirmado. Confira a configuração antes de tentar outra mudança." : unknown ? "O estado da rede não pôde ser confirmado e nenhuma restauração foi confirmada. O caminho do backup está no cartão acima; consulte a rede antes de tentar outra mudança." : changed ? "A restauração automática não foi confirmada. O erro e o caminho do backup estão no cartão acima; é necessário conferir a configuração antes de tentar outra mudança." : "A operação foi interrompida antes de alterar a configuração.");
     }
     private static string ValidToolResult(string? output)
     {
