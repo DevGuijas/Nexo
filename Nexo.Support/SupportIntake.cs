@@ -163,6 +163,26 @@ public static class SupportIntake
         return Regex.IsMatch(text, Space) ? "space" : Regex.IsMatch(text, Slowness) && !Regex.IsMatch(text, PaperJam) ? "slowness" : null;
     }
 
+    // Pergunta sobre a temperatura ou sobre a saúde dos discos (#135): na validação da #19 no PC, "qual a temperatura da CPU?"
+    // foi respondida sem nenhuma consulta, e o relatório de saúde já trazia a temperatura com o estado e o motivo. O Nexo
+    // consulta o relatório ele mesmo e garante na resposta o valor ou o motivo; para os discos, a linha "Discos físicos".
+    // Falta de espaço ("disco cheio") não é saúde do disco: segue pela triagem do sistema.
+    private const string Heat = @"\b(temperatura|temperaturas|esquent\w*|aquec(?!edor)\w*|superaquec\w*|quente|fervendo)\b";
+    private const string Drives = @"\b(discos?|hds?|ssds?|nvme|armazenamento|raid)\b";
+    private const string DriveHealth = @"\b(saude|estado|smart|condicao|vida util|desgaste|falhando|defeito|estragad\w*|morrendo)\b";
+    // "Quantos graus está a CPU?" também é pergunta de temperatura (@qa); "graus" sozinho não, porque pode ser ângulo ou outra coisa.
+    private const string Degrees = @"\bgraus\b.*\b(cpu|processador|pc|computador|notebook|placa)\b|\b(cpu|processador|pc|computador|notebook|placa)\b.*\bgraus\b";
+    public static bool AsksTemperature(string request)
+    {
+        var text = AgentProtocol.Normalize(request);
+        return Regex.IsMatch(text, Heat) || Regex.IsMatch(text, Degrees);
+    }
+    public static bool AsksDiskHealth(string request)
+    {
+        var text = AgentProtocol.Normalize(request);
+        return !Regex.IsMatch(text, Space) && Regex.IsMatch(text, Drives) && Regex.IsMatch(text, DriveHealth);
+    }
+
     // Tópicos do incidente numa conversa: os da última mensagem do usuário que tinha tópico, somados aos anteriores
     // enquanto a mensagem for só uma continuação genérica do sistema. O que uma mensagem mais nova diz ter voltado
     // ("a internet voltou, mas ainda tá lento") não volta a ser herdado.

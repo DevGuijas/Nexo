@@ -474,8 +474,14 @@ public static class HealthReportPresentation
         var kind = string.Join(", ", new[] { disk.MediaType, disk.BusType }.Where(v => v.Length > 0 && !v.Equals("Unspecified", StringComparison.OrdinalIgnoreCase)).Select(Clean));
         // No relatório ao modelo o nome vai entre aspas: é texto do fabricante, não instrução nem parte da frase.
         var name = sanitize ? "“" + Clean(disk.Name) + "”" : disk.Name;
-        return $"Disco {Clean(disk.Device)} {name}{(kind.Length > 0 ? " (" + kind + ")" : "")}: {StorageLabel(disk.State)}; HealthStatus {Clean(disk.Health)}, OperationalStatus {(disk.OperationalStatus.Length == 0 ? "não informado" : string.Join(", ", disk.OperationalStatus.Select(Clean)))}";
+        return $"Disco {Clean(disk.Device)} {name}{(kind.Length > 0 ? " (" + kind + ")" : "")}: {StorageLabel(disk.State)}; HealthStatus {Clean(disk.Health)}, OperationalStatus {(disk.OperationalStatus.Length == 0 ? "não informado" : string.Join(", ", disk.OperationalStatus.Select(Clean)))}"
+            + (IsRaid(disk) ? ". " + RaidScope : "");
     }
+    // Validação da #19 no PC com AMD-RAID (22/11, #135): o Windows Storage só enxerga o array ("AMD-RAID Array 1", BusType RAID);
+    // os discos-membro não aparecem nem elevado. O estado mostrado é o do volume, informado pelo driver do controlador. O
+    // barramento pode chegar como número (8 = RAID) quando a formatação do módulo Storage não se aplica.
+    public const string RaidScope = "Volume RAID: o estado é o do volume informado pelo driver do controlador; o estado dos discos-membro não é visível pelo Windows Storage";
+    public static bool IsRaid(PhysicalDiskReading disk) => WindowsTools.BusName(disk.BusType.Trim()).Equals("RAID", StringComparison.OrdinalIgnoreCase);
     public static string DescribeProbe(NetworkProbeReading? reading)
     {
         if (reading == null) return "indisponível";
