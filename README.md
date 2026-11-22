@@ -141,6 +141,21 @@ Com o agente ativo, os pedidos comuns de falta de conexão passam primeiro pelo 
 
 Experimente: “Meu Bluetooth não funciona”, “A câmera está desabilitada, pode corrigir”, “A impressora está travada”, “Verifique meu áudio”. Para IPv4/DNS manual, informe os valores da sua rede quando solicitado. O modo básico permanece disponível quando a IA está desativada nas configurações.
 
+### Apps pré-instalados e ajustes do Windows
+
+Em **Ferramentas**, o cartão **Apps pré-instalados e ajustes do Windows** (#127) remove do usuário atual apps que vêm com o Windows e aplica ajustes de privacidade e de aparência. A ação existe só no menu: o assistente não a oferece nem a executa.
+
+- **Verificar este PC** só lê. O Nexo escolhe o catálogo pelo build (Windows 10 abaixo de 22000, Windows 11 a partir dele) e mostra apenas o que existe no PC, item a item. Nada muda antes de **Aplicar selecionados** e da confirmação.
+- **Ponto de restauração:** antes de aplicar, o Nexo cria e confirma um ponto de restauração, com UAC. Sem ele, serviços, tarefas e o Recall não são alterados; só os apps e os ajustes do perfil seguem, e a tela diz isso.
+- **Apps:** removidos só do usuário atual, pelo nome exato do pacote, sem `-AllUsers` e sem desprovisionar. Voltam pela Microsoft Store; o Nexo não os reinstala.
+- **Ajustes do perfil** (HKCU): rodam no processo do Nexo, sem UAC, e caem no perfil do usuário atendido. Nenhuma chave de política (`Software\Policies`) é gravada.
+- **Serviços, tarefas do CEIP e Recall:** passam pelo executor elevado da otimização.
+- **Travas:** o login do Xbox, com o app Xbox, a Game Bar ou o Minecraft instalados, só sai com a confirmação explícita de que o login do Minecraft e do Game Pass vai parar. O SysMain só aparece com o disco do sistema em SSD.
+- **Desfazer:** o estado anterior de cada serviço, tarefa, recurso e valor de registro fica em `debloat-undo.json`, na pasta do Nexo. **Desfazer a última aplicação** restaura esses itens; o arquivo só é aceito para alvos do catálogo. Cada item termina como ok, parcial, não encontrado, falha ou não aplicado, no cartão, em `debloat-audit.ndjson` e no histórico operacional (`operations.db`). O Nexo não mede nem promete ganho de desempenho.
+- **Fora do catálogo, de propósito:** OneDrive, Compras da Microsoft Store, Windows Search, `dmwappushservice`, DiagTrack e telemetria por política, Obter Ajuda, Assistência Rápida, apps de uso real (Câmera, Email, Outlook, Notas Adesivas, Media Player, Phone Link e outros), limpeza de temporários (já feita pelo **Otimizar PC**), Fax e o menu de contexto clássico.
+
+Catálogo adaptado de [rivaed/Windows10-Debloat](https://github.com/rivaed/Windows10-Debloat) e [rivaed/Windows11-Debloat](https://github.com/rivaed/Windows11-Debloat), sob a licença MIT. O script deles não é executado: o Nexo reimplementa os itens escolhidos.
+
 ## Rede e recuperação
 
 Antes de alterar IP/DNS, o processo elevado salva o backup (`before.json`) e o registro da transação em `%ProgramData%\NexoSupport\operations\<operação>`. Cada pasta dessa cadeia nasce já com o descritor final (herança desligada, dono Administradores, controle total só para SYSTEM e Administradores, leitura para Usuários). Uma pasta que já existe nunca é reparada nem adotada: só é usada se já estiver assim, sem link. Se não estiver, o executor deve recusar a mudança antes de aplicá-la; se sair sem resultado, confira o estado da rede. Os arquivos da pasta protegida também nascem com o descritor explícito (dono Administradores, sem herança), num temporário que substitui o destino; o dono não depende do padrão do processo, que num administrador com o UAC desligado é o próprio usuário. Sem conseguir esse dono, o executor deve interromper a alteração antes de aplicar; uma saída sem resultado não confirma o estado da rede.
@@ -188,6 +203,7 @@ dotnet run --project Nexo.Checks -- --network-evals
 dotnet run --project Nexo.Checks -- --interaction-evals
 dotnet run --project Nexo.Checks -- --interface-probe-live
 dotnet run --project Nexo.Checks -- --hardware-live
+dotnet run --project Nexo.Checks -- --debloat
 dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.7.0
 dotnet run --project Nexo.Setup.Checks -c Release
 ```
