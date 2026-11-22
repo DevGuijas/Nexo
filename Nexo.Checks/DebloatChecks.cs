@@ -120,6 +120,17 @@ internal static class DebloatChecks
         check(sentApply < WindowsTools.CommandLineLimit / 2 && sentUndo < WindowsTools.CommandLineLimit / 2 && !Sent(apply).Contains('"')
             && DebloatScripts.ForElevation(apply).EndsWith(NetworkRecovery.LoaderRun, StringComparison.Ordinal),
             "Debloat: o script elevado vai compactado no carregador da rede, com menos da metade do limite da linha de comando (Aplicar " + sentApply + ", Desfazer " + sentUndo + " caracteres)");
+        // #131: o que vai ao executor elevado passa pela conferência do formato antes do UAC e começa com a fixação do
+        // PSModulePath; o inventário e a remoção de apps (sem elevação, mas decidem o que é oferecido e as travas) também.
+        bool Accepted(string script) { try { PowerShellModulePath.Require(["-NoProfile", "-NonInteractive", "-Command", script]); return true; } catch (InvalidOperationException) { return false; } }
+        check(Accepted(Sent(apply)) && Accepted(Sent(DebloatScripts.Undo(RunA))) && Sent(apply).StartsWith(PowerShellModulePath.Guard, StringComparison.Ordinal)
+            && DebloatScripts.ForElevation(apply).StartsWith(PowerShellModulePath.Guard, StringComparison.Ordinal),
+            "Debloat: o Aplicar e o Desfazer elevados começam com a fixação do PSModulePath e passam na conferência do lançamento (#131)");
+        var inventoryText = DebloatScripts.Inventory(DebloatCatalog.ForBuild(Win11));
+        check(SupportService.PowershellCommand(inventoryText).StartsWith(PowerShellModulePath.Guard, StringComparison.Ordinal)
+            && SupportService.PowershellCommand(DebloatScripts.RemoveApps([("Microsoft.BingNews", "Microsoft.BingNews_1_x64__8wekyb3d8bbwe")])).StartsWith(PowerShellModulePath.Guard, StringComparison.Ordinal)
+            && inventoryText.Contains(DebloatScripts.SystemDriveLetter) && !inventoryText.Contains("$env:"),
+            "Debloat: o inventário e a remoção de apps rodam com a fixação do PSModulePath e acham o disco do sistema sem variável de ambiente (#131)");
         var store = ProtectedFolderScript.Text;
         check(ProtectedFolderScript.Functions.All(f => store.Contains("function " + f)) && store.StartsWith("$trustedSids = @('S-1-5-18', 'S-1-5-32-544'", StringComparison.Ordinal)
             && !store.Contains('"') && store.Contains("SetAccessRuleProtection($true, $false)") && store.Contains("[IO.FileMode]::CreateNew")
@@ -358,7 +369,7 @@ internal static class DebloatChecks
             "Debloat: app removido é indicado para reinstalar pela Store e a aplicação fica marcada como desfeita (" + culture + ")");
 
         var delayed = DebloatScripts.Undo(RunA);
-        check(delayed.Contains("& sc.exe config $t 'start=' 'delayed-auto'") && delayed.Contains("if($parts[1] -ceq 'True'){ Start-Service -Name $t"), "Debloat: início atrasado volta como atrasado (" + culture + ")");
+        check(delayed.Contains("& " + DebloatScripts.ScExecutable + " config $t 'start=' 'delayed-auto'") && !delayed.Contains("& sc.exe") && !delayed.Contains("$env:") && delayed.Contains("if($parts[1] -ceq 'True'){ Start-Service -Name $t"), "Debloat: início atrasado volta como atrasado (" + culture + ")");
 
         // Arquivo local adulterado: as entradas de serviço dele não chegam ao executor; o que vale é a pasta protegida.
         var tampered = new FakeSystem(Inventory());
@@ -795,7 +806,8 @@ internal static class DebloatScriptChecks
             $env:SystemDrive='C:'
             """;
         await LongScript(shell, check);
-        var inventoryJson = await Run(shell, inventoryFakes + "\n" + DebloatScripts.Inventory(DebloatCatalog.ForBuild(22631)));
+        // A letra do sistema vem do GetSystemDirectory (#131); fora do Windows ele não tem letra, então o teste fixa o C:.
+        var inventoryJson = await Run(shell, inventoryFakes + "\n" + DebloatScripts.Inventory(DebloatCatalog.ForBuild(22631)).Replace(DebloatScripts.SystemDriveLetter, "'C'"));
         DebloatInventory? inventory = null;
         try { inventory = DebloatScripts.ParseInventory(inventoryJson); } catch (JsonException) { }
         check(inventory != null && inventory.Apps.Select(a => a.Name).SequenceEqual(["Microsoft.BingNews", "Microsoft.MinecraftUWP"])
@@ -986,7 +998,8 @@ internal static class DebloatScriptChecks
             function Save-DebloatDone($done) { $script:calls+=('Done:'+(@($done) -join ',')) }
 
             """;
-        var undoScript = DebloatScripts.Undo(RunId);
+        // O sc.exe vem do System32 pelo GetSystemDirectory (#131); aqui o nome simples aponta para a função falsa acima.
+        var undoScript = DebloatScripts.Undo(RunId).Replace(DebloatScripts.ScExecutable, "sc.exe");
         var undoJson = await Run(shell, undoFakes + "\n$data=& { " + undoScript.Replace(DebloatScripts.StoreFunctions, readFake) + " }\nConvertTo-Json -InputObject ([pscustomobject]@{data=$data;calls=$script:calls}) -Depth 8 -Compress");
         string[] restoredCalls = [];
         try { using var doc = JsonDocument.Parse(undoJson); restoredCalls = doc.RootElement.GetProperty("calls").EnumerateArray().Select(c => c.GetString()!).ToArray(); }

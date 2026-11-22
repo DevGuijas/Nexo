@@ -663,6 +663,11 @@ public static class DebloatScripts
 
     private static string Q(string value) => "'" + value.Replace("'", "''") + "'";
 
+    // Executável e unidade do sistema pelo GetSystemDirectory, nunca por $env:WINDIR/$env:SystemDrive: o usuário define essas
+    // variáveis em HKCU\Environment, e o processo (elevado ou não) as recebe (#131).
+    internal static readonly string ScExecutable = PowerShellModulePath.SystemExecutable("sc.exe");
+    internal const string SystemDriveLetter = "[IO.Path]::GetPathRoot([Environment]::SystemDirectory).TrimEnd([char]92,[char]58)";
+
     /// <summary>Inventário sem elevação: só os pacotes do usuário atual (sem -AllUsers), serviços, tarefas, disco do sistema e Recall.</summary>
     public static string Inventory(IEnumerable<DebloatItem> items)
     {
@@ -680,7 +685,7 @@ public static class DebloatScripts
             $svc=@(foreach($n in $services){ $s=Get-Service -Name $n -ErrorAction SilentlyContinue; if($s){ $d=$false; try { $d=[int](Get-ItemProperty -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\'+$n) -Name DelayedAutostart -ErrorAction Stop).DelayedAutostart -eq 1 } catch {}; $t=[string]$s.StartType; if($t -eq 'Automatic' -and $d){$t='AutomaticDelayed'}; [pscustomobject]@{Name=[string]$s.Name;StartType=$t;Running=([string]$s.Status -eq 'Running')} } })
             $tk=@(foreach($t in $tasks){ $p=$t.Split('|'); $x=Get-ScheduledTask -TaskPath $p[0] -TaskName $p[1] -ErrorAction SilentlyContinue; if($x){ [pscustomobject]@{Path=$p[0];Name=$p[1];State=[string]$x.State} } })
             $media=''
-            try { $number=(Get-Partition -DriveLetter ($env:SystemDrive.TrimEnd(':')) -ErrorAction Stop | Get-Disk -ErrorAction Stop).Number; $pd=@(Get-PhysicalDisk -ErrorAction Stop | Where-Object { [string]$_.DeviceId -eq [string]$number }); if($pd.Count -eq 1){ $media=[string]$pd[0].MediaType } } catch {}
+            try { $number=(Get-Partition -DriveLetter ({{SystemDriveLetter}}) -ErrorAction Stop | Get-Disk -ErrorAction Stop).Number; $pd=@(Get-PhysicalDisk -ErrorAction Stop | Where-Object { [string]$_.DeviceId -eq [string]$number }); if($pd.Count -eq 1){ $media=[string]$pd[0].MediaType } } catch {}
             $recall=$null
             {{(recall ? "try { $f=Get-CimInstance -ClassName Win32_OptionalFeature -Filter \"Name='Recall'\" -ErrorAction Stop; if($f){ $recall=switch([int]$f.InstallState){ 1 {'Enabled'} 2 {'Disabled'} default {'Unknown'} } } } catch {}" : "")}}
             ConvertTo-Json -InputObject ([pscustomobject]@{Apps=$apps;Services=$svc;Tasks=$tk;SystemDisk=$media;Recall=$recall}) -Depth 5 -Compress
@@ -928,7 +933,7 @@ public static class DebloatScripts
               try {
                 if($kind -ceq 'Service'){
                   $parts=$p.Split('|')
-                  if($parts[0] -ceq 'AutomaticDelayed'){ Set-Service -Name $t -StartupType Automatic -ErrorAction Stop; & sc.exe config $t 'start=' 'delayed-auto' | Out-Null; if($LASTEXITCODE -ne 0){ throw 'sc.exe não aplicou o início atrasado' } }
+                  if($parts[0] -ceq 'AutomaticDelayed'){ Set-Service -Name $t -StartupType Automatic -ErrorAction Stop; & __NEXO_SC__ config $t 'start=' 'delayed-auto' | Out-Null; if($LASTEXITCODE -ne 0){ throw 'sc.exe não aplicou o início atrasado' } }
                   else { Set-Service -Name $t -StartupType $parts[0] -ErrorAction Stop }
                   if($parts[1] -ceq 'True'){ Start-Service -Name $t -ErrorAction Stop }
                   $detail='restaurado para '+$parts[0]
@@ -948,7 +953,7 @@ public static class DebloatScripts
             $restoredKeys=@($items | Where-Object { $_.Status -ceq 'Ok' } | ForEach-Object { [string]$_.Key })
             if($restoredKeys.Count -gt 0){ try { Save-DebloatDone (@($prev) + $restoredKeys) } catch { $marked=$false; $markError=$_.Exception.Message } }
             [pscustomobject]@{Items=$items;Marked=$marked;MarkError=$markError}
-            """;
+            """.Replace("__NEXO_SC__", ScExecutable);
     }
     /// <summary>
     /// Só aceita alvos que estão no catálogo e estados anteriores reconhecidos. O arquivo do Desfazer fica na pasta do usuário;
