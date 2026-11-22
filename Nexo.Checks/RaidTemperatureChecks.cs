@@ -252,6 +252,9 @@ internal static class RaidTemperatureChecks
         if (disks.WithSensorFigures(cites) != cites) wrong.Add("já citava: " + disks.WithSensorFigures(cites));
         const string driver = "O AMD-RAID Array 1 está Healthy; o estado vem do driver do controlador RAID.";
         if (disks.WithSensorFigures(driver) != driver) wrong.Add("RAID e driver: " + disks.WithSensorFigures(driver));
+        // "Volume RAID" sozinho e o driver do RAID atualizado não dizem o limite: a nota entra (@qa).
+        foreach (var loose in new[] { "O volume RAID AMD-RAID Array 1 está sem alertas informados pelo Windows.", "O driver do RAID está atualizado e os discos estão sem alertas informados pelo Windows." })
+            if (Occurrences(disks.WithSensorFigures(loose), HealthReportPresentation.RaidScope) != 1) wrong.Add("frouxo: " + disks.WithSensorFigures(loose));
         // Sem RAID no relatório, o resumo genérico sem alerta continua bastando.
         var plain = Observed(PcReport(storage: [Usb, Nvme])); plain.AsksDiskHealth = true;
         if (plain.WithSensorFigures(Answer21) != Answer21) wrong.Add("sem RAID: " + plain.WithSensorFigures(Answer21));
@@ -292,6 +295,10 @@ internal static class RaidTemperatureChecks
             ("O uso do disco aparece em Configurações > Sistema > Armazenamento.", null, null),
             ("Os arquivos temporários ocupam espaço no disco.", null, null),
             ("O alerta do T: foi resolvido; não é preciso verificar o uso do disco.", null, null),
+            // A orientação do Armazenamento continua aceita; a vírgula depois da dispensa e o "não deixe de" mandam verificar (@qa).
+            ("Para ver o uso do disco, abra Configurações > Sistema > Armazenamento.", null, null),
+            ("Não é preciso, verifique o uso do disco no T:.", InvestigationEvidence.ClosedDiskReason, null),
+            ("Não deixe de verificar o uso do disco no T:.", InvestigationEvidence.ClosedDiskReason, null),
         ];
         var wrong = cases.Where(c => closed.ValidateStatement(c.Text, false) != c.Closed || plain.ValidateStatement(c.Text, false) != c.Plain)
             .Select(c => c.Text + " → " + closed.ValidateStatement(c.Text, false) + " / " + plain.ValidateStatement(c.Text, false)).ToList();
@@ -307,6 +314,7 @@ internal static class RaidTemperatureChecks
     {
         var heat = Observed(PcReport()); heat.AsksTemperature = true;
         var plain = Observed(PcReport());
+        var gpu = Observed(PcReport()); gpu.AsksTemperature = true; gpu.UserRequest = "minha placa de vídeo está esquentando, qual a temperatura?";
         const string real = "A temperatura da CPU está indisponível no momento, pois o driver PawnIO não está instalado. Para obter essa informação, seria necessário instalar ou verificar o status desse driver. "
             + "Se você deseja, posso ajudar a verificar se o driver está instalado ou buscar informações adicionais sobre ele.";
         (InvestigationEvidence Evidence, string Text, string? Expected)[] cases =
@@ -327,6 +335,14 @@ internal static class RaidTemperatureChecks
             (plain, "Posso verificar o driver do dispositivo com erro.", null),
             // Sem pedido de temperatura, "o driver" sozinho não é o do sensor.
             (plain, "Posso verificar se o driver está instalado.", null),
+            // O "não" depois do driver não nega a oferta; o driver longe do verbo não é o objeto dela; a temperatura da placa de
+            // vídeo faz "o driver" ser o dela (@qa).
+            (heat, "Posso verificar por que o driver PawnIO não está instalado.", InvestigationEvidence.SensorDriverOfferReason),
+            (heat, "Se quiser, posso verificar a temperatura novamente quando o driver PawnIO for instalado.", null),
+            (gpu, "Posso verificar se o driver está atualizado.", null),
+            (gpu, "Posso verificar se o PawnIO está instalado.", InvestigationEvidence.SensorDriverOfferReason),
+            (plain, "Posso instalar o driver PawnIO para você.", InvestigationEvidence.SensorDriverOfferReason),
+            (plain, "Posso verificar o driver da impressora, que não depende do PawnIO.", null),
         ];
         var wrong = cases.Where(c => c.Evidence.ValidateStatement(c.Text, false) != c.Expected).Select(c => c.Text + " → " + c.Evidence.ValidateStatement(c.Text, false)).ToList();
         var repeated = heat.RepeatedGuidance(InvestigationEvidence.SensorDriverOfferReason, real);

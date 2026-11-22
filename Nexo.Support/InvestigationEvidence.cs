@@ -374,12 +374,22 @@ public sealed class InvestigationEvidence
     // diz que ele não está instalado. A oferta em 1ª pessoa de verificar, instalar, baixar ou procurar o PawnIO é recusada; com
     // pedido de temperatura, "o driver" sem outro dispositivo também é o do sensor. Drivers que o Nexo consulta (vídeo,
     // impressora, rede, dispositivo) não contam, e a explicação ("posso explicar como instalar…") e a negação passam.
-    private static readonly Regex DriverOffer = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo)\b(?<lead>[^:;.]*?)"
-        + @"\b(?:verific\w*|confer\w*|chec\w*|instal\w*|baix\w*|busc\w*|procur\w*|pesquis\w*)\b[^:;.]{0,90}");
+    // O driver é o objeto do verbo, a até quatro palavras dele (@qa): "posso verificar a temperatura novamente quando o driver
+    // PawnIO for instalado" oferece nova consulta, não verificar o driver. O PawnIO conta no próprio objeto ("o driver PawnIO",
+    // "o PawnIO"), não no resto da frase: "posso verificar o driver da impressora, que não depende do PawnIO" passa. A negação vale só antes do verbo: em "posso verificar
+    // por que o driver PawnIO não está instalado", o "não" é do driver, não da oferta.
+    private static readonly Regex DriverOffer = new(@"(?<head>\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo)\b(?<lead>[^:;.]*?)"
+        + @"\b(?:verific\w*|confer\w*|chec\w*|instal\w*|baix\w*|busc\w*|procur\w*|pesquis\w*)\b)(?<obj>(?<target>\s+(?:[^\s:;.]+\s+){0,4}?(?:drivers?|pawnio)\b(?:\s+(?:d[oe]\s+)?pawnio\b)?)[^:;.]{0,40})");
     private static readonly Regex OtherDevice = new(@"\b(?:video|grafic\w*|gpu|nvidia|radeon|geforce|impressora|rede|wi-?fi|ethernet|audio|som|camera|webcam|bluetooth|dispositivo|placa|chipset|usb|teclado|mouse|monitor de video)\b");
+    // Com pedido de temperatura de outro dispositivo ("a placa de vídeo está esquentando"), "o driver" sozinho é o dele, que o Nexo
+    // consulta, e não o do sensor da CPU (@qa).
     private bool OffersSensorDriverCheck(string normalized) => Sentences(normalized).Any(sentence => DriverOffer.Matches(sentence).Any(offer =>
-        !Negated(sentence, offer) && !Orientation.IsMatch(offer.Groups["lead"].Value)
-        && (Regex.IsMatch(offer.Value, @"\bpawnio\b") || AsksTemperature && Regex.IsMatch(offer.Value, @"\bdrivers?\b") && !OtherDevice.IsMatch(offer.Value))));
+        !NegatedHead(sentence, offer) && !Orientation.IsMatch(offer.Groups["lead"].Value)
+        && (Regex.IsMatch(offer.Groups["target"].Value, @"\bpawnio\b") || AsksTemperature && Regex.IsMatch(offer.Groups["obj"].Value, @"\bdrivers?\b")
+            && !OtherDevice.IsMatch(offer.Groups["obj"].Value) && !OtherDevice.IsMatch(AgentProtocol.Normalize(UserRequest)))));
+    private static bool NegatedHead(string sentence, Match offer) =>
+        Regex.Matches(sentence[..offer.Index], @"[\p{L}\p{N}]+").TakeLast(3).Concat(Regex.Matches(offer.Groups["head"].Value, @"[\p{L}\p{N}]+"))
+            .Any(word => word.Value is "nao" or "nem" or "nunca");
 
     // Resposta pobre (validação da e7a69a2, 22/11): sem nenhum fato do turno (número, processo conhecido ou letra de unidade)
     // e curta (menos de 6 palavras, como "Posso ajudar?") ou começando por uma condição solta ("Se a lentidão continuar…").
@@ -596,7 +606,7 @@ public sealed class InvestigationEvidence
             return parts.Where((part, index) => !parts.Skip(index + 1).Any(StateExempt));
         }).Any(sentence => ClosedDiskSentence(sentence, LowSpace, sentence)
             || UsageSuggestion.IsMatch(sentence) && (ClosedDiskSentence(sentence, OccupiedSpace, IndirectQuestion.Replace(sentence, " "))
-                || ClosedDiskSentence(sentence, DiskUsage, IndirectQuestion.Replace(sentence, " "))));
+                || ClosedDiskSentence(sentence, DiskUsage, IndirectQuestion.Replace(sentence, " ")) && !StoragePath.IsMatch(sentence)));
     }
     // A frase só conta sem pergunta, condição, passado ou isenção de estado; "verificar se há…" é pergunta indireta, não condição,
     // e só é lida assim para o que ocupa espaço (#135): a leitura da falta de espaço não muda.
@@ -606,7 +616,8 @@ public sealed class InvestigationEvidence
         && pattern.Matches(sentence).Any(match => !Negated(sentence, match) && !NotNeeded.IsMatch(sentence[(match.Index + match.Length)..])
             && !NeedlessBefore.IsMatch(sentence[..match.Index]));
     // "não é preciso verificar o uso do disco": a dispensa vem antes do trecho, a até três palavras dele (#135, revalidação).
-    private static readonly Regex NeedlessBefore = new(@"\bnao (?:e|sera|seria|esta) (?:necessari\w*|precis\w*)(?:\W+\w+){0,3}\W*$");
+    // Só espaço separa a dispensa do trecho (@qa): "não é preciso, verifique o uso do disco" tem vírgula e manda verificar.
+    private static readonly Regex NeedlessBefore = new(@"\bnao (?:e|sera|seria|esta) (?:necessari\w*|precis\w*)(?: \w+){0,3} ?$");
     private static readonly Regex IndirectQuestion = new(@"\b(?:verificar|verifique|ver|veja|conferir|confira|checar|cheque|avaliar|avalie|identificar|descobrir|saber)\s+se\b");
     // Validação da #19 no PC (22/11, #135): com o alerta do T: encerrado, "recomendo verificar se há arquivos ou aplicativos que
     // possam estar ocupando espaço no T:" foi recusada 4 vezes pelo motivo do conteúdo de unidade ("há arquivos"), e o modelo
@@ -1248,8 +1259,10 @@ public sealed class InvestigationEvidence
         return Regex.IsMatch(normalized, @"\b(?:sem alertas? informad|atencao informada|falha informada|healthy|unhealthy|warning)") || physicalDisks.Any(Named);
     }
     private static readonly Regex MentionsDisks = new(@"\b(?:discos?|hds?|ssds?|nvme|raid|armazenamento)\b");
-    // O limite do RAID: "volume RAID", "discos-membro"/"membros do array" ou o RAID junto do driver do controlador.
-    private static readonly Regex CitesRaidScope = new(@"\bvolume raid\b|\bdiscos?[- ]?membros?\b|\bmembros? (?:do|da|de) (?:raid|array|volume)\b|\bdiscos? (?:que (?:formam|compoem)|do array)\b|\braid\b.{0,80}\bdriver\b|\bdriver\b.{0,80}\braid\b");
+    // O limite do RAID: os discos-membro ("discos-membro", "membros do array", "discos que formam o volume") ou o estado vindo do
+    // driver ("informado pelo driver", "vem do driver"). "Volume RAID" sozinho e "o driver do RAID está atualizado" não dizem
+    // o limite (@qa).
+    private static readonly Regex CitesRaidScope = new(@"\bdiscos?[- ]?membros?\b|\bmembros? (?:do|da|de) (?:raid|array|volume)\b|\bdiscos? (?:que (?:formam|compoem)|do array)\b|\b(?:informad\w*|reportad\w*|fornecid\w*|vem|vindo|lido) (?:do|pelo) driver\b");
 
     // Estado atual e informativo: só o rótulo do patamar estável da #71, pelo começo exato e compartilhado com quem o monta.
     // Um "(informativo" no meio de outro estado não conta.
