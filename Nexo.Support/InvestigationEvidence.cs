@@ -326,8 +326,10 @@ public sealed class InvestigationEvidence
     // pessoa é recusada, como a de procurar arquivos. Fechar exige o objeto logo depois do verbo (programas, processos,
     // aplicativos, janelas, "-los" ou um processo conhecido do turno): "vou encerrar este atendimento" passa. A explicação ao
     // usuário ("posso explicar como fechar…", "posso te orientar a…") e a negação também passam.
+    // O verbo de aumentar precisa ter o disco, o volume ou o tamanho logo como objeto (@qa): "posso ampliar a verificação para o
+    // disco C:" e "posso estender a análise ao volume D:" são consultas que o Nexo faz, não redimensionamento.
     private static readonly Regex UnsupportedOffer = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo)\b(?<lead>[^:;]*?)"
-        + @"\b(?:(?:aument|expand|redimension|estend|ampli)\w*\b[^:;]{0,40}?(?:\b(?:tamanho|capacidade|disco|volume|particao|vhdx?)\b|(?<![\w:])[a-z]:)"
+        + @"\b(?:(?:aument|expand|redimension|estend|ampli)\w*\s+(?:(?:o|a|os|as|esse|essa|este|esta|seu|sua|meu|minha)\s+)?(?:arquivo\s+)?(?:\b(?:tamanho|capacidade|disco|volume|particao|vhdx?)\b|(?<![\w:])[a-z]:)"
         + @"|(?:fech|encerr|finaliz)\w*(?:-(?:lo|la|los|las)\b|\s+(?:(?:os|as|o|a|esses|essas|esse|essa|este|esta|estes|estas|alguns|algumas|seus|suas|todos os|todas as|aquele|aqueles)\s+)?(?:(?<object>programas?|processos?|aplicativos?|apps?|janelas?|abas?)\b|(?<target>[\p{L}\p{N}._-]+))))");
     private static readonly Regex Orientation = new(@"\b(?:explic\w*|orient\w*|ensin\w*|(?:mostrar|indicar|dizer) como|passo a passo)\b");
     private bool OffersUnsupportedAction(string normalized)
@@ -473,9 +475,10 @@ public sealed class InvestigationEvidence
     // Na validação da e7a69a2 (22/11, passo 1.3), "posso ajudar você a verificar o que há dentro dessa unidade" passou: a oferta
     // só era reconhecida com "conteúdo", "arquivos" ou "pastas". Numa resposta que fala de unidade, conta também a oferta de
     // ver "o que há/tem/existe/está" dentro, guardado, salvo ou na unidade. "Posso verificar o que está causando a lentidão no
-    // disco" passa: o que vem depois de "o que está" não é o lugar.
+    // disco" passa: o que vem depois de "o que está" não é o lugar. Entre o verbo e o lugar só cabe um advérbio ("o que há
+    // atualmente no D:"): "posso verificar o que está errado no disco C:" e "o que há de errado no disco" são diagnóstico (@qa).
     private static readonly Regex InsideOffer = new(@"\b(?:posso|podemos|poderia|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu)\b[^:;]{0,45}?\b(?:verific\w*|inspecion\w*|analis\w*|list\w*|mostr\w*|ver|veja|olh\w*|confer\w*|confir\w*|chec\w*|abr\w*|explor\w*)\b[^:;]{0,30}?"
-        + @"\bo que (?:ha|tem|existe|existem|esta|estao|foi|ficou)(?:\s+\w+){0,2}?\s+(?:dentro|guardad\w*|salv\w*|armazenad\w*|gravad\w*|nel[ae]s?|ali|n[ao]s?\s+(?:unidade|disco|volume|pendrive|pen drive|(?<![\w:])[a-z]:)|nessa|nesse|nesta|neste|dess[ae]\s+(?:unidade|disco|volume|pendrive))");
+        + @"\bo que (?:ha|tem|existe|existem|esta|estao|foi|ficou)(?:\s+(?:atualmente|agora|hoje|realmente|exatamente|mesmo|la))?\s+(?:dentro|guardad\w*|salv\w*|armazenad\w*|gravad\w*|nel[ae]s?|ali|n[ao]s?\s+(?:unidade|disco|volume|pendrive|pen drive|(?<![\w:])[a-z]:)|nessa|nesse|nesta|neste|dess[ae]\s+(?:unidade|disco|volume|pendrive))");
     // O inventário informa discos e volumes, nunca o conteúdo dos arquivos. Avaliar cada oração evita que
     // "não consigo ver..." ou "você pode abrir..." isente uma afirmação/oferta diferente na mesma frase.
     private static bool ClaimsDriveContents(string normalized)

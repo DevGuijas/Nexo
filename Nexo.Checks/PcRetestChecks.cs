@@ -59,6 +59,8 @@ internal static class PcRetestChecks
             "Posso conferir o que está guardado no pendrive D:.",
             "Deseja que eu veja o que há dentro do D:?",
             "Vou verificar o que existe nessa unidade.",
+            "Posso verificar o que há atualmente no D:.",
+            "Posso verificar o que está no D:.",
         ];
         string[] accepted =
         [
@@ -68,6 +70,11 @@ internal static class PcRetestChecks
             "O inventário não mostra o que há dentro do D:; abra o Explorador de Arquivos para ver.",
             "Posso verificar o que está causando a lentidão no disco C:.",
             "Não posso ver o que há dentro do D:.",
+            "Posso verificar o que há de errado no disco C:.",
+            "Posso verificar o que está errado no disco C:.",
+            "Posso verificar o que está acontecendo no disco C:.",
+            // Sem unidade na resposta, "o que ficou salvo" não é conteúdo de disco (@qa).
+            "Posso verificar o que ficou salvo no histórico do navegador.",
         ];
         var wrong = refused.Where(text => evidence.ValidateStatement(text, false) != InvestigationEvidence.DriveContentsReason)
             .Concat(accepted.Where(text => evidence.ValidateStatement(text, false) != null)).ToArray();
@@ -106,9 +113,12 @@ internal static class PcRetestChecks
             .Concat(accepted.Where(text => asked.ValidateStatement(text, false) != null || followUp.ValidateStatement(text, false) != null)).ToArray();
         // O malware também: sem consulta, o nome citado pelo usuário liga a frase ao processo.
         var malware = new InvestigationEvidence { UserRequest = "o que é esse NexoMemTeste?" }.ValidateStatement("O NexoMemTeste pode ser um malware.", false);
-        assert(wrong.Length == 0 && malware == InvestigationEvidence.MalwareReason,
+        // O nome com ".exe" no pedido também conta, mesmo sem maiúscula no meio (@qa).
+        var exe = new InvestigationEvidence { UserRequest = "o que é esse svcmon.exe?" }.ValidateStatement("O svcmon.exe serve para monitorar serviços.", false);
+        assert(wrong.Length == 0 && malware == InvestigationEvidence.MalwareReason && exe == InvestigationEvidence.ProcessPurposeReason,
             "Validação de 22/11 (#93), " + culture + ": sem consulta no turno, a função inventada do processo citado pelo usuário ou pelo monitor é recusada; consumo, dúvida e pergunta passam"
-            + (wrong.Length > 0 ? " · erradas: " + string.Join(" | ", wrong) : "") + (malware != InvestigationEvidence.MalwareReason ? " · malware: " + malware : ""));
+            + (wrong.Length > 0 ? " · erradas: " + string.Join(" | ", wrong) : "") + (malware != InvestigationEvidence.MalwareReason ? " · malware: " + malware : "")
+            + (exe != InvestigationEvidence.ProcessPurposeReason ? " · .exe: " + exe : ""));
     }
 
     // 4. Ação que nenhuma ferramenta faz: aumentar VHDX/volume e fechar programas.
@@ -122,6 +132,8 @@ internal static class PcRetestChecks
             CloseOffer,
             "Quer que eu encerre o processo NexoMemTeste-toca?",
             "Posso expandir o volume T: para você.",
+            "Posso aumentar o arquivo VHDX do T:.",
+            "Vou redimensionar a partição do T: para você.",
             "Se quiser, eu te ajudo a fechar os programas abertos.",
         ];
         string[] accepted =
@@ -132,6 +144,9 @@ internal static class PcRetestChecks
             "Não posso fechar programas, mas você pode usar o Gerenciador de Tarefas.",
             "Vou encerrar este atendimento com o que as consultas mostraram.",
             "Para fechar um programa, abra o Gerenciador de Tarefas (Ctrl+Shift+Esc), selecione-o e clique em Finalizar tarefa.",
+            "Posso ampliar a verificação para o disco C:.",
+            "Posso estender a análise ao volume D:.",
+            "Posso estender o diagnóstico para o disco T:.",
         ];
         var wrong = refused.Where(text => evidence.ValidateStatement(text, false) != InvestigationEvidence.UnsupportedActionReason)
             .Concat(accepted.Where(text => evidence.ValidateStatement(text, false) != null)).ToArray();
@@ -219,6 +234,13 @@ internal static class PcRetestChecks
             && direct.StartsWith("Posso ajudar?", StringComparison.Ordinal) && kept.StartsWith(grounded, StringComparison.Ordinal),
             "Validação de 22/11 (#88): depois de uma recusa, a resposta sem nenhum fato do turno vem depois do que as consultas mostraram; sem recusa ou com fato citado, fica como está"
             + " · " + string.Join(" | ", results.Select(r => r.Answer.Replace("\n", " ")[..Math.Min(r.Answer.Length, 120)])));
+        // Um número ou uma letra de unidade já é fato do turno, mesmo numa resposta curta ou que começa por condição (@qa).
+        var probe = new InvestigationEvidence();
+        string[] grounded2 = ["Se a memória passar de 90%, feche o que não estiver usando.", "O C: está ok.", "Caso o T: encha de novo, abra o Armazenamento."];
+        string[] thin2 = ["Posso ajudar?", "Se a lentidão continuar, reinicie o computador."];
+        var misjudged = grounded2.Where(probe.IsThinAnswer).Concat(thin2.Where(t => !probe.IsThinAnswer(t))).ToArray();
+        assert(misjudged.Length == 0, "Validação de 22/11 (#88): número ou letra de unidade tira a resposta da categoria pobre; sem fato, curta ou condicional continua pobre"
+            + (misjudged.Length > 0 ? " · erradas: " + string.Join(" | ", misjudged) : ""));
     }
 
     private static Entry User(string text) => new() { Role = "user", Text = text };
