@@ -89,6 +89,16 @@ internal static class DebloatChecks
 
         var elevatedItems = DebloatCatalog.Items.Where(i => i.Elevated).ToArray();
         var apply = DebloatScripts.Apply(elevatedItems, RunA);
+        // #133: como o executor de rede, nenhum script do debloat compila código. O Add-Type do PowerShell 5.1 grava o .cs e a
+        // .dll no TEMP do processo, que vem da pasta do usuário. Vale para os scripts elevados (Aplicar e Desfazer, antes e depois
+        // de compactar) e para os sem elevação (inventário e remoção de apps), cujo resultado decide o que roda com elevação.
+        string[] compilers = ["Add-Type", "TypeDefinition", "CompilerParameters", "CSharpCodeProvider", "CodeDom", "csc.exe", "CompileAssemblyFrom"];
+        var debloatScripts = new[] { apply, DebloatScripts.Undo(RunA), DebloatScripts.Inventory(DebloatCatalog.ForBuild(Win10)), DebloatScripts.Inventory(DebloatCatalog.ForBuild(Win11)),
+            DebloatScripts.RemoveApps([("Microsoft.BingNews", "Microsoft.BingNews_4.55.1_x64__8wekyb3d8bbwe")]) };
+        var compiling = debloatScripts.SelectMany(script => compilers.Where(word => script.Contains(word, StringComparison.OrdinalIgnoreCase))).Distinct().ToList();
+        check(compiling.Count == 0, "Debloat (#133): nenhum script do debloat compila código (sem Add-Type nem CodeDom/csc.exe)" + (compiling.Count == 0 ? "" : ": " + string.Join(", ", compiling)));
+        check(!DebloatScripts.ForElevation(apply).Contains("Add-Type", StringComparison.OrdinalIgnoreCase) && !DebloatScripts.ForElevation(DebloatScripts.Undo(RunA)).Contains("Add-Type", StringComparison.OrdinalIgnoreCase),
+            "Debloat (#133): o carregador compactado do Aplicar e do Desfazer também não traz Add-Type");
         int At(string text) => apply.IndexOf(text, StringComparison.Ordinal);
         check(At("Checkpoint-Computer") >= 0 && At("Checkpoint-Computer") < At("Set-Service -Name")
             && apply.Contains(DebloatService.RestorePointDescription) && !apply.Contains("Nexo before driver installation"),
