@@ -82,6 +82,9 @@ internal static class NetworkFollowUpChecks
         var fixedIp = Before(dhcp: "Disabled", staticDns: "10.0.0.2", dns: ["10.0.0.2"],
             addresses: [new { IPAddress = "10.0.0.10", PrefixLength = 24, PrefixOrigin = 1, AddressState = 4 }, new { IPAddress = "169.254.3.3", PrefixLength = 16, PrefixOrigin = 4, AddressState = 4 }],
             routes: [new { NextHop = "10.0.0.1", RouteMetric = 256 }]);
+        var twoManual = Before(dhcp: "Disabled", staticDns: "10.0.0.2", dns: ["10.0.0.2"],
+            addresses: [new { IPAddress = "10.0.0.10", PrefixLength = 24, PrefixOrigin = 1, AddressState = 4 }, new { IPAddress = "10.0.0.11", PrefixLength = 24, PrefixOrigin = "Manual", AddressState = 4 }],
+            routes: [new { NextHop = "10.0.0.1", RouteMetric = 256 }]);
         (string Label, bool Expected, bool Actual)[] cases =
         [
             ("DNS automático de volta", true, NetworkRecovery.MatchesBefore(Before(), Current(), dns)),
@@ -108,6 +111,13 @@ internal static class NetworkFollowUpChecks
             ("leitura ilegível", false, NetworkRecovery.MatchesBefore(Before(), "não é json", dns)),
             ("leitura vazia", false, NetworkRecovery.MatchesBefore(Before(), "", dns)),
             ("ação desconhecida", false, NetworkRecovery.MatchesBefore(Before(), Current(), Record("enable_network_adapter"))),
+            // @qa: o backup e o registro protegidos precisam falar da mesma interface que a leitura de agora.
+            ("backup de outro índice", false, NetworkRecovery.MatchesBefore(Before().Replace("\"Index\":13", "\"Index\":12"), Current(), dns)),
+            ("registro com outro GUID esperado", false, NetworkRecovery.MatchesBefore(Before(), Current(), dns with { ExpectedGuid = "00000000-0000-0000-0000-000000000099" })),
+            ("IP fixo sem o 2º endereço manual", false, NetworkRecovery.MatchesBefore(twoManual, Current(dhcp: "Disabled", staticDns: "10.0.0.2", dns: ["10.0.0.2"],
+                addresses: [new { IPAddress = "10.0.0.10", PrefixLength = 24 }], routes: [new { NextHop = "10.0.0.1" }]), ipv4)),
+            ("IP fixo com os 2 endereços manuais", true, NetworkRecovery.MatchesBefore(twoManual, Current(dhcp: "Disabled", staticDns: "10.0.0.2", dns: ["10.0.0.2"],
+                addresses: [new { IPAddress = "10.0.0.11", PrefixLength = 24 }, new { IPAddress = "10.0.0.10", PrefixLength = 24 }], routes: [new { NextHop = "10.0.0.1" }]), ipv4)),
         ];
         // Sem a propriedade StaticDns na leitura não se presume DNS automático.
         var missingStatic = NetworkRecovery.MatchesBefore(Before(), "{\"Index\":13,\"Guid\":\"" + Guid + "\",\"Dhcp\":\"Enabled\",\"Dns\":[\"192.168.1.1\"],\"Addresses\":[],\"Routes\":[]}", dns);
@@ -154,11 +164,15 @@ internal static class NetworkFollowUpChecks
     // 4. O estado atual já corresponde: nada é perguntado nem elevado, e o resultado fica registrado; uma diferença segue o caminho de antes.
     private static async Task RecoveryWithoutElevation(Action<bool, string> assert)
     {
+        var script = NetworkRecovery.CurrentStateScript("13");
+        var modules = script.IndexOf("$env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules');", StringComparison.Ordinal);
+        assert(modules == 0 && script.IndexOf("Get-", StringComparison.Ordinal) > modules,
+            "#128 (@qa): a leitura sem elevação usa só os módulos do Windows ($PSHOME), antes do primeiro cmdlet; um módulo plantado no perfil do usuário não falsifica o estado atual");
         var (root, item) = Interrupted();
         try
         {
-            var prompts = 0; var starts = 0; var reads = 0;
-            Task<bool> Confirm(ChangeRequest _) { prompts++; return Task.FromResult(false); }
+            var prompts = 0; var starts = 0; var reads = 0; ChangeRequest? lastPrompt = null;
+            Task<bool> Confirm(ChangeRequest request) { prompts++; lastPrompt = request; return Task.FromResult(false); }
             IElevatedProcess Start(string _) { starts++; return new FakeProcess(); }
             var first = await NetworkRecovery.Recover(item, Confirm, Start, TimeSpan.FromSeconds(1), CancellationToken.None, (_, _) => { reads++; return Task.FromResult<string?>(Current()); });
             using var firstJson = JsonDocument.Parse(first);
@@ -175,6 +189,9 @@ internal static class NetworkFollowUpChecks
             prompts = starts = 0;
             await NetworkRecovery.Recover(item, Confirm, Start, TimeSpan.FromSeconds(1), CancellationToken.None, (_, _) => Task.FromResult<string?>(Current(staticDns: "1.1.1.1", dns: ["1.1.1.1"])));
             var differentPrompts = prompts;
+            // @qa: a conferência sem elevação não encerra a transação na pasta protegida. Uma diferença depois dela pode ser mudança
+            // posterior do usuário: a oferta volta (a marca local não a suprime), mas avisa que restaurar desfaria essa mudança.
+            var laterWarned = lastPrompt?.Details.Contains(NetworkRecovery.LaterChangeWarning.Trim()) == true;
             // Leitura que falha ou não devolve nada: caminho de antes (a janela de restauração).
             prompts = 0;
             await NetworkRecovery.Recover(item, Confirm, Start, TimeSpan.FromSeconds(1), CancellationToken.None, (_, _) => throw new IOException("Get-NetAdapter falhou"));
@@ -188,7 +205,9 @@ internal static class NetworkFollowUpChecks
             var unprotectedReads = 0; prompts = 0;
             await NetworkRecovery.Recover(unprotected, Confirm, Start, TimeSpan.FromSeconds(1), CancellationToken.None, (_, _) => { unprotectedReads++; return Task.FromResult<string?>(Current()); });
             var unprotectedPrompts = prompts;
+            var freshWarned = lastPrompt?.Details.Contains(NetworkRecovery.LaterChangeWarning.Trim()) == true;
             try { Directory.Delete(otherRoot, true); } catch (IOException) { }
+            assert(laterWarned && !freshWarned, "#128 (@qa): com a conferência sem elevação já registrada e a rede diferente agora, a oferta volta avisando que restaurar desfaria uma mudança posterior; sem a marca, o aviso não aparece");
             assert(differentPrompts == 1 && failingPrompts == 1 && nullPrompts == 1 && unprotectedReads == 0 && unprotectedPrompts == 1,
                 "#128: estado diferente, leitura que falha, leitura vazia ou transação sem cópia protegida seguem para a janela de restauração"
                 + $" · diferente {differentPrompts}, falha {failingPrompts}, vazia {nullPrompts}, sem cópia {unprotectedReads}/{unprotectedPrompts}");
@@ -243,6 +262,14 @@ internal static class NetworkFollowUpChecks
                 && note.Text.Contains(TurnFacts.Prefix) && mine.Entries.Count == 2 && theirs.Entries.Count == 0
                 && wrongUser == null && forged == null && unreadable == null && missing == null,
                 "#128: o resultado da recuperação vai para a conversa de origem do mesmo usuário, com a linha de fatos; outro usuário, origem forjada ou ilegível não recebem nada");
+            // @qa: fechar a oferta sem escolher não é resultado; nada vai para a conversa a cada abertura adiada.
+            NetworkRecovery.WriteOrigin(item.Directory, new NetworkOrigin(mine.Id, actor.Id));
+            var entriesBefore = mine.Entries.Count;
+            var postponedNote = NetworkRecovery.AttachToOrigin(store, actor, item.Directory, JsonSerializer.Serialize(new { success = false, restored = false, postponed = true, message = NetworkRecovery.PostponedMessage }), DateTimeOffset.UtcNow);
+            assert(postponedNote == null && mine.Entries.Count == entriesBefore, "#128 (@qa): a oferta adiada não é anexada à conversa de origem");
+            var failedNote = NetworkRecovery.AttachToOrigin(store, actor, item.Directory, JsonSerializer.Serialize(new { success = false, restored = false, error = "Acesso negado." }), DateTimeOffset.UtcNow);
+            assert(ReferenceEquals(failedNote, mine) && mine.Entries[^1].Presentation == "error" && !mine.Entries[^1].Text.Contains("restaurada e conferida"),
+                "#128 (@qa): uma recuperação que falhou chega à conversa de origem como erro, sem afirmar restauração");
             store.Data.Conversations.Remove(mine); store.Data.Conversations.Remove(theirs); store.Save();
 
             // O set_dns grava a origem na pasta da operação antes de iniciar o executor (aqui, UAC recusado).
@@ -283,7 +310,7 @@ internal static class NetworkFollowUpChecks
         var ethernet = evidence.NetworkTargetProblem("set_dns", Json(new { interface_index = 13, mode = "automatic" }));
         var text = evidence.NetworkTargetProblem("set_dns", Json(new { interface_index = "13", mode = "automatic" }));
         var other = evidence.NetworkTargetProblem("restart_service", Json(new { service = "Spooler" }));
-        assert(before != null && before.Contains("get_network") && wifiFirst == null && wifiGone != null && wifiGone.Contains("#7") && ethernet == null && text != null && other == null,
+        assert(before != null && before.Contains("get_network") && before.Contains("não foi consultada") && wifiFirst == null && wifiGone != null && wifiGone.Contains("#7") && ethernet == null && text != null && other == null,
             "#128: o índice precisa estar na consulta de rede mais recente do turno; antes da consulta, com interface que sumiu ou sem número, a alteração de rede é recusada");
     }
 

@@ -321,6 +321,7 @@ public static class NetworkRecovery
 
     public const string OriginFile = "origin.json";
     public const string PostponedMessage = "A janela de restauração foi fechada sem uma escolha. Nada foi alterado; a restauração da configuração anterior será oferecida de novo na próxima abertura do Nexo.";
+    internal const string LaterChangeWarning = "\n\nAtenção: numa abertura anterior do Nexo, a rede já correspondia a esse estado anterior. A diferença de agora pode vir de uma mudança feita depois, fora desta alteração interrompida. Restaurar desfaria essa mudança; escolha Cancelar ação se ela foi intencional.";
     public const string VerifiedWithoutElevationMessage = "A configuração atual da rede já corresponde ao estado anterior salvo. Nenhuma alteração foi feita, e não foi preciso pedir permissão de administrador.";
 
     /// <summary>Grava, na pasta local da operação, a conversa em que a alteração de rede começou (#128). Sem a gravação, a
@@ -369,6 +370,8 @@ public static class NetworkRecovery
     /// ou null quando não há origem válida.</summary>
     internal static Conversation? AttachToOrigin(Store store, Account user, string directory, string outcome, DateTimeOffset when)
     {
+        // Adiar a janela não é resultado: a nota iria a cada abertura em que o usuário fecha a oferta sem escolher (@qa, #128).
+        if (Postponed(outcome)) return null;
         if (ReadOrigin(directory) is not { } origin || origin.UserId != user.Id) return null;
         var conversation = store.Data.Conversations.FirstOrDefault(c => c.Id == origin.ConversationId && c.UserId == user.Id);
         if (conversation == null) return null;
@@ -422,12 +425,22 @@ public static class NetworkRecovery
     }
 
     internal static string CurrentStateScript(string index)
-        => "$i=" + index + "; $a=Get-NetAdapter -InterfaceIndex $i -ErrorAction Stop; $ip=Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Stop; "
+        => "$env:PSModulePath=[IO.Path]::Combine($PSHOME,'Modules'); $i=" + index + "; $a=Get-NetAdapter -InterfaceIndex $i -ErrorAction Stop; $ip=Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Stop; "
         + "$s=(Get-ItemProperty -LiteralPath ('HKLM:\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\'+$a.InterfaceGuid) -ErrorAction SilentlyContinue).NameServer; "
         + "[pscustomobject]@{Index=$i;Guid=[string]$a.InterfaceGuid;Dhcp=[string]$ip.Dhcp;StaticDns=[string]$s;"
         + "Dns=@((Get-DnsClientServerAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction Stop).ServerAddresses | ForEach-Object {[string]$_});"
         + "Addresses=@(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object {$_.InterfaceIndex -eq $i} | ForEach-Object {[pscustomobject]@{IPAddress=[string]$_.IPAddress;PrefixLength=[int]$_.PrefixLength}});"
         + "Routes=@(Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop | Where-Object {$_.InterfaceIndex -eq $i -and $_.DestinationPrefix -eq '0.0.0.0/0'} | ForEach-Object {[pscustomobject]@{NextHop=[string]$_.NextHop}})} | ConvertTo-Json -Compress -Depth 4";
+
+    internal static bool Postponed(string outcome)
+    {
+        try
+        {
+            using var json = JsonDocument.Parse(outcome);
+            return json.RootElement.TryGetProperty("postponed", out var postponed) && postponed.ValueKind == JsonValueKind.True;
+        }
+        catch (JsonException) { return false; }
+    }
 
     /// <summary>O resultado diz que a conferência sem elevação já tinha sido registrada numa abertura anterior (#128).</summary>
     internal static bool AlreadyRecorded(string outcome)
@@ -481,7 +494,11 @@ public static class NetworkRecovery
         }
         bool accepted;
         var dismissed = false;
-        try { accepted = await confirm(new ChangeRequest("Restaurar configuração de rede anterior?", Describe(item)) { Postponable = true, OnDismissed = () => dismissed = true }); }
+        // A conferência sem elevação não encerra a transação na pasta protegida: até a limpeza de 7 dias, uma mudança feita depois
+        // (nas Configurações do Windows, por exemplo) faz a oferta voltar. A marca local não suprime a oferta, porque pode ser forjada;
+        // ela só acrescenta o aviso de que restaurar desfaria essa mudança posterior (@qa, #128).
+        var details = Describe(item) + (readCurrent != null && PreviouslyVerified(resultPath) ? LaterChangeWarning : "");
+        try { accepted = await confirm(new ChangeRequest("Restaurar configuração de rede anterior?", details) { Postponable = true, OnDismissed = () => dismissed = true }); }
         catch (Exception ex) { return Serialize(new { success = false, restored = false, uncertain = true, error = "Confirmação indisponível: " + ex.Message + ". Nada foi alterado; a restauração será oferecida novamente.", backup }); }
         // #128: a janela fechada sem escolha (inclusive ao encerrar o Nexo) é "Agora não": nada gravado, a oferta volta na próxima abertura.
         if (!accepted && dismissed) return Serialize(new { success = false, restored = false, postponed = true, message = PostponedMessage, backup });
