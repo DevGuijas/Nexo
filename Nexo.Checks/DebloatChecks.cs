@@ -112,6 +112,14 @@ internal static class DebloatChecks
         var length = WindowsTools.CommandLength(["-NoProfile", "-NonInteractive", "-Command", OptimizationDiskExecutor.BuildScript(apply,
             @"C:\Program Files\NexoOptimize-" + RunA, @"C:\Program Files\NexoOptimize-" + RunA + @"\result.json", "S-1-5-21-1000000000-2000000000-3000000000-1001")]);
         check(length < WindowsTools.CommandLineLimit - 300, "Debloat: o Aplicar com todos os itens elevados cabe na linha de comando do Windows (" + length + " caracteres)");
+        // Como vai de fato ao executor: compactado no carregador da rede, com margem larga para o catálogo crescer.
+        string Sent(string script) => OptimizationDiskExecutor.BuildScript(DebloatScripts.ForElevation(script),
+            @"C:\Program Files\NexoOptimize-" + RunA, @"C:\Program Files\NexoOptimize-" + RunA + @"\result.json", "S-1-5-21-1000000000-2000000000-3000000000-1001");
+        var sentApply = WindowsTools.CommandLength(["-NoProfile", "-NonInteractive", "-Command", Sent(apply)]);
+        var sentUndo = WindowsTools.CommandLength(["-NoProfile", "-NonInteractive", "-Command", Sent(DebloatScripts.Undo(RunA))]);
+        check(sentApply < WindowsTools.CommandLineLimit / 2 && sentUndo < WindowsTools.CommandLineLimit / 2 && !Sent(apply).Contains('"')
+            && DebloatScripts.ForElevation(apply).EndsWith(NetworkRecovery.LoaderRun, StringComparison.Ordinal),
+            "Debloat: o script elevado vai compactado no carregador da rede, com menos da metade do limite da linha de comando (Aplicar " + sentApply + ", Desfazer " + sentUndo + " caracteres)");
         var store = ProtectedFolderScript.Text;
         check(ProtectedFolderScript.Functions.All(f => store.Contains("function " + f)) && store.StartsWith("$trustedSids = @('S-1-5-18', 'S-1-5-32-544'", StringComparison.Ordinal)
             && !store.Contains('"') && store.Contains("SetAccessRuleProtection($true, $false)") && store.Contains("[IO.FileMode]::CreateNew")
@@ -234,6 +242,12 @@ internal static class DebloatChecks
         check(unsavedResult != null && u!["sysmain"].Status == DebloatStatus.Ok && u["bing-news"].Status == DebloatStatus.Ok && unsavedResult.Status == "Partial"
             && unsavedResult.Warning is { } w && w.Contains("não foi salvo") && w.Contains("ponto de restauração 41") && w.Contains("pasta protegida"),
             "Debloat: sem gravar o arquivo do Desfazer, a aplicação não lança, devolve o resultado e indica o ponto de restauração (" + culture + ")");
+        // Só itens elevados, todos ok: a falha do registro local sozinha já deixa o resultado parcial, com o aviso.
+        var onlyElevated = new FakeSystem(Inventory());
+        var onlyElevatedService = new DebloatService(onlyElevated, new DebloatUndoStore(Path.Combine(blocker, "so-elevados.json")), _ => { });
+        var onlyElevatedResult = await onlyElevatedService.ApplyAsync(await onlyElevatedService.PreviewAsync(CancellationToken.None), ["sysmain"], false, null, CancellationToken.None);
+        check(onlyElevatedResult.Items.Single().Status == DebloatStatus.Ok && onlyElevatedResult.Status == "Partial" && onlyElevatedResult.Warning is { } ow && ow.Contains("não foi salvo"),
+            "Debloat: com tudo ok, a falha ao gravar o arquivo do Desfazer sozinha deixa o resultado parcial, com o aviso (" + culture + ")");
         check(u != null && u["file-extensions"].Status == DebloatStatus.Failed && u["file-extensions"].Detail.Contains("não pôde ser guardado")
             && unsaved.Registry.Value(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "HideFileExt") == "1",
             "Debloat: valor do perfil sem o estado anterior guardado não é gravado (" + culture + ")");
@@ -456,8 +470,10 @@ internal static class DebloatChecks
         var broken = DebloatProtectedStore.Read(root, RunA, (_, _) => null).Problem;
         Write("{\"RunId\":\"" + RunA + "\",\"Items\":{\"Id\":\"sysmain\",\"Kind\":\"Service\",\"Target\":\"SysMain\",\"Previous\":\"Manual|False\"}}");
         var single = DebloatProtectedStore.Read(root, RunA, (_, _) => null);
-        check(other != null && other.Contains("outra aplicação") && kind != null && broken != null && single.Problem == null && single.Entries.Count == 1,
-            "Debloat: registro protegido de outra aplicação, com item do perfil ou ilegível é recusado; item único do ConvertTo-Json é aceito");
+        Write("{\"RunId\":\"" + RunA + "\",\"Items\":[{\"Id\":\"bing-news\",\"Kind\":\"App\",\"Target\":\"Microsoft.BingNews\",\"Previous\":\"removed\"}]}");
+        var app = DebloatProtectedStore.Read(root, RunA, (_, _) => null).Problem;
+        check(other != null && other.Contains("outra aplicação") && kind != null && app != null && broken != null && single.Problem == null && single.Entries.Count == 1,
+            "Debloat: registro protegido de outra aplicação, com item do perfil ou de app, ou ilegível é recusado; item único do ConvertTo-Json é aceito");
         check(DebloatScripts.ParseRemoval("{\"Package\":\"A_1\",\"Status\":\"Ok\",\"Detail\":\"\"}")["A_1"].Status == "Ok"
             && DebloatScripts.ParseRemoval("[{\"Package\":\"A_1\",\"Status\":\"Estranho\"}]")["A_1"].Status == "Failed",
             "Debloat: a remoção só conta Ok com evidência explícita");
@@ -746,6 +762,22 @@ internal static class DebloatScriptChecks
             && parsed.Results.Count(r => r.Id == "ceip-tasks" && r.Status == "NotFound") == 5 && parsed.Results.Any(r => r.Id == "ceip-tasks" && r.Status == "Ok" && r.Previous == "Ready")
             && parsed.Results.Any(r => r.Target == "Recall" && r.Previous == "Enabled"),
             "Debloat: o resultado elevado real traz o ponto confirmado, o estado anterior de cada alvo e isola o erro de um alvo: " + Short(resultJson));
+
+        // O mesmo script, compactado como vai ao executor real: o carregador da rede o roda no mesmo escopo, com o mesmo efeito.
+        var compactJson = await Run(shell, applyFakes + "\n" + "try { $data=& { " + DebloatScripts.ForElevation(applyScript.Replace(DebloatScripts.StoreFunctions, storeFakes))
+            + " }; $result=@{success=$true;data=$data} } catch { $result=@{success=$false;error=$_.Exception.Message} }\n"
+            + "ConvertTo-Json -InputObject ([pscustomobject]@{result=$result;calls=$script:calls}) -Depth 8 -Compress");
+        string[] compactCalls = []; string compactResult = "";
+        try
+        {
+            using var doc = JsonDocument.Parse(compactJson);
+            compactCalls = doc.RootElement.GetProperty("calls").EnumerateArray().Select(c => c.GetString()!).ToArray();
+            compactResult = doc.RootElement.GetProperty("result").GetProperty("data").GetRawText();
+        }
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { }
+        string Data(string json) { try { using var d = JsonDocument.Parse(json); return d.RootElement.GetProperty("data").GetRawText(); } catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { return "sem dados"; } }
+        check(calls.Length > 3 && compactCalls.SequenceEqual(calls) && compactResult.Length > 0 && compactResult == Data(resultJson),
+            "Debloat: compactado no carregador da rede, o script elevado real faz as mesmas chamadas e devolve o mesmo resultado: " + Short(compactJson));
 
         var stuckJson = await Run(shell, applyFakes.Replace("function Set-Service { param($Name,$StartupType,$ErrorAction) $script:calls+=('Set:'+$Name+':'+$StartupType) }",
             "function Set-Service { param($Name,$StartupType,$ErrorAction) throw 'acesso negado' }") + "\n" + Elevated(applyScript, storeFakes));

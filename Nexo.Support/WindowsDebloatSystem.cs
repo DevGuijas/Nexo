@@ -14,7 +14,7 @@ public sealed class WindowsDebloatSystem : IDebloatSystem
     public int Build => Environment.OSVersion.Version.Build;
     public IDebloatRegistry Registry { get; } = new CurrentUserRegistry();
     public Task<string> RunUserScriptAsync(string script, int timeoutSeconds, CancellationToken token) => SupportService.Powershell(script, token, timeoutSeconds);
-    public Task<string> RunElevatedAsync(string script, CancellationToken token) => OptimizationDiskExecutor.RunAsync(script, token);
+    public Task<string> RunElevatedAsync(string script, CancellationToken token) => OptimizationDiskExecutor.RunAsync(DebloatScripts.ForElevation(script), token);
     // A mesma conferência da cópia protegida da rede: NexoSupport, debloat, a pasta da aplicação e o undo.json.
     public DebloatProtectedUndo ReadProtectedUndo(string runId) =>
         DebloatProtectedStore.Read(DebloatProtectedStore.Root, runId, (directory, file) => NetworkRecovery.UntrustedReasonOnWindows(directory, [file]));

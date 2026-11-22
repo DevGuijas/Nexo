@@ -665,6 +665,13 @@ public static class DebloatScripts
     public const string StoreRefusal = "Pasta protegida do Desfazer recusada: ";
 
     /// <summary>
+    /// O script elevado como vai ao executor: compactado (GZip) no mesmo carregador curto do executor de rede (#10), em
+    /// -Command, executado no mesmo escopo. Com todos os itens, o Aplicar sem compactar fica perto do limite de 32 767
+    /// caracteres da linha de comando do Windows; compactado, sobra margem para o catálogo crescer.
+    /// </summary>
+    public static string ForElevation(string script) => NetworkRecovery.Compact(script);
+
+    /// <summary>
     /// Funções da pasta protegida do Desfazer: as da cópia protegida da rede (ProtectedFolderScript) e as próprias do
     /// debloat, em %ProgramData%\NexoSupport\debloat\&lt;id&gt;. A pasta da aplicação nasce nova e protegida; NexoSupport e
     /// debloat só são usadas se já forem confiáveis (#97). Os testes trocam este bloco inteiro por funções falsas.
