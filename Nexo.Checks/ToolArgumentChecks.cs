@@ -180,12 +180,12 @@ internal static class ToolArgumentChecks
         const string done = "Não encontrei erros recentes. Desde quando o computador está lento?";
         var tools = new ValidatingTools();
         var (reset, _) = await Run(store, actor, "meu computador esta lento e travado", tools,
-            Text("Vamos verificar."), Text("Vamos verificar."), Text("Vamos verificar."), Call("get_recent_errors", new { }),
-            Text("Vamos verificar."), Text("Vamos verificar."), Text("Vamos verificar."), Text(done));
+            Text("Vamos verificar."), Text("Vamos verificar agora."), Text("Vamos verificar de novo."), Call("get_recent_errors", new { }),
+            Text("Vamos verificar."), Text("Vamos verificar agora."), Text("Vamos verificar de novo."), Text(done));
         assert(reset.StartsWith(done) && tools.Executed.Count(n => n == "get_recent_errors") == 1,
             "Contador de recusas: zera depois de uma ferramenta executada; três recusas de cada lado não encerram o turno");
         var (kept, _) = await Run(store, actor, "meu computador esta lento e travado", new ValidatingTools(),
-            Text("Vamos verificar."), Text("Vamos verificar."), Text("Vamos verificar."), Call("get_recent_errors", new { service = "System" }), Text("Vamos verificar."));
+            Text("Vamos verificar."), Text("Vamos verificar agora."), Text("Vamos verificar de novo."), Call("get_recent_errors", new { service = "System" }), Text("Vamos verificar isso."));
         assert(kept.Contains(AgentService.NextStep), "Contador de recusas: não zera depois de uma ferramenta recusada pelo executor; a quarta recusa encerra");
     }
 
@@ -260,7 +260,7 @@ internal static class ToolArgumentChecks
     {
         var tools = new ValidatingTools();
         var (answer, _) = await Run(store, actor, "como faço para mudar o papel de parede?", tools,
-            Text("Vou verificar."), Text("Vou verificar."), Text("Vou verificar."), Text("Vou verificar."));
+            Text("Vou verificar."), Text("Vou verificar agora."), Text("Vou verificar de novo."), Text("Vou verificar isso."));
         assert(tools.Executed.Count == 0 && answer.StartsWith("A IA não conseguiu selecionar a próxima etapa.") && !answer.Contains(AgentService.NextStep),
             "Quatro recusas sem nenhuma consulta: a mensagem de antes continua, sem inventar evidência");
     }

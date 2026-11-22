@@ -485,7 +485,7 @@ internal static class FinalAnswerChecks
             : throw new Exception("Alteração ambígua chegou ao executor: " + name));
         var promise = JsonSerializer.Serialize(new { message = new { role = "assistant", content = "Vou reiniciar o dispositivo agora." } });
         var answer = await Run(store, actor, "Estou sem som em todos os aplicativos.", tools,
-            Call("restart_device", new { device_id = "HDAUDIO\\SPK1" }), promise, promise, promise, promise);
+            Call("restart_device", new { device_id = "HDAUDIO\\SPK1" }), promise, promise, promise);
         assert(tools.Calls.SequenceEqual(["diagnose_device"]) && answer.Contains("O Nexo não executou a etapa “Reiniciando e verificando o dispositivo” porque o alvo não foi identificado sem ambiguidade")
             && answer.Contains("Diga qual dispositivo ou impressora apresenta a falha respondendo só com o nome dele, como aparece no cartão da consulta.") && !answer.Contains("não cita"), "Alvo ambíguo explica a trava sem culpar o pedido");
     }
@@ -506,7 +506,7 @@ internal static class FinalAnswerChecks
         var first = new FlowTools(Tools);
         var asked = await Run(store, actor, "A placa de vídeo está piscando.", first,
             Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }), Call("install_driver_update", new { update_id = "00000000-0000-0000-0000-0000000000a1" }),
-            promise, promise, promise, promise);
+            promise, promise, promise);
         assert(!first.Calls.Contains("install_driver_update") && asked.Contains("há mais de uma oferta para o dispositivo relatado: “Driver gráfico”; “Driver gráfico Pro”. Qual delas você quer instalar? Responda só com o nome"),
             "Oferta ambígua: a trava não instala e pergunta qual oferta, pedindo só o nome");
 
@@ -520,11 +520,11 @@ internal static class FinalAnswerChecks
             return (tools, await new AgentService(store, tools, http).Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None));
         }
         var chosen = await Reply("Driver gráfico Pro", Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }),
-            Call("install_driver_update", new { update_id = "00000000-0000-0000-0000-0000000000a2" }), promise, promise, promise, promise);
+            Call("install_driver_update", new { update_id = "00000000-0000-0000-0000-0000000000a2" }), promise, promise, promise);
         assert(chosen.Tools.Calls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates", "install_driver_update"]),
             "Oferta ambígua: no turno seguinte, a resposta só com o título instala a oferta escolhida");
         var refused = await Reply("não, o Driver gráfico Pro", Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }),
-            Call("install_driver_update", new { update_id = "00000000-0000-0000-0000-0000000000a2" }), promise, promise, promise, promise);
+            Call("install_driver_update", new { update_id = "00000000-0000-0000-0000-0000000000a2" }), promise, promise, promise);
         assert(!refused.Tools.Calls.Contains("install_driver_update") && refused.Answer.Contains("Qual delas você quer instalar?"),
             "Oferta ambígua: resposta com outras palavras não instala e pergunta de novo");
     }
@@ -558,15 +558,15 @@ internal static class FinalAnswerChecks
             _ => throw new Exception("Oferta não escolhida chegou ao executor: " + name)
         };
         var offer = await TwoTurns("A placa de vídeo está piscando.", "Driver gráfico Pro", Offers,
-            [Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }), Call("install_driver_update", new { update_id = basic }), promise, promise, promise, promise],
+            [Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }), Call("install_driver_update", new { update_id = basic }), promise, promise, promise],
             [Call("install_driver_update", new { update_id = pro }), Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }),
-                Call("install_driver_update", new { update_id = pro }), promise, promise, promise, promise]);
+                Call("install_driver_update", new { update_id = pro }), promise, promise, promise]);
         assert(offer.Calls.SequenceEqual(["get_hardware_inventory", "scan_driver_updates", "install_driver_update"]),
             "2º turno: instalação pedida antes da consulta não vira falha repetida; depois da consulta, a oferta escolhida é instalada (" + string.Join(",", offer.Calls) + ")");
         var scannedFirst = await TwoTurns("A placa de vídeo está piscando.", "Driver gráfico Pro", Offers,
-            [Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }), Call("install_driver_update", new { update_id = basic }), promise, promise, promise, promise],
+            [Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }), Call("install_driver_update", new { update_id = basic }), promise, promise, promise],
             [Call("scan_driver_updates", new { }), Call("install_driver_update", new { update_id = pro }), Call("get_hardware_inventory", new { category = "display" }),
-                Call("install_driver_update", new { update_id = pro }), promise, promise, promise, promise]);
+                Call("install_driver_update", new { update_id = pro }), promise, promise, promise]);
         assert(scannedFirst.Calls.SequenceEqual(["scan_driver_updates", "get_hardware_inventory", "install_driver_update"]),
             "2º turno: oferta consultada sem o hardware observado ainda é falta de evidência; depois do inventário, é instalada (" + string.Join(",", scannedFirst.Calls) + ")");
 
@@ -578,7 +578,7 @@ internal static class FinalAnswerChecks
             _ => throw new Exception("Dispositivo não escolhido chegou ao executor: " + name)
         };
         var device = await TwoTurns("meu microfone parou de funcionar", "Microfone Fifine USB", Audio, [],
-            [Call("enable_device", new { device_id = fifine }), Call("diagnose_device", new { topic = "audio" }), Call("enable_device", new { device_id = fifine }), promise, promise, promise, promise]);
+            [Call("enable_device", new { device_id = fifine }), Call("diagnose_device", new { topic = "audio" }), Call("enable_device", new { device_id = fifine }), promise, promise, promise]);
         assert(device.Calls.SequenceEqual(["diagnose_device", "enable_device"]),
             "2º turno: dispositivo habilitado antes da consulta não vira falha repetida; depois da consulta, o escolhido é habilitado (" + string.Join(",", device.Calls) + ")");
 
@@ -589,20 +589,20 @@ internal static class FinalAnswerChecks
             _ => throw new Exception("Impressora não escolhida chegou ao executor: " + name)
         };
         var printer = await TwoTurns("a impressora não imprime", "Canon Sala", Printers, [],
-            [Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("get_printers", new { }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), promise, promise, promise, promise]);
+            [Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("get_printers", new { }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), promise, promise, promise]);
         assert(printer.Calls.SequenceEqual(["get_printers", "clear_print_queue"]),
             "2º turno: fila limpa antes da consulta não vira falha repetida; depois da consulta, a fila escolhida é limpa (" + string.Join(",", printer.Calls) + ")");
 
         // Barrada por alvo errado, a chamada conta como falha desde a primeira: repetida, a trava encerra o turno ali.
         var wrong = await TwoTurns("a impressora não imprime", "Canon Sala", Printers, [],
             [Call("get_printers", new { }), Call("clear_print_queue", new { printer_name = "HP LaserJet Recepção" }), Call("clear_print_queue", new { printer_name = "HP LaserJet Recepção" }),
-                Call("get_printers", new { }), promise, promise, promise, promise]);
+                Call("get_printers", new { }), promise, promise, promise]);
         assert(wrong.Calls.SequenceEqual(["get_printers"]), "2º turno: alteração barrada por alvo errado e repetida encerra o turno sem chegar ao executor (" + string.Join(",", wrong.Calls) + ")");
         // #70 (validação no PC): pedida antes da consulta, a alteração faz o próprio Nexo consultar as impressoras e reavaliar a
         // mesma chamada; a fila escolhida é limpa uma vez só, sem depender de o modelo consultar.
         var thrice = await TwoTurns("a impressora não imprime", "Canon Sala", Printers, [],
             [Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("clear_print_queue", new { printer_name = "Canon Sala" }),
-                Call("get_printers", new { }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), promise, promise, promise, promise]);
+                Call("get_printers", new { }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), promise, promise, promise]);
         assert(thrice.Calls.SequenceEqual(["get_printers", "clear_print_queue"]), "2º turno: a alteração pedida sem consulta leva à consulta automática e à fila escolhida, uma vez (" + string.Join(",", thrice.Calls) + ")");
         // Sem a consulta disponível (Spooler parado), só a primeira tentativa é perdoada: a segunda conta como falha, e a terceira
         // encerra o turno pela trava. A consulta automática acontece uma vez só.
@@ -613,7 +613,7 @@ internal static class FinalAnswerChecks
             : throw new Exception("Alteração chegou ao executor sem consulta: " + name);
         var down = await TwoTurns("a impressora não imprime", "Canon Sala", PrintersDown, [],
             [Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("clear_print_queue", new { printer_name = "Canon Sala" }), Call("clear_print_queue", new { printer_name = "Canon Sala" }),
-                Call("clear_print_queue", new { printer_name = "Canon Sala" }), promise, promise, promise, promise]);
+                Call("clear_print_queue", new { printer_name = "Canon Sala" }), promise, promise, promise]);
         assert(down.Calls.SequenceEqual(["get_printers"]), "2º turno: sem consulta possível, a mesma alteração pedida três vezes encerra o turno, com uma consulta automática só (" + string.Join(",", down.Calls) + ")");
     }
 
@@ -884,7 +884,7 @@ internal static class FinalAnswerChecks
         var gpu = New();
         await Turn(gpu, "A placa de vídeo está piscando.", Gpu, Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }),
             Call("install_driver_update", new { update_id = "00000000-0000-0000-0000-0000000000d1" }), Plain("Vou instalar o driver agora."), Plain("Vou instalar o driver agora."),
-            Plain("Vou instalar o driver agora."), Plain("Vou instalar o driver agora."));
+            Plain("Vou instalar o driver agora."));
         var installed = await Turn(gpu, "Driver gráfico Pro", Gpu, Call("install_driver_update", new { update_id = "00000000-0000-0000-0000-0000000000d2" }),
             Call("get_hardware_inventory", new { category = "display" }), Call("scan_driver_updates", new { }), Call("install_driver_update", new { update_id = "00000000-0000-0000-0000-0000000000d2" }));
         assert(Closes(installed.Answer, facts + "instalação do driver “Driver gráfico Pro”."), "#73: oferta pedida pelo GUID antes do scan e instalada pelo título aparece uma vez (" + installed.Answer + ")");
@@ -1175,7 +1175,7 @@ internal static class FinalAnswerChecks
         // Desde a #63, "os sites não abrem" libera a rede; a trava continua para um pedido que não aponta para ela.
         var answer = (await Run(store, actor, "Meu computador está estranho desde ontem", tools,
             Call("get_network", new { }), Call("set_dns", new { interface_index = 13, mode = "manual", servers = new[] { "8.8.8.8" } }),
-            promise, promise, promise, promise)).ReplaceLineEndings("\n");
+            promise, promise, promise)).ReplaceLineEndings("\n");
         Console.WriteLine("RESPOSTA cenário 3 | " + answer.Replace("\n", " ⏎ "));
         assert(tools.Calls.SequenceEqual(["get_network"]), "Cenário 3: set_dns barrado pela trava de tópico não chega ao executor");
         assert(answer.Contains("O Nexo não executou a etapa “Configurando os servidores DNS” porque o seu pedido não cita a rede ou a internet")

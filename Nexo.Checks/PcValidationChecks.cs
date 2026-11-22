@@ -91,7 +91,7 @@ internal static class PcValidationChecks
         // Fora de um incidente do sistema, a desistência sem evidência continua como antes, sem consulta.
         var other = new FlowTools((name, _) => throw new Exception("Ferramenta inesperada: " + name));
         var plain = await Ask(store, actor, [User("como faço para mudar o papel de parede?")], other,
-            new CapturingModel([Text("Vou verificar."), Text("Vou verificar."), Text("Vou verificar."), Text("Vou verificar.")]));
+            new CapturingModel([Text("Vou verificar."), Text("Vou verificar agora."), Text("Vou verificar de novo."), Text("Vou verificar isso.")]));
         assert(other.Calls.Count == 0 && plain.StartsWith("A IA não conseguiu selecionar a próxima etapa.", StringComparison.Ordinal),
             "#88 loop do disco: fora de lentidão, espaço ou memória, a desistência sem evidência não consulta nada");
 
