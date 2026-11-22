@@ -42,6 +42,7 @@ internal static class RaidTemperatureChecks
                 ClosedDiskSuggestion(assert, culture);
                 TaskManagerTemperature(assert, culture);
                 Questions(assert, culture);
+                QaEdges(assert, culture);
             }
             await DiskHealthFlow(store, actor, assert);
             await TemperatureFlow(store, actor, assert);
@@ -116,6 +117,40 @@ internal static class RaidTemperatureChecks
         assert(wrong.Length == 0 && InvestigationEvidence.TemperatureSourceReason.Contains("relatório de saúde"),
             "#135, " + culture + ": mandar ao Gerenciador de Tarefas para ver a temperatura da CPU é recusado; negação, memória, motivo e programa de terceiros passam"
             + (wrong.Length > 0 ? " · erradas: " + string.Join(" | ", wrong) : ""));
+    }
+
+    // Casos de borda do @qa: afirmação de conteúdo continua com o próprio motivo; explicação genérica sobre o que ocupa espaço
+    // passa com o T: encerrado, como antes da #135; GPU e memória no Gerenciador de Tarefas passam; a negação fora do trecho
+    // não isenta; "quantos graus" conta como pergunta de temperatura e "aquecedor" não.
+    private static void QaEdges(Action<bool, string> assert, string culture)
+    {
+        var closed = Observed(PcReport());
+        var plain = new InvestigationEvidence();
+        (string Text, string? Closed, string? Plain)[] cases =
+        [
+            ("Há arquivos grandes ocupando espaço no D:.", InvestigationEvidence.DriveContentsReason, InvestigationEvidence.DriveContentsReason),
+            ("Há arquivos grandes ocupando espaço no D:, apague-os.", InvestigationEvidence.DriveContentsReason, InvestigationEvidence.DriveContentsReason),
+            ("Recomendo verificar se o T: está com pouco espaço.", null, null),
+            ("O T: tem pouco espaço, verifique se há arquivos ocupando espaço.", InvestigationEvidence.ClosedDiskReason, InvestigationEvidence.DriveContentsReason),
+            ("Os arquivos temporários ocupam espaço no disco.", null, null),
+            ("O Windows Update ocupa espaço em disco.", null, null),
+            ("Verifique se algum aplicativo está consumindo espaço no C:.", InvestigationEvidence.ClosedDiskReason, null),
+            ("Libere espaço no T:.", InvestigationEvidence.ClosedDiskReason, null),
+            ("Posso identificar os maiores arquivos do T: para você.", InvestigationEvidence.FileSearchReason, InvestigationEvidence.FileSearchReason),
+            ("Abra o Gerenciador de Tarefas para ver a temperatura da GPU.", null, null),
+            ("No Gerenciador de Tarefas, na aba Desempenho, a GPU mostra a temperatura.", null, null),
+            ("A temperatura está indisponível e o Gerenciador de Tarefas mostra o uso de memória.", null, null),
+            ("Abra o Gerenciador de Tarefas para ver a temperatura, já que o Nexo não mostra esse dado.", InvestigationEvidence.TemperatureSourceReason, InvestigationEvidence.TemperatureSourceReason),
+            ("Use o Gerenciador de Tarefas para conferir a temperatura do processador.", InvestigationEvidence.TemperatureSourceReason, InvestigationEvidence.TemperatureSourceReason),
+            ("O Gerenciador de Tarefas não mostra a temperatura da CPU nem da GPU.", null, null),
+        ];
+        var wrong = cases.Where(c => closed.ValidateStatement(c.Text, false) != c.Closed || plain.ValidateStatement(c.Text, false) != c.Plain)
+            .Select(c => c.Text + " → " + closed.ValidateStatement(c.Text, false) + " / " + plain.ValidateStatement(c.Text, false)).ToList();
+        (string Text, bool Temperature)[] asks = [("quantos graus está a CPU?", true), ("quantos graus o processador", true), ("o aquecedor do quarto", false), ("girar a imagem 90 graus", false)];
+        if (SupportIntake.AsksDiskHealth("meu disco está cheio, qual o estado dele?")) wrong.Add("pedido: disco cheio contou como saúde do disco");
+        wrong.AddRange(asks.Where(a => SupportIntake.AsksTemperature(a.Text) != a.Temperature).Select(a => "pedido: " + a.Text));
+        assert(wrong.Count == 0, "#135 (@qa), " + culture + ": afirmação de conteúdo mantém o motivo; explicação genérica do que ocupa espaço passa; GPU e memória no Gerenciador passam; \"quantos graus\" conta"
+            + (wrong.Count > 0 ? " · erradas: " + string.Join(" | ", wrong) : ""));
     }
 
     // Pedidos sobre temperatura e saúde dos discos; falta de espaço e unidade sem saúde não contam.

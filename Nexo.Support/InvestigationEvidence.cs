@@ -475,9 +475,16 @@ public sealed class InvestigationEvidence
     // indisponível. A frase que nega ("o Gerenciador de Tarefas não mostra a temperatura") e a que usa o Gerenciador para outra
     // coisa passam. Programa de terceiros (HWMonitor) não é recusado: a linha do monitor garante a informação do Nexo na resposta.
     internal const string TemperatureSourceReason = "O Gerenciador de Tarefas do Windows não mostra a temperatura da CPU. Cite a temperatura do relatório de saúde (get_health_report) ou, se ela estiver indisponível, o motivo informado nele, sem mandar o usuário procurar essa leitura no Gerenciador de Tarefas.";
+    // O Gerenciador de Tarefas precisa aparecer como o lugar de ver a temperatura, e a negação vale dentro desse trecho (@qa): "a
+    // temperatura está indisponível e o Gerenciador de Tarefas mostra o uso de memória" passa, e "abra o Gerenciador de Tarefas
+    // para ver a temperatura, já que o Nexo não mostra esse dado" é recusada. A temperatura da GPU aparece no Gerenciador de
+    // Tarefas do Windows 10 2004 em diante; a frase só da GPU passa.
+    private static readonly Regex TaskManagerTemperature = new(@"(?:ver|veja|verifi\w*|confer\w*|confira|chec\w*|consult\w*|acompanh\w*|monitor\w*|olh\w*)\b[^.;!?]{0,50}?\btemperatura[^.;!?]{0,70}?\bgerenciador de tarefas\b"
+        + @"|\bgerenciador de tarefas\b[^.;!?]{0,50}?\b(?:ver|veja|verifi\w*|confer\w*|confira|chec\w*|consult\w*|acompanh\w*|monitor\w*|olh\w*|mostra\w*|exib\w*)\b[^.;!?]{0,40}?\btemperatura"
+        + @"|\btemperatura[^.;!?]{0,50}?\bno gerenciador de tarefas\b");
     private static bool SendsToTaskManagerForTemperature(string normalized) => Sentences(normalized).Any(sentence =>
-        Regex.IsMatch(sentence, @"\bgerenciador de tarefas\b") && Regex.IsMatch(sentence, @"\btemperatura")
-        && !Regex.IsMatch(sentence, @"\bnao (?:mostra|exibe|informa|tem|traz|apresenta)\b"));
+        (!Regex.IsMatch(sentence, @"\b(?:gpu|placa de video|grafic\w*)\b") || Regex.IsMatch(sentence, @"\b(?:cpu|processador)\b"))
+        && TaskManagerTemperature.Matches(sentence).Any(match => !Regex.IsMatch(match.Value, @"\bnao (?:mostra|exibe|informa|tem|traz|apresenta)\b")));
     internal const string ClosedDiskReason = "A resposta apresenta como atual a falta de espaço em disco, mas o relatório de saúde só mostra essa ocorrência encerrada (resolvida ou com estado atual desconhecido) e nenhuma leitura atual tem pouco espaço. Cite o espaço livre atual por volume, ou diga que essa ocorrência não está ativa.";
     // Caminho real para ver o uso do disco (#88): o Nexo não lista arquivos nem pastas.
     internal const string StorageGuidance = "Para ver o que ocupa espaço, abra Configurações > Sistema > Armazenamento no Windows.";
@@ -572,7 +579,8 @@ public sealed class InvestigationEvidence
         {
             var parts = Contrast.Split(sentence);
             return parts.Where((part, index) => !parts.Skip(index + 1).Any(StateExempt));
-        }).Any(sentence => ClosedDiskSentence(sentence, LowSpace, sentence) || ClosedDiskSentence(sentence, OccupiedSpace, IndirectQuestion.Replace(sentence, " ")));
+        }).Any(sentence => ClosedDiskSentence(sentence, LowSpace, sentence)
+            || UsageSuggestion.IsMatch(sentence) && ClosedDiskSentence(sentence, OccupiedSpace, IndirectQuestion.Replace(sentence, " ")));
     }
     // A frase só conta sem pergunta, condição, passado ou isenção de estado; "verificar se há…" é pergunta indireta, não condição,
     // e só é lida assim para o que ocupa espaço (#135): a leitura da falta de espaço não muda.
@@ -585,9 +593,14 @@ public sealed class InvestigationEvidence
     // possam estar ocupando espaço no T:" foi recusada 4 vezes pelo motivo do conteúdo de unidade ("há arquivos"), e o modelo
     // não entendia o que corrigir. É a falta de espaço apresentada como atual: o que ocupa espaço também conta para o disco
     // encerrado, e a frase de conteúdo que só fala do que ocupa espaço recebe o motivo do disco encerrado. A recusa continua.
+    // Só a pergunta indireta ("verificar se há arquivos… ocupando espaço") muda de motivo; a afirmação ("há arquivos grandes
+    // ocupando espaço no D:") continua com o motivo do conteúdo de unidade (@qa).
+    // Só a sugestão de olhar ou mexer no que ocupa espaço conta (@qa): "os arquivos temporários ocupam espaço no disco" é
+    // explicação genérica, não falta de espaço apresentada como atual, e continua aceita como antes da #135.
+    private static readonly Regex UsageSuggestion = new(@"\b(?:verifi\w*|ver|veja|confer\w*|confira|chec\w*|cheque|identific\w*|descobr\w*|avali\w*|remov\w*|apag\w*|exclu\w*|limp\w*|desinstal\w*)\b");
     private static readonly Regex OccupiedSpace = new(@"\b(?:ocupand\w*|ocupa|ocupam|ocupar|consumind\w*|consome|consomem)\s+(?:\w+\s+){0,2}?espaco\b");
     private bool SuggestsClosedDiskUsage(string normalized) => PresentsClosedDisk(normalized)
-        && Sentences(normalized).Where(ClaimsDriveContents).All(sentence => OccupiedSpace.IsMatch(sentence));
+        && Sentences(normalized).Where(ClaimsDriveContents).All(sentence => OccupiedSpace.IsMatch(sentence) && IndirectQuestion.IsMatch(sentence));
     private static readonly Regex AlertState = new(@"\b(?:alerta|ocorrencia|aviso)s?\b.*(?:\bnao (?:esta|estao|e|sao|fica|ficou)(?: mais)? (?:ativ\w*|atua(?:l|is))\b|\bsaiu do relatorio\b|\bnao aparece(?:m)? mais\b)");
     private static readonly Regex NotNeeded = new(@"^\W*(?:\w+\W+){0,2}?nao (?:(?:e|sera|seria|esta) (?:necessari\w*|precis\w*)|precis\w*|dev\w*)\b");
     private static bool StateExempt(string part) => Regex.IsMatch(part, "resolvid|encerrad") || AlertState.IsMatch(part);

@@ -167,10 +167,16 @@ public static class SupportIntake
     // foi respondida sem nenhuma consulta, e o relatório de saúde já trazia a temperatura com o estado e o motivo. O Nexo
     // consulta o relatório ele mesmo e garante na resposta o valor ou o motivo; para os discos, a linha "Discos físicos".
     // Falta de espaço ("disco cheio") não é saúde do disco: segue pela triagem do sistema.
-    private const string Heat = @"\b(temperatura|temperaturas|esquent\w*|aquec\w*|superaquec\w*|quente|fervendo)\b";
+    private const string Heat = @"\b(temperatura|temperaturas|esquent\w*|aquec(?!edor)\w*|superaquec\w*|quente|fervendo)\b";
     private const string Drives = @"\b(discos?|hds?|ssds?|nvme|armazenamento|raid)\b";
     private const string DriveHealth = @"\b(saude|estado|smart|condicao|vida util|desgaste|falhando|defeito|estragad\w*|morrendo)\b";
-    public static bool AsksTemperature(string request) => Regex.IsMatch(AgentProtocol.Normalize(request), Heat);
+    // "Quantos graus está a CPU?" também é pergunta de temperatura (@qa); "graus" sozinho não, porque pode ser ângulo ou outra coisa.
+    private const string Degrees = @"\bgraus\b.*\b(cpu|processador|pc|computador|notebook|placa)\b|\b(cpu|processador|pc|computador|notebook|placa)\b.*\bgraus\b";
+    public static bool AsksTemperature(string request)
+    {
+        var text = AgentProtocol.Normalize(request);
+        return Regex.IsMatch(text, Heat) || Regex.IsMatch(text, Degrees);
+    }
     public static bool AsksDiskHealth(string request)
     {
         var text = AgentProtocol.Normalize(request);
