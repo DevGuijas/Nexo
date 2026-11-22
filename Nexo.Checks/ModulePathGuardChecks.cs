@@ -19,6 +19,8 @@ internal static class ModulePathGuardChecks
     {
         Structure(check);
         Launch(check);
+        StrictLaunch(check);
+        SystemPaths(check);
         await Behavior(check);
     }
 
@@ -96,6 +98,82 @@ internal static class ModulePathGuardChecks
             "#131: o lançamento elevado confere a fixação no mesmo passo em que confere o tamanho, antes de pedir o UAC");
     }
 
+    // @qa: o powershell.exe aceita abreviações de parâmetro (-c, -e, -ec, -enc, -f), parâmetros que carregam código
+    // (-PSConsoleFile) e, sem -NoProfile, roda os perfis do usuário antes do script. O Require aceita só o formato que o
+    // Nexo gera; tudo o mais é recusado, em vez de interpretado.
+    private static void StrictLaunch(Action<bool, string> check)
+    {
+        bool Rejected(IReadOnlyList<string> arguments)
+        {
+            try { PowerShellModulePath.Require(arguments); return false; }
+            catch (InvalidOperationException) { return true; }
+        }
+        var guarded = Expected + " Get-Service";
+        var guardedB64 = Convert.ToBase64String(Encoding.Unicode.GetBytes(guarded));
+        check(Rejected(["-c", "Remove-Item C:\\x", "-Command", guarded])
+            && Rejected(["-NoProfile", "-c", "evil", "-Command", guarded])
+            && Rejected(["-NoProfile", "-NonInteractive", "-e", guardedB64])
+            && Rejected(["-NoProfile", "-NonInteractive", "-ec", guardedB64])
+            && Rejected(["-NoProfile", "-NonInteractive", "-enc", guardedB64])
+            && Rejected(["-NoProfile", "-NonInteractive", "-encodedcommand", guardedB64])
+            && Rejected(["-NoProfile", "-NonInteractive", "/Command", guarded])
+            && Rejected(["-NoProfile", "-NonInteractive", "-f", @"C:\Users\u\x.ps1"]),
+            "#131 (@qa): abreviações e outras grafias de -Command/-EncodedCommand/-File (-c, -e, -ec, -enc, minúsculas, /Command, -f) são recusadas, mesmo com um -Command com a fixação depois");
+        check(Rejected(["-NonInteractive", "-Command", guarded]) && Rejected(["-NoProfile", "-Command", guarded])
+            && Rejected(["-NonInteractive", "-NoProfile", "-Command", guarded])
+            && Rejected(["-NoLogo", "-NonInteractive", "-Command", guarded]) && Rejected(["-NoProfile", "-NoLogo", "-Command", guarded])
+            && Rejected(["-NoProfile", "-NonInteractive", "-EncodedCommand", guarded]),
+            "#131 (@qa): sem -NoProfile e -NonInteractive nas posições do Nexo (ou com o script em texto puro no -EncodedCommand), o lançamento é recusado: os perfis do usuário rodariam com admin antes da fixação");
+        check(Rejected(["-NoProfile", "-NonInteractive", "-Command", guarded, "; Remove-Item C:\\x"])
+            && Rejected(["-NoProfile", "-NonInteractive", "-PSConsoleFile", @"C:\Users\u\x.psc1", "-Command", guarded])
+            && Rejected(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", guarded])
+            && Rejected(["-NoProfile", "-NonInteractive", "-EncodedCommand", guardedB64, "-Command", "Get-Service"]),
+            "#131 (@qa): argumentos a mais depois do script (que o -Command juntaria), -PSConsoleFile, -ExecutionPolicy ou um 2º script são recusados");
+        check(!Rejected(["-NoProfile", "-NonInteractive", "-Command", guarded]) && !Rejected(["-NoProfile", "-NonInteractive", "-EncodedCommand", guardedB64]),
+            "#131 (@qa): o formato que o Nexo gera (-NoProfile -NonInteractive e o script com a fixação) continua aceito");
+    }
+
+    // @qa: $env:WINDIR e $env:SystemRoot vêm do ambiente do usuário (HKCU\Environment) também no processo elevado. Um
+    // executável ou módulo chamado por esse caminho seria trocado por um do usuário, rodando com admin.
+    private static void SystemPaths(Action<bool, string> check)
+    {
+        var envPath = new System.Text.RegularExpressions.Regex(@"\$\{?env:(windir|systemroot|systemdrive|programfiles|programdata|temp|tmp|localappdata|appdata|userprofile)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        string transaction;
+        using (var resource = typeof(NetworkChange).Assembly.GetManifestResourceStream("Nexo.NetworkTransaction.ps1")!)
+        using (var reader = new StreamReader(resource)) transaction = reader.ReadToEnd();
+        string Embedded(string name)
+        {
+            using var resource = typeof(NetworkChange).Assembly.GetManifestResourceStream(name);
+            if (resource == null) return "";
+            using var reader = new StreamReader(resource);
+            return reader.ReadToEnd();
+        }
+        var scripts = new (string Name, string Text)[]
+        {
+            ("executor de rede (NetworkTransaction.ps1)", transaction),
+            ("ativação de adaptador (EnableNetworkAdapter.ps1)", Embedded("Nexo.EnableNetworkAdapter.ps1")),
+            ("restart_device", WindowsTools.DeviceScript("restart_device", "USB\\VID_1&PID_2\\3")),
+            ("enable_device", WindowsTools.DeviceScript("enable_device", "USB\\VID_1&PID_2\\3")),
+            ("enable_camera", WindowsTools.DeviceScript("enable_camera", "USB\\VID_1&PID_2\\3")),
+            ("erros recentes do System", WindowsTools.SystemErrorEventsScript),
+            ("coleta de eventos", WindowsEventCollector.ImportDiagnostics),
+            ("otimização", OptimizationDiskExecutor.BuildScript("Optimize-Volume -DriveLetter C", @"C:\Program Files\Nexo-x", @"C:\Program Files\Nexo-x\result.json", "S-1-5-21-1-2-3-1001")),
+            ("driver NVIDIA", WindowsTools.ElevatedWrapper(NvidiaAudioScriptChecks.Script(), @"C:\ProgramData\NexoSupport\pending\x\result.json")),
+        };
+        var offenders = scripts.Where(s => envPath.IsMatch(s.Text)).Select(s => s.Name).ToList();
+        check(offenders.Count == 0,
+            "#131 (@qa): nenhum script do PowerShell chama executável ou módulo por $env:WINDIR/$env:SystemRoot ou outra variável que o usuário define" + (offenders.Count == 0 ? "" : ": " + string.Join(", ", offenders)));
+        check(transaction.Contains("& ([IO.Path]::Combine([Environment]::SystemDirectory,'netsh.exe')) interface", StringComparison.Ordinal)
+            && WindowsTools.DeviceScript("restart_device", "X").Contains("& ([IO.Path]::Combine([Environment]::SystemDirectory,'pnputil.exe')) /restart-device", StringComparison.Ordinal)
+            && WindowsTools.SystemErrorEventsScript.StartsWith("$log=& ([IO.Path]::Combine([Environment]::SystemDirectory,'wevtutil.exe')) qe System", StringComparison.Ordinal)
+            && WindowsEventCollector.ImportDiagnostics.Contains("Combine($PSHOME,'Modules','Microsoft.PowerShell.Diagnostics'", StringComparison.Ordinal),
+            "#131 (@qa): netsh.exe (elevado), pnputil.exe (elevado) e wevtutil.exe vêm do System32 por GetSystemDirectory, e o módulo de diagnóstico pelo $PSHOME");
+        bool Invalid(string name) { try { PowerShellModulePath.SystemExecutable(name); return false; } catch (ArgumentException) { return true; } }
+        check(Invalid("a'.exe") && Invalid("..\\x.exe") && Invalid("netsh") && Invalid("x.exe'); Remove-Item C:\\x; ('")
+            && PowerShellModulePath.SystemExecutable("netsh.exe") == "([IO.Path]::Combine([Environment]::SystemDirectory,'netsh.exe'))",
+            "#131 (@qa): o caminho de executável do System32 só aceita um nome simples terminado em .exe, sem aspas nem separador");
+    }
+
     private static bool ThrowsOnLaunch(IReadOnlyList<string> arguments)
     {
         try { WindowsTools.CheckElevatedLaunch(arguments); return false; }
@@ -145,6 +223,24 @@ internal static class ModulePathGuardChecks
                 var output = await RunFile(shell, root, modules, script);
                 check(output.Contains("RESULTADO:", StringComparison.Ordinal) && !output.Contains(Planted, StringComparison.Ordinal),
                     "#131: " + name + " — com a fixação, o DnsClient plantado não é carregado (" + Last(output) + ")");
+            }
+
+            // @qa: os scripts que trocaram $env:WINDIR/$env:SystemRoot por [Environment]::SystemDirectory/$PSHOME continuam
+            // sendo PowerShell válido (o parser do próprio PowerShell, sem executar nada).
+            var parsed = new (string Name, string Text)[]
+            {
+                ("restart_device", WindowsTools.DeviceScript("restart_device", "USB\\VID_1&PID_2\\3")),
+                ("enable_camera", WindowsTools.DeviceScript("enable_camera", "USB\\VID_1&PID_2\\3")),
+                ("erros recentes do System", WindowsTools.SystemErrorEventsScript),
+                ("coleta de eventos", WindowsEventCollector.ImportDiagnostics + "'ok'"),
+            };
+            foreach (var (name, text) in parsed)
+            {
+                var target = Path.Combine(root, "parse-" + Guid.NewGuid().ToString("N") + ".ps1");
+                File.WriteAllText(target, text, new UTF8Encoding(true));
+                var parse = "$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile('" + target.Replace("'", "''") + "',[ref]$null,[ref]$e); 'RESULTADO:ERROS=' + $e.Count";
+                var output = await RunFile(shell, root, modules, parse);
+                check(output.Contains("RESULTADO:ERROS=0", StringComparison.Ordinal), "#131 (@qa): " + name + " é PowerShell válido depois da troca do caminho (" + Last(output) + ")");
             }
         }
         finally

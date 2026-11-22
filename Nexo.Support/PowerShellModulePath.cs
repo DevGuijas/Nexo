@@ -20,26 +20,35 @@ public static class PowerShellModulePath
     public static string Prefix(string script) => Guard + " " + script;
 
     /// <summary>
-    /// Confere, antes do UAC, que o script entregue ao powershell.exe (em -EncodedCommand ou -Command) começa com a
-    /// fixação. Script por arquivo (-File), ausente, ilegível ou com a fixação depois de outro comando é recusado.
+    /// Caminho de um executável do System32 como expressão do PowerShell, por GetSystemDirectory ([Environment]::SystemDirectory).
+    /// Nunca por $env:WINDIR ou $env:SystemRoot: o usuário define essas variáveis em HKCU\Environment e o processo elevado as
+    /// recebe, o que trocaria o netsh.exe ou o pnputil.exe por um executável dele, rodando com admin (#131).
+    /// </summary>
+    public static string SystemExecutable(string fileName)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(fileName, @"^[A-Za-z0-9_-]+\.exe$")) throw new ArgumentException("Nome de executável inválido.", nameof(fileName));
+        return "([IO.Path]::Combine([Environment]::SystemDirectory,'" + fileName + "'))";
+    }
+
+    /// <summary>
+    /// Confere, antes do UAC, o único formato de lançamento que o Nexo usa: exatamente -NoProfile, -NonInteractive e o
+    /// script em -EncodedCommand ou -Command, que precisa começar com a fixação. Qualquer outro formato é recusado, em vez
+    /// de interpretado: o powershell.exe aceita abreviações (-c, -e, -ec, -enc, -f) e outros parâmetros que carregam código
+    /// (-File, -PSConsoleFile), junta ao -Command os argumentos que vierem depois e, sem -NoProfile, roda os perfis do
+    /// usuário antes do script. Script ausente, ilegível ou com a fixação depois de outro comando também é recusado.
     /// </summary>
     public static void Require(IReadOnlyList<string> arguments)
     {
-        string? script = null;
-        for (var i = 0; i < arguments.Count; i++)
+        if (arguments.Count != 4 || !string.Equals(arguments[0], "-NoProfile", StringComparison.Ordinal) || !string.Equals(arguments[1], "-NonInteractive", StringComparison.Ordinal))
+            throw new InvalidOperationException(MissingGuardMessage);
+        string script;
+        if (string.Equals(arguments[2], "-EncodedCommand", StringComparison.Ordinal))
         {
-            var argument = arguments[i];
-            if (argument.Equals("-File", StringComparison.OrdinalIgnoreCase) || argument.Equals("-f", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException(MissingGuardMessage);
-            if (script != null) continue;
-            if (argument.Equals("-EncodedCommand", StringComparison.OrdinalIgnoreCase) && i + 1 < arguments.Count)
-            {
-                try { script = Encoding.Unicode.GetString(Convert.FromBase64String(arguments[i + 1])); }
-                catch (FormatException) { throw new InvalidOperationException(MissingGuardMessage); }
-            }
-            else if (argument.Equals("-Command", StringComparison.OrdinalIgnoreCase) && i + 1 < arguments.Count)
-                script = arguments[i + 1];
+            try { script = Encoding.Unicode.GetString(Convert.FromBase64String(arguments[3])); }
+            catch (FormatException) { throw new InvalidOperationException(MissingGuardMessage); }
         }
-        if (script == null || !script.StartsWith(Guard, StringComparison.Ordinal)) throw new InvalidOperationException(MissingGuardMessage);
+        else if (string.Equals(arguments[2], "-Command", StringComparison.Ordinal)) script = arguments[3];
+        else throw new InvalidOperationException(MissingGuardMessage);
+        if (!script.StartsWith(Guard, StringComparison.Ordinal)) throw new InvalidOperationException(MissingGuardMessage);
     }
 }
