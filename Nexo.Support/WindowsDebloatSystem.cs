@@ -6,7 +6,8 @@ namespace Nexo.Support;
 /// <summary>
 /// Implementação real da #127. O inventário e a remoção de apps rodam no Windows PowerShell 5.1 sem elevação (o módulo Appx
 /// não é confiável no PowerShell 7); o ponto de restauração, os serviços, as tarefas e o Recall vão pelo executor elevado
-/// da otimização, que grava o resultado numa pasta protegida.
+/// da otimização, que grava o resultado numa pasta protegida. O estado anterior desses itens fica em
+/// %ProgramData%\NexoSupport\debloat, gravado e lido só pelo executor elevado.
 /// </summary>
 public sealed class WindowsDebloatSystem : IDebloatSystem
 {
@@ -14,6 +15,9 @@ public sealed class WindowsDebloatSystem : IDebloatSystem
     public IDebloatRegistry Registry { get; } = new CurrentUserRegistry();
     public Task<string> RunUserScriptAsync(string script, int timeoutSeconds, CancellationToken token) => SupportService.Powershell(script, token, timeoutSeconds);
     public Task<string> RunElevatedAsync(string script, CancellationToken token) => OptimizationDiskExecutor.RunAsync(script, token);
+    // A mesma conferência da cópia protegida da rede: NexoSupport, debloat, a pasta da aplicação e o undo.json.
+    public DebloatProtectedUndo ReadProtectedUndo(string runId) =>
+        DebloatProtectedStore.Read(DebloatProtectedStore.Root, runId, (directory, file) => NetworkRecovery.UntrustedReasonOnWindows(directory, [file]));
 
     private sealed class CurrentUserRegistry : IDebloatRegistry
     {

@@ -100,7 +100,7 @@ public static class DebloatCatalog
         new("recall", PrivacyCategory, "Recall (capturas de tela do Copilot+)", DebloatWindows.Windows11, DebloatKind.OptionalFeature, false, ["Recall"], [],
             "Desativa o recurso opcional; o Windows pede reinício para concluir."),
 
-        new("visual-effects", PerformanceCategory, "Efeitos visuais para desempenho", DebloatWindows.Both, DebloatKind.UserRegistry, true, [],
+        new("visual-effects", PerformanceCategory, "Efeitos visuais para desempenho", DebloatWindows.Both, DebloatKind.UserRegistry, false, [],
         [
             DWord(@"Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects", "VisualFXSetting", 3),
             // Máscara de "melhor desempenho" mantendo a suavização de fontes, como no catálogo de origem.

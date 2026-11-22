@@ -1053,7 +1053,7 @@ public partial class MainWindow : Window
         if (debloatRunning) return;
         var run = DebloatUndo().LatestUndoable();
         if (run == null) { debloatCanUndo = false; debloatStatus = "Não há aplicação para desfazer."; UpdateToolsView(); return; }
-        var plan = string.Join("\n", DebloatService.DescribeUndo(run).Select(line => "• " + line));
+        var plan = string.Join("\n", DebloatServiceFor().DescribeUndo(run).Select(line => "• " + line));
         if (MessageBox.Show(this, $"Desfazer a aplicação de {run.At.ToLocalTime():g}? O Nexo vai mudar:\n\n{plan}\n\nO Windows pode pedir autorização de administrador. Continuar?",
                 "Desfazer remoção de apps e ajustes", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
         debloatCancellation = new CancellationTokenSource(); debloatRunning = true;
@@ -1063,7 +1063,7 @@ public partial class MainWindow : Window
             var progress = new Progress<string>(message => { debloatStatus = message; UpdateToolsView(); });
             var result = await DebloatServiceFor().UndoAsync(run, progress, debloatCancellation.Token);
             ShowDebloatResult("Desfazer", result);
-            RecordDebloat("Desfazer remoção de apps e ajustes (Ferramentas)", run.Entries.Select(e => e.ItemId).Distinct(), result);
+            RecordDebloat("Desfazer remoção de apps e ajustes (Ferramentas)", run.Entries.Select(e => e.ItemId).Concat(run.ProtectedItems).Distinct(), result);
             debloatPreview = null;
         }
         finally { debloatRunning = false; debloatCancellation.Dispose(); debloatCancellation = null; RefreshDebloatUndo(); RenderDebloatList(); UpdateToolsView(); }
@@ -1087,6 +1087,7 @@ public partial class MainWindow : Window
             : " Ponto de restauração não confirmado: " + result.RestorePoint.Reason + ".";
         debloatStatus = stage + ": " + DebloatService.Summary(result.Status, result.Items) + point + "\n"
             + string.Join("\n", result.Items.Select(i => $"{i.Title}: {Label(i.Status)}. {i.Detail}"))
+            + (result.Warning == null ? "" : "\n" + result.Warning)
             + "\nClique em Verificar este PC para ver o estado atual.";
     }
 
