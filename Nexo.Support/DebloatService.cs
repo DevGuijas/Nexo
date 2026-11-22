@@ -67,6 +67,8 @@ public sealed class DebloatUndoStore(string path)
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException or NotSupportedException) { return []; }
     }
     public DebloatRun? Latest() => Load().OrderByDescending(run => run.At).FirstOrDefault();
+    /// <summary>A aplicação mais recente que ainda pode ser desfeita: depois de desfazer a última, a anterior continua alcançável.</summary>
+    public DebloatRun? LatestUndoable() => Load().Where(run => run.CanUndo).OrderByDescending(run => run.At).FirstOrDefault();
     public void Save(DebloatRun run)
     {
         var runs = Load().Where(item => item.Id != run.Id).Append(run).OrderByDescending(item => item.At).Take(20).ToList();
@@ -99,6 +101,55 @@ public sealed class DebloatService
 
     public const string RestorePointDescription = "Nexo antes de remover apps e ajustes";
     public const string StoreGuidance = "Para reinstalar, abra a Microsoft Store e procure o app pelo nome.";
+    internal const string NoEvidence = "O Windows não devolveu resultado para este item; o estado atual é desconhecido.";
+
+    /// <summary>
+    /// O que o Desfazer vai mudar, item a item, para a confirmação. O arquivo do Desfazer fica na pasta do usuário: mostrar o
+    /// plano antes do UAC impede que uma entrada plantada (ex.: reativar o Recall) passe sem o usuário ver.
+    /// </summary>
+    public static IReadOnlyList<string> DescribeUndo(DebloatRun run)
+    {
+        var lines = new List<string>();
+        foreach (var group in run.Entries.GroupBy(e => e.ItemId))
+        {
+            var item = DebloatCatalog.Find(group.Key);
+            var title = item?.Title ?? group.Key;
+            foreach (var entry in group.Where(e => item == null || !DebloatScripts.ValidUndo(item, e)))
+                lines.Add($"{title}: estado anterior inválido para {entry.Target}; não será alterado.");
+            var valid = item == null ? Array.Empty<DebloatUndoEntry>() : group.Where(e => DebloatScripts.ValidUndo(item, e)).ToArray();
+            if (valid.Length == 0) continue;
+            switch (item!.Kind)
+            {
+                case DebloatKind.Service:
+                    foreach (var e in valid)
+                    {
+                        var parts = e.Previous.Split('|');
+                        lines.Add($"{e.Target}: volta ao início {StartLabel(parts[0])}" + (parts[1] == "True" ? " e é iniciado." : "."));
+                    }
+                    break;
+                case DebloatKind.ScheduledTask:
+                    foreach (var e in valid.Where(e => e.Previous != "Disabled"))
+                        lines.Add($"Tarefa {e.Target.Split('|', 2)[1]}: volta a ficar ativa.");
+                    break;
+                case DebloatKind.OptionalFeature:
+                    foreach (var e in valid.Where(e => e.Previous == "Enabled"))
+                        lines.Add($"{title}: o recurso volta a ser ativado (o Windows pede reinício).");
+                    break;
+                case DebloatKind.UserRegistry:
+                    lines.Add($"{title}: os valores do seu perfil voltam ao que eram.");
+                    break;
+                case DebloatKind.App:
+                    lines.Add($"{title}: não é reinstalado pelo Nexo (Microsoft Store).");
+                    break;
+            }
+        }
+        return lines;
+
+        static string StartLabel(string start) => start switch
+        {
+            "Automatic" => "automático", "AutomaticDelayed" => "automático (atraso)", "Manual" => "manual", _ => "desativado",
+        };
+    }
 
     public async Task<DebloatPreview> PreviewAsync(CancellationToken token)
     {
@@ -197,6 +248,9 @@ public sealed class DebloatService
             Log("Debloat", string.Join(",", chosen.Select(c => c.Item.Id)), "Started");
             token.ThrowIfCancellationRequested();
 
+            // Nada a aplicar (tudo já aplicado, ausente ou bloqueado): sem UAC e sem ponto de restauração à toa.
+            if (chosen.Count > 0)
+            {
             // 1) Ponto de restauração e itens elevados num único UAC. Sem ponto confirmado, nenhum item elevado roda.
             var elevated = chosen.Where(c => c.Item.Elevated).ToList();
             progress?.Report("Criando o ponto de restauração. O Windows pode pedir autorização de administrador.");
@@ -212,6 +266,8 @@ public sealed class DebloatService
                     continue;
                 }
                 var mine = results.Where(r => r.Id == item.Item.Id).ToArray();
+                // Sem linha do Windows para o item, o estado é desconhecido: não vira "não encontrado".
+                if (mine.Length == 0) { Add(item.Item, DebloatStatus.Failed, NoEvidence); continue; }
                 foreach (var r in mine.Where(r => r.Status is "Ok" or "Partial" && r.Previous.Length > 0))
                     run.Entries.Add(new(item.Item.Id, item.Item.Kind, r.Target, r.Previous));
                 Add(item.Item, Aggregate(mine.Select(r => r.Status)), Details(mine));
@@ -266,6 +322,7 @@ public sealed class DebloatService
                 }
             }
             if (run.Entries.Count > 0) undo.Save(run);
+            }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
@@ -315,6 +372,7 @@ public sealed class DebloatService
                     var item = DebloatCatalog.Find(group.Key)!;
                     if (results == null) { outcomes.Add(new(item.Id, item.Title, DebloatStatus.NotApplied, "Não restaurado: " + error)); continue; }
                     var mine = results.Where(r => r.Id == item.Id).ToArray();
+                    if (mine.Length == 0) { outcomes.Add(new(item.Id, item.Title, DebloatStatus.Failed, NoEvidence)); continue; }
                     outcomes.Add(new(item.Id, item.Title, Aggregate(mine.Select(r => r.Status)), Details(mine)));
                 }
             }

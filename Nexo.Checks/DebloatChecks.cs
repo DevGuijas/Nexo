@@ -31,6 +31,7 @@ internal static class DebloatChecks
         }
         finally { CultureInfo.CurrentCulture = previous; }
         await Store(check);
+        await Review(check);
         await DebloatScriptChecks.Run(check);
     }
 
@@ -229,7 +230,7 @@ internal static class DebloatChecks
         var already = new FakeSystem(Inventory(sysmainStart: "Disabled"));
         var alreadyService = new DebloatService(already, new DebloatUndoStore(Path.Combine(dir.Path, "already.json")), _ => { });
         var alreadyResult = await alreadyService.ApplyAsync(await alreadyService.PreviewAsync(CancellationToken.None), ["sysmain"], false, null, CancellationToken.None);
-        check(alreadyResult.Items.Single().Status == DebloatStatus.NotApplied && !already.Elevated.Single().Contains("SysMain"), "Debloat: item já aplicado não roda de novo (" + culture + ")");
+        check(alreadyResult.Items.Single().Status == DebloatStatus.NotApplied && already.Elevated.Count == 0 && alreadyResult.RestorePoint == null, "Debloat: item já aplicado não roda de novo nem pede UAC só para o ponto de restauração (" + culture + ")");
         var canceledSystem = new FakeSystem(Inventory());
         var canceledService = new DebloatService(canceledSystem, new DebloatUndoStore(Path.Combine(dir.Path, "canceled.json")), _ => { });
         var canceledPreview = await canceledService.PreviewAsync(CancellationToken.None);
@@ -331,6 +332,68 @@ internal static class DebloatChecks
         check(DebloatScripts.ParseRemoval("{\"Package\":\"A_1\",\"Status\":\"Ok\",\"Detail\":\"\"}")["A_1"].Status == "Ok"
             && DebloatScripts.ParseRemoval("[{\"Package\":\"A_1\",\"Status\":\"Estranho\"}]")["A_1"].Status == "Failed",
             "Debloat: a remoção só conta Ok com evidência explícita");
+    }
+
+    // Gate @qa: resultado elevado sem linha do item, Desfazer da aplicação anterior e o plano mostrado antes do UAC.
+    private static async Task Review(Action<bool, string> check)
+    {
+        using var dir = new TempDir();
+        const string Empty = "{\"success\":true,\"data\":{\"RestorePoint\":41,\"Items\":[]}}";
+        var silent = new FakeSystem(Inventory()) { ElevatedOutput = _ => Empty };
+        var silentStore = new DebloatUndoStore(Path.Combine(dir.Path, "silent.json"));
+        var silentService = new DebloatService(silent, silentStore, _ => { });
+        var silentResult = await silentService.ApplyAsync(await silentService.PreviewAsync(CancellationToken.None), ["sysmain"], false, null, CancellationToken.None);
+        check(silentResult.Items.Single().Status == DebloatStatus.Failed && silentResult.Items.Single().Detail == DebloatService.NoEvidence
+            && silentResult.Status == "Partial" && silentStore.Load().Count == 0,
+            "Debloat: resultado elevado sem a linha do item vira falha com estado desconhecido, não \"não encontrado\"");
+        var silentUndo = await new DebloatService(new FakeSystem(Inventory()) { ElevatedOutput = _ => "{\"success\":true,\"data\":{\"Items\":[]}}" },
+            new DebloatUndoStore(Path.Combine(dir.Path, "silent-undo.json")), _ => { })
+            .UndoAsync(new DebloatRun { At = DateTimeOffset.UtcNow, Entries = [new("sysmain", DebloatKind.Service, "SysMain", "Manual|False")] }, null, CancellationToken.None);
+        check(silentUndo.Items.Single().Status == DebloatStatus.Failed && silentUndo.Status == "Partial",
+            "Debloat: Desfazer sem a linha do item não conta como restaurado");
+
+        var store = new DebloatUndoStore(Path.Combine(dir.Path, "undo.json"));
+        var older = new DebloatRun { At = DateTimeOffset.UtcNow.AddHours(-2), Entries = [new("sysmain", DebloatKind.Service, "SysMain", "Manual|False")] };
+        var newer = new DebloatRun { At = DateTimeOffset.UtcNow, Entries = [new("bing-news", DebloatKind.App, "Microsoft.BingNews", "installed")], UndoneAt = DateTimeOffset.UtcNow };
+        store.Save(older); store.Save(newer);
+        check(store.Latest()!.Id == newer.Id && store.LatestUndoable()!.Id == older.Id,
+            "Debloat: depois de desfazer a última aplicação, a anterior continua podendo ser desfeita");
+        older.UndoneAt = DateTimeOffset.UtcNow; store.Save(older);
+        check(store.LatestUndoable() == null, "Debloat: sem aplicação pendente, não há o que desfazer");
+
+        var plan = DebloatService.DescribeUndo(new DebloatRun
+        {
+            Entries =
+            [
+                new("sysmain", DebloatKind.Service, "SysMain", "AutomaticDelayed|True"),
+                new("xbox-services", DebloatKind.Service, "XblGameSave", "Manual|False"),
+                new("ceip-tasks", DebloatKind.ScheduledTask, @"\Microsoft\Windows\Customer Experience Improvement Program\|Consolidator", "Ready"),
+                new("ceip-tasks", DebloatKind.ScheduledTask, @"\Microsoft\Windows\Autochk\|Proxy", "Disabled"),
+                new("recall", DebloatKind.OptionalFeature, "Recall", "Enabled"),
+                new("file-extensions", DebloatKind.UserRegistry, @"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced|HideFileExt", "DWord:1"),
+                new("bing-news", DebloatKind.App, "Microsoft.BingNews", "installed"),
+                new("sysmain", DebloatKind.Service, "WinDefend", "Disabled|False"),
+            ],
+        });
+        check(plan.Contains("SysMain: volta ao início automático (atraso) e é iniciado.") && plan.Contains("XblGameSave: volta ao início manual.")
+            && plan.Contains("Tarefa Consolidator: volta a ficar ativa.") && !plan.Any(l => l.Contains("Proxy"))
+            && plan.Any(l => l.StartsWith("Recall") && l.Contains("volta a ser ativado")) && plan.Any(l => l.StartsWith("Mostrar extensões"))
+            && plan.Any(l => l.StartsWith("Notícias") && l.Contains("Microsoft Store")) && plan.Any(l => l.Contains("WinDefend") && l.Contains("inválido")),
+            "Debloat: a confirmação do Desfazer lista o que vai mudar, inclusive o Recall, e aponta a entrada inválida");
+
+        var recall = DebloatCatalog.Find("recall")!; var ceip = DebloatCatalog.Find("ceip-tasks")!;
+        var keepOff = DebloatScripts.Undo([new("recall", DebloatKind.OptionalFeature, "Recall", "Disabled")]);
+        var turnOn = DebloatScripts.Undo([new("recall", DebloatKind.OptionalFeature, "Recall", "Enabled")]);
+        check(!keepOff.Contains("Enable-WindowsOptionalFeature") && turnOn.Contains("Enable-WindowsOptionalFeature -Online -FeatureName 'Recall' -NoRestart"),
+            "Debloat: o Desfazer só reativa o Recall que estava ativo, e sem reiniciar o Windows sozinho");
+        check(!DebloatScripts.ValidUndo(recall, new("recall", DebloatKind.OptionalFeature, "Microsoft-Hyper-V-All", "Enabled"))
+            && !DebloatScripts.ValidUndo(recall, new("recall", DebloatKind.OptionalFeature, "Recall", "Installed"))
+            && !DebloatScripts.ValidUndo(ceip, new("ceip-tasks", DebloatKind.ScheduledTask, @"\Microsoft\Windows\Customer Experience Improvement Program\|Consolidator", "Ready;Start-Process"))
+            && DebloatScripts.ValidUndo(ceip, new("ceip-tasks", DebloatKind.ScheduledTask, @"\Microsoft\Windows\Customer Experience Improvement Program\|Consolidator", "Ready")),
+            "Debloat: o Desfazer recusa recurso fora do catálogo e estado de tarefa ou recurso que o Nexo não grava");
+        var task = DebloatScripts.Undo([new("ceip-tasks", DebloatKind.ScheduledTask, @"\Microsoft\Windows\Customer Experience Improvement Program\|Consolidator", "Ready")]);
+        check(task.Contains(@"Get-ScheduledTask -TaskPath '\Microsoft\Windows\Customer Experience Improvement Program\' -TaskName 'Consolidator'"),
+            "Debloat: o Desfazer reativa a tarefa pelo caminho completo, não por um nome que outra pasta também tenha");
     }
 
     private sealed class TempDir : IDisposable

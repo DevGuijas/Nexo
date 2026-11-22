@@ -974,7 +974,7 @@ public partial class MainWindow : Window
         debloatListView = new StackPanel();
         panel.Children.Add(debloatListView);
         RenderDebloatList();
-        try { debloatCanUndo = DebloatUndo().Latest()?.CanUndo == true; } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { debloatCanUndo = false; }
+        try { debloatCanUndo = DebloatUndo().LatestUndoable() != null; } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { debloatCanUndo = false; }
         var actions = new WrapPanel();
         debloatScanView = Action("Verificar este PC", async (_, _) => await GuardAsync(ScanDebloat));
         debloatApplyView = Action("Aplicar selecionados", async (_, _) => await GuardAsync(ApplyDebloat), true);
@@ -1051,9 +1051,10 @@ public partial class MainWindow : Window
     private async Task UndoDebloat()
     {
         if (debloatRunning) return;
-        var run = DebloatUndo().Latest();
-        if (run is not { CanUndo: true }) { debloatCanUndo = false; debloatStatus = "Não há aplicação para desfazer."; UpdateToolsView(); return; }
-        if (MessageBox.Show(this, $"Desfazer a aplicação de {run.At.ToLocalTime():g}? Serviços, tarefas e ajustes do perfil voltam ao estado anterior; o Windows pode pedir autorização de administrador. Apps removidos não são reinstalados pelo Nexo.",
+        var run = DebloatUndo().LatestUndoable();
+        if (run == null) { debloatCanUndo = false; debloatStatus = "Não há aplicação para desfazer."; UpdateToolsView(); return; }
+        var plan = string.Join("\n", DebloatService.DescribeUndo(run).Select(line => "• " + line));
+        if (MessageBox.Show(this, $"Desfazer a aplicação de {run.At.ToLocalTime():g}? O Nexo vai mudar:\n\n{plan}\n\nO Windows pode pedir autorização de administrador. Continuar?",
                 "Desfazer remoção de apps e ajustes", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
         debloatCancellation = new CancellationTokenSource(); debloatRunning = true;
         debloatStatus = "Desfazendo..."; UpdateToolsView();
@@ -1070,7 +1071,7 @@ public partial class MainWindow : Window
 
     private void RefreshDebloatUndo()
     {
-        try { debloatCanUndo = DebloatUndo().Latest()?.CanUndo == true; }
+        try { debloatCanUndo = DebloatUndo().LatestUndoable() != null; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { debloatCanUndo = false; }
     }
 
