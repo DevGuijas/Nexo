@@ -30,6 +30,15 @@ if (args.Contains("--network-decision"))
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
+if (args.Contains("--raid-temperature"))
+{
+    var raidStore = new Store(Path.Combine(root, "raid"));
+    var raidAdmin = raidStore.Login("Guisbz", "1234");
+    raidAdmin.MustChangePassword = false; raidStore.Save();
+    await RaidTemperatureChecks.Run(raidStore, raidAdmin, Assert);
+    Console.WriteLine($"{count} verificações aprovadas.");
+    return;
+}
 if (args.Contains("--network-followup"))
 {
     var followUpStore = new Store(Path.Combine(root, "followup"));
@@ -273,6 +282,7 @@ try
     await PcValidationChecks.Run(store, admin, Assert);
     await PcRetestChecks.Run(store, admin, Assert);
     await NetworkFollowUpChecks.Run(store, admin, Assert);
+    await RaidTemperatureChecks.Run(store, admin, Assert);
     await NetworkRecoveryChecks.Run(Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
