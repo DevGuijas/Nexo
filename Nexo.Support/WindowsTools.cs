@@ -572,7 +572,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 return Ok(serviceRaw);
             case "get_recent_errors":
                 if (args.TryGetProperty("service", out _)) return await ReadServiceEvents(Value(args, "service"), token);
-                return Ok(await SupportService.Powershell("$log=& \"$env:WINDIR\\System32\\wevtutil.exe\" qe System '/q:*[System[(Level=2) and TimeCreated[timediff(@SystemTime) <= 86400000]]]' /c:12 /rd:true /f:text; if($LASTEXITCODE -ne 0){throw 'Não foi possível ler os eventos do sistema'}; $text=$log -join \"`n\"; if($text.Length -gt 7000){$text.Substring(0,7000)}else{$text}", token));
+                return Ok(await SupportService.Powershell(SystemErrorEventsScript, token));
             case "get_processes":
                 return Ok(ProcessesForModel(await SupportService.Powershell("ConvertTo-Json -Compress -InputObject @(Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 12 Name,Id,@{N='MemoryMB';E={[math]::Round($_.WorkingSet64/1MB)}},Responding)", token)));
             case "get_health_report":
@@ -617,9 +617,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 if (!Fresh(observedDevicesAt) || !observedDevices.TryGetValue(id, out var known)) throw new InvalidOperationException("Consulte o dispositivo nesta etapa antes de alterá-lo.");
                 ValidateDeviceTarget(name, known.Topic, known.Device);
                 if (!await Approve(new ChangeRequest("Ajustar dispositivo", DeviceChangeDetails(name, known.Device)), token)) return Denied();
-                var allowedClasses = name == "enable_camera" ? "'Camera','Image'" : "'Camera','Image','AudioEndpoint','MEDIA','Bluetooth','Printer','PrintQueue'";
-                var codeCheck = name == "restart_device" ? "" : "if([int]$d[0].ConfigManagerErrorCode -ne 22){throw 'Dispositivo não está mais desabilitado; faça novo diagnóstico'}; ";
-                var deviceScript = "$d=@(Get-CimInstance Win32_PnPEntity | Where-Object {$_.PNPDeviceID -eq " + Quote(id) + " -and $_.PNPClass -in " + allowedClasses + "}); if($d.Count -ne 1){throw 'Dispositivo permitido não encontrado ou ambíguo'}; " + codeCheck + "& \"$env:WINDIR\\System32\\pnputil.exe\" " + (name == "restart_device" ? "/restart-device " : "/enable-device ") + Quote(id) + " | Out-Null; if($LASTEXITCODE -notin 0,3010){throw 'Falha do PnPUtil'}; Start-Sleep -Seconds 2; $after=@(Get-CimInstance Win32_PnPEntity | Where-Object {$_.PNPDeviceID -eq " + Quote(id) + "}); if($after.Count -ne 1 -or [int]$after[0].ConfigManagerErrorCode -ne 0){throw 'Windows ainda reporta erro no dispositivo; confirme se precisa reiniciar'}; $after[0] | Select-Object Name,ConfigManagerErrorCode,Status";
+                var deviceScript = DeviceScript(name, id);
                 return await Elevated(deviceScript, token);
             case "allow_camera":
                 if (!await Approve(new ChangeRequest("Permitir câmera", "Permitir acesso à câmera neste perfil do Windows. Isso amplia a permissão de câmera para aplicativos; políticas da organização continuam valendo."), token)) return Denied();
@@ -1153,14 +1151,29 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
             catch (UnauthorizedAccessException) { }
         }
     }
+    // Script elevado de enable_camera, enable_device e restart_device; o pnputil.exe vem do System32 por GetSystemDirectory (#131).
+    internal static string DeviceScript(string name, string id)
+    {
+        var allowedClasses = name == "enable_camera" ? "'Camera','Image'" : "'Camera','Image','AudioEndpoint','MEDIA','Bluetooth','Printer','PrintQueue'";
+        var codeCheck = name == "restart_device" ? "" : "if([int]$d[0].ConfigManagerErrorCode -ne 22){throw 'Dispositivo não está mais desabilitado; faça novo diagnóstico'}; ";
+        var deviceScript = "$d=@(Get-CimInstance Win32_PnPEntity | Where-Object {$_.PNPDeviceID -eq " + Quote(id) + " -and $_.PNPClass -in " + allowedClasses + "}); if($d.Count -ne 1){throw 'Dispositivo permitido não encontrado ou ambíguo'}; " + codeCheck + "& " + PowerShellModulePath.SystemExecutable("pnputil.exe") + " " + (name == "restart_device" ? "/restart-device " : "/enable-device ") + Quote(id) + " | Out-Null; if($LASTEXITCODE -notin 0,3010){throw 'Falha do PnPUtil'}; Start-Sleep -Seconds 2; $after=@(Get-CimInstance Win32_PnPEntity | Where-Object {$_.PNPDeviceID -eq " + Quote(id) + "}); if($after.Count -ne 1 -or [int]$after[0].ConfigManagerErrorCode -ne 0){throw 'Windows ainda reporta erro no dispositivo; confirme se precisa reiniciar'}; $after[0] | Select-Object Name,ConfigManagerErrorCode,Status";
+        return deviceScript;
+    }
+
+    // Leitura sem elevação dos erros recentes do log System; o wevtutil.exe vem do System32 por GetSystemDirectory (#131).
+    internal static readonly string SystemErrorEventsScript = "$log=& " + PowerShellModulePath.SystemExecutable("wevtutil.exe") + " qe System '/q:*[System[(Level=2) and TimeCreated[timediff(@SystemTime) <= 86400000]]]' /c:12 /rd:true /f:text; if($LASTEXITCODE -ne 0){throw 'Não foi possível ler os eventos do sistema'}; $text=$log -join \"`n\"; if($text.Length -gt 7000){$text.Substring(0,7000)}else{$text}";
+
     internal static Process StartElevated(string script) => StartElevated(ElevatedArguments(script));
 
     /// <summary>Limite da linha de comando do Windows (CreateProcess), contando o caminho do powershell.exe.</summary>
     internal const int CommandLineLimit = 32767;
     internal static string ElevatedShell => Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe");
 
-    /// <summary>Argumentos do powershell.exe elevado: o script vai inteiro, em UTF-16 e Base64, em -EncodedCommand.</summary>
-    internal static string[] ElevatedArguments(string script) => ["-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(script))];
+    /// <summary>
+    /// Argumentos do powershell.exe elevado: o script vai inteiro, em UTF-16 e Base64, em -EncodedCommand, e começa
+    /// restringindo o PSModulePath aos módulos do Windows (#131).
+    /// </summary>
+    internal static string[] ElevatedArguments(string script) => ["-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(PowerShellModulePath.Prefix(script)))];
 
     /// <summary>Tamanho da linha de comando que o Windows recebe: caminho entre aspas e argumentos separados por espaço.</summary>
     internal static int CommandLength(IReadOnlyList<string> arguments) => ElevatedShell.Length + 2 + arguments.Sum(argument => argument.Length + 1);
@@ -1173,9 +1186,16 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
         if (length > CommandLineLimit) throw new InvalidOperationException($"O comando elevado tem {length} caracteres e passa do limite de {CommandLineLimit} da linha de comando do Windows. A operação não foi iniciada e nada foi alterado.");
     }
 
-    internal static Process StartElevated(IReadOnlyList<string> arguments)
+    // Antes do UAC: o comando cabe na linha de comando e o script começa com a fixação do PSModulePath (#131).
+    internal static void CheckElevatedLaunch(IReadOnlyList<string> arguments)
     {
         EnsureFits(arguments);
+        PowerShellModulePath.Require(arguments);
+    }
+
+    internal static Process StartElevated(IReadOnlyList<string> arguments)
+    {
+        CheckElevatedLaunch(arguments);
         var start = new ProcessStartInfo(ElevatedShell) { UseShellExecute = true, Verb = "runas", WindowStyle = ProcessWindowStyle.Hidden };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         return Process.Start(start) ?? throw new IOException("O Windows não iniciou a operação elevada.");

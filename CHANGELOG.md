@@ -11,6 +11,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 ### Antes de publicar
 
 - [x] **Prioridade alta:** o executor de rede elevado deixa de gravar resultados na pasta do usuário (`%LOCALAPPDATA%`) e passa a gravar só na pasta protegida em `%ProgramData%` (#95, PR #96, validado no PC com UAC real em 10/11/2026).
+- [x] **Prioridade alta:** os scripts elevados restringem o `PSModulePath` aos módulos do Windows antes de qualquer comando, e o lançamento elevado recusa o que não fizer isso; um módulo plantado na pasta Documentos do usuário não roda mais com admin (#131).
 - [x] Investigar com o log do Ollama ativo as etapas expiradas na 1ª chamada ao modelo, antes de mudar o limite de 3 minutos (#93, item 4). No PC, em 22/11/2026 (e7a69a2), com a RAM entre 80,1% e 81,6% e `OLLAMA_DEBUG=1`, nenhuma etapa expirou: a maior chamada levou 26,7 s (27,3 s com a RAM em 39%), todas com HTTP 200, e o modelo ficou na GPU. O limite de 3 minutos fica como está.
 - [ ] Validar as sete falhas controladas em VM Windows (#8). O cenário 5 de memória foi ensaiado com alerta, PID e resolução no [relatório da VM](docs/ENSAIO-VM-MEMORIA-2026-11-16.md); faltam os demais cenários e controles.
 - [ ] Validar em VM descartável a limpeza de temporários, a manutenção de disco e o cancelamento da otimização (#118); os testes automatizados usam pastas e comandos simulados.
@@ -60,6 +61,8 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 ### Recuperação e drivers
 
 - Ações elevadas supervisionadas: sem resultado no prazo, a operação fica em estado desconhecido, nunca como concluída.
+- Todo script elevado (rede, serviço, impressora, adaptador, dispositivo, driver, ponto de restauração, otimização e Office) começa restringindo o `PSModulePath` aos módulos do Windows (`$PSHOME\Modules`), e o lançamento elevado recusa antes do UAC o script que não fizer isso. Um módulo plantado em `Documentos\WindowsPowerShell\Modules` com o nome de um módulo do Windows (`DnsClient`, `NetAdapter`…) não é mais autocarregado com admin. As leituras sem elevação usam a mesma restrição, inclusive a conferência da assinatura do driver baixado (#131).
+- O lançamento elevado aceita só o formato que o Nexo gera (`-NoProfile -NonInteractive` e o script em `-EncodedCommand` ou `-Command`); abreviações como `-c` e `-enc`, `-File`, `-PSConsoleFile`, argumentos a mais e a falta de `-NoProfile` são recusados antes do UAC. O `netsh.exe` do executor de rede e o `pnputil.exe` das ações de dispositivo, que rodam com admin, e o `wevtutil.exe` e o módulo de diagnóstico da coleta de eventos deixam de vir de `$env:WINDIR`/`$env:SystemRoot`, que o usuário define em `HKCU\Environment`, e passam a vir do System32 por `[Environment]::SystemDirectory` e do `$PSHOME` (#131).
 - Ponto de restauração confirmado antes de instalar driver; sem ele, a instalação para.
 - Retomada salva quando o driver pede reinício.
 - Instalação NVIDIA preserva o áudio HDMI, reconhece GeForce sem o prefixo NVIDIA e confere a versão instalada com a oferta.

@@ -165,7 +165,7 @@ function Set-AutomaticIP {
     if ([guid]$current.InterfaceGuid -ne [guid]$before.Guid) { throw 'A identidade da interface mudou antes da transição DHCP.' }
     # Let Windows perform the complete static-to-DHCP transition. Removing the last
     # address first can leave Win32_NetworkAdapterConfiguration.IPEnabled false (84).
-    $output = @(& "$env:WINDIR\System32\netsh.exe" interface ipv4 set address "name=$interfaceIndex" source=dhcp store=persistent 2>&1)
+    $output = @(& ([IO.Path]::Combine([Environment]::SystemDirectory,'netsh.exe')) interface ipv4 set address "name=$interfaceIndex" source=dhcp store=persistent 2>&1)
     $code = $LASTEXITCODE
     $dhcpTransition.method='netsh interface ipv4 set address source=dhcp'; $dhcpTransition.exitCode=$code; $dhcpTransition.output=($output -join "`n")
     if ($code -ne 0) { throw ('O Windows recusou a mudança para IP automático (código '+$code+'): '+($output -join ' ')) }

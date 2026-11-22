@@ -17,9 +17,10 @@
 <ItemGroup><Compile Include="../Nexo.Support/PendingOperations.cs" Link="PendingOperations.cs"/><PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" Version="8.10.0" /></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/HealthSettings.cs" Link="HealthSettings.cs"/><Compile Include="../Nexo.Support/AppVersion.cs" Link="AppVersion.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/RestorePointProtection.cs" Link="RestorePointProtection.cs"/></ItemGroup>
+<ItemGroup><Compile Include="../Nexo.Support/PowerShellModulePath.cs" Link="PowerShellModulePath.cs"/><Compile Include="../Nexo.Support/OptimizationDiskExecutor.cs" Link="OptimizationDiskExecutor.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/ServiceEvents.cs" Link="ServiceEvents.cs"/><Compile Include="../Nexo.Support/TurnFacts.cs" Link="TurnFacts.cs"/><Compile Include="../Nexo.Support/QuickReplies.cs" Link="QuickReplies.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/NetworkRecovery.cs" Link="NetworkRecovery.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/NetworkDecisionChannel.cs" Link="NetworkDecisionChannel.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/EmbeddedCpuTemperature.cs" Link="EmbeddedCpuTemperature.cs"/><PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" /></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/BasicOptimizationService.cs" Link="BasicOptimizationService.cs"/><Compile Include="../Nexo.Support/SafeTemporaryFiles.cs" Link="SafeTemporaryFiles.cs"/></ItemGroup>
-<ItemGroup><Compile Include="../Nexo.Support/DebloatCatalog.cs" Link="DebloatCatalog.cs"/><Compile Include="../Nexo.Support/DebloatService.cs" Link="DebloatService.cs"/><Compile Include="../Nexo.Support/ProtectedFolderScript.cs" Link="ProtectedFolderScript.cs"/><Compile Include="../Nexo.Support/OptimizationDiskExecutor.cs" Link="OptimizationDiskExecutor.cs"/></ItemGroup></Project>
+<ItemGroup><Compile Include="../Nexo.Support/DebloatCatalog.cs" Link="DebloatCatalog.cs"/><Compile Include="../Nexo.Support/DebloatService.cs" Link="DebloatService.cs"/><Compile Include="../Nexo.Support/ProtectedFolderScript.cs" Link="ProtectedFolderScript.cs"/></ItemGroup></Project>

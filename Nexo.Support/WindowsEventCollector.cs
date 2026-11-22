@@ -187,7 +187,8 @@ public sealed class WindowsEventCollector
         => root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             && DateTimeOffset.TryParse(value.GetString(), out var time) ? time : null;
 
-    private const string ImportDiagnostics = "Import-Module ($env:SystemRoot+'\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Diagnostics\\Microsoft.PowerShell.Diagnostics.psd1') -ErrorAction Stop; ";
+    // Pelo $PSHOME (pasta do powershell.exe do System32), não por $env:SystemRoot, que o usuário define em HKCU\Environment (#131).
+    internal const string ImportDiagnostics = "Import-Module ([IO.Path]::Combine($PSHOME,'Modules','Microsoft.PowerShell.Diagnostics','Microsoft.PowerShell.Diagnostics.psd1')) -ErrorAction Stop; ";
 
     // Arguments are constrained in Collect and log is from a closed internal list.
     private static Task<string> QueryPage(EventPageQuery query, CancellationToken token)

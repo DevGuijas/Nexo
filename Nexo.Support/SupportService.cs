@@ -115,7 +115,7 @@ public sealed class SupportService(Store store)
     }
     // Texto exato que o powershell.exe recebe; exposto para as verificações executarem o mesmo invólucro.
     internal static string PowershellCommand(string script)
-        => "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; try { " + script + " } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }";
+        => PowerShellModulePath.Guard + " $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; try { " + script + " } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }";
     internal static Task<string> Powershell(string script, CancellationToken token, int timeoutSeconds = 45)
     {
         var wrapped = PowershellCommand(script);
