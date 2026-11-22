@@ -149,7 +149,7 @@ function Check($name,$action,$mode,$decision,$failure=$false,$variant='normal') 
     if($decision -ne 'timeout'){Set-Content -LiteralPath (Join-Path $operationDir 'decision.txt') -Value $decision}
     $appProcessId=$PID; $decisionPipeName='nexo-network-'+$operationId
     $requestJson=@{Action=$action;Index=10;ExpectedGuid=$(if($variant -eq 'identity-changed'){'00000000-0000-0000-0000-000000000099'}else{'00000000-0000-0000-0000-000000000001'});Mode=$mode;Servers=@('1.1.1.1');Address='10.0.0.20';Prefix=24;Gateway='10.0.0.1'} | ConvertTo-Json
-    $testSource=(Isolated $source).Replace('"$env:WINDIR\System32\netsh.exe"','Invoke-TestNetsh').Replace('.AddSeconds(60)', '.AddMilliseconds(500)').Replace('Start-Sleep -Milliseconds 500','Start-Sleep -Milliseconds 10').Replace('Start-Sleep -Seconds 3','Start-Sleep -Milliseconds 1').Replace('Connect(250)','Connect(10)')
+    $testSource=(Isolated $source).Replace("([IO.Path]::Combine([Environment]::SystemDirectory,'netsh.exe'))",'Invoke-TestNetsh').Replace('.AddSeconds(60)', '.AddMilliseconds(500)').Replace('Start-Sleep -Milliseconds 500','Start-Sleep -Milliseconds 10').Replace('Start-Sleep -Seconds 3','Start-Sleep -Milliseconds 1').Replace('Connect(250)','Connect(10)')
     if($variant -ne 'forged-keep') {
         # O simulador cobre os cmdlets de rede; o pipe real é exercitado pelas checagens C# e pelo caso forjado abaixo.
         $testSource="function Receive-Decision { Note-Phase; return '$(if($decision -eq 'keep'){'keep'}else{'rollback'})' }`n" + $testSource.Replace('function Receive-Decision {','function Receive-Decision-Real {')
@@ -216,7 +216,8 @@ function Recover($name,$action,$current,$expect,$variant='normal') {
     ($beforeJson -replace '10\.0\.0\.2','203.0.113.66') | Set-Content -LiteralPath (Join-Path $operationDir 'before.json')
     $requestAction=$(if($variant -eq 'request-mismatch'){if($action -eq 'set_dns'){'set_ipv4'}else{'set_dns'}}else{$action})
     $requestJson=@{Action=$requestAction;Index=10;ExpectedGuid=$guid.Trim('{}');Mode='';Servers=@();Address='';Prefix=0;Gateway=''} | ConvertTo-Json
-    $testSource=(Isolated $source).Replace('"$env:WINDIR\System32\netsh.exe"','Invoke-TestNetsh')
+    $testSource=(Isolated $source).Replace("([IO.Path]::Combine([Environment]::SystemDirectory,'netsh.exe'))",'Invoke-TestNetsh')
+    if($testSource.Contains('netsh.exe')){throw 'Native command was not isolated by the simulator'}
     & ([scriptblock]::Create($testSource))
     if(Test-Path (Join-Path $operationDir 'result.json')){throw ($name+': recovery ran the normal transaction')}
     # The elevated recovery writes its result only to the protected folder; the app copies it without elevation.
