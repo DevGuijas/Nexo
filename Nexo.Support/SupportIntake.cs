@@ -186,6 +186,31 @@ public static class SupportIntake
     public static bool AsksOnlyTemperature(string request) =>
         AsksTemperature(request) && !AsksDiskHealth(request) && IncidentTopics(request).Count == 0
         && !Regex.IsMatch(AgentProtocol.Normalize(request), OtherSymptom);
+    // Pedido de remover apps que vêm com o Windows (#127, validação no PC da 63f01f0: "remove os apps inúteis do windows pra mim").
+    // A remoção existe só no menu Ferramentas; o pedido marca o turno para que, se ele terminar sem resposta aceita, o Nexo
+    // indique o cartão. Não contam: reinstalar um app, um app que travou, vírus, arquivos temporários (Otimizar PC, #113) nem
+    // o cache, os dados ou os arquivos de um app, um relato no passado nem tirar da inicialização.
+    private const string AppTarget = @"(?:apps?|aplicativos?|programas?|softwares?|bloatwares?)";
+    private const string AppRemovalRequest = @"\b(?:debloat\w*|bloatwares?)\b"
+        + @"|\b(?:remov|desinstal|tir|limp|exclu|apag|delet|elimin|arranc)(?!(?:ei|uei|ou|eu|iu|i|eram|aram|iram)\b)\w*(?:-(?:lo|la|los|las))?\s+(?:(?!(?:arquivos?|pastas?|dados|cache|historico|fila|atalhos?|icones?|virus|malware|temporari\w*|prints?|fotos?|screenshots?|capturas?)\b)[\w-]+\s+){0,3}?" + AppTarget + @"\b"
+        + @"|\b" + AppTarget + @"\s+(?:\w+\s+)?(?:inute\w*|inutil|desnecessari\w*|que (?:eu )?nao (?:uso|usa)\b)";
+    public static bool AsksAppRemoval(string request)
+    {
+        var text = AgentProtocol.Normalize(request);
+        // O passado ("desinstalei o app e agora…", "removi um programa e o som parou") relata o que o usuário fez; tirar da
+        // inicialização ("tirar o programa da inicialização", "programas que abrem junto com o Windows") não é remover (@qa).
+        return Regex.IsMatch(text, AppRemovalRequest)
+            && !Regex.IsMatch(text, @"\b(?:reinstal\w*|trav\w*|virus|malware|de volta|inicializac\w*|startup|segundo plano|abre\w* junto|abrem junto|iniciam? junto)\b");
+    }
+    // Seguimento sobre o que remover (#127, repetição no PC da a6fcbea): depois da orientação do cartão, "ok, e o que eu
+    // removo?" recebeu do modelo a cópia, palavra por palavra, da resposta anterior. A pergunta é sobre quais itens escolher;
+    // ela só vale como seguimento numa conversa em que o Nexo já indicou o cartão (o AgentService confere isso).
+    public static bool AsksWhatToRemove(string request)
+    {
+        var text = AgentProtocol.Normalize(request);
+        return Regex.IsMatch(text, @"\b(?:o que|quais?|qual (?:app|aplicativo|programa)s?)\b(?: (?:eu|que|da|vale|a|pena|devo|posso|pode|ser|pra|para|os|as|dos|desses|deles|apps?|aplicativos?|programas?|itens?))* (?:remov|tir|desinstal|apag|exclu|desmarc|marc)\w*")
+            && !Regex.IsMatch(text, @"\b(?:reinstal\w*|de volta|inicializac\w*)\b");
+    }
     public static bool AsksDiskHealth(string request)
     {
         var text = AgentProtocol.Normalize(request);

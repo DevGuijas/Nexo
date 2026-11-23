@@ -52,6 +52,20 @@ public partial class MainWindow : Window
     private Button? optimizationCancelView;
     private readonly OfficeDeploymentService officeDeployment = new(new WindowsOfficeDeployment());
     private readonly object optimizationAuditSync = new();
+    private CancellationTokenSource? debloatCancellation;
+    private bool debloatRunning;
+    private bool debloatCanUndo;
+    private string debloatStatus = "Nenhuma verificação iniciada nesta sessão.";
+    private DebloatPreview? debloatPreview;
+    private readonly Dictionary<string, CheckBox> debloatChecks = new();
+    private CheckBox? debloatRiskView;
+    private StackPanel? debloatListView;
+    private TextBlock? debloatProgressView;
+    private Button? debloatScanView;
+    private Button? debloatApplyView;
+    private Button? debloatUndoView;
+    private Button? debloatCancelView;
+    private readonly object debloatAuditSync = new();
     public MainWindow(Store store)
     {
         InitializeComponent(); Title = "Nexo " + AppVersion.Current + " • Suporte inteligente"; this.store = store; support = new SupportService(store);
@@ -84,7 +98,7 @@ public partial class MainWindow : Window
                 pending.Close();
                 return;
             }
-            if (officeRunning || optimizationRunning)
+            if (officeRunning || optimizationRunning || debloatRunning)
             {
                 e.Cancel = true;
                 exitRequested = false;
@@ -907,6 +921,13 @@ public partial class MainWindow : Window
         if (officeCancelView != null) officeCancelView.IsEnabled = officeRunning;
         if (optimizationStartView != null) optimizationStartView.IsEnabled = !optimizationRunning;
         if (optimizationCancelView != null) optimizationCancelView.IsEnabled = optimizationRunning;
+        if (debloatProgressView != null) debloatProgressView.Text = debloatStatus;
+        if (debloatScanView != null) debloatScanView.IsEnabled = !debloatRunning;
+        if (debloatApplyView != null) debloatApplyView.IsEnabled = !debloatRunning && debloatPreview != null && debloatChecks.Count > 0;
+        if (debloatUndoView != null) debloatUndoView.IsEnabled = !debloatRunning && debloatCanUndo;
+        if (debloatCancelView != null) debloatCancelView.IsEnabled = debloatRunning;
+        foreach (var check in debloatChecks.Values) check.IsEnabled = !debloatRunning && check.Tag is not DebloatAvailability.AlreadyApplied;
+        if (debloatRiskView != null) debloatRiskView.IsEnabled = !debloatRunning;
     }
     private void Tools()
     {
@@ -980,7 +1001,147 @@ public partial class MainWindow : Window
         optimizePanel.Children.Add(optimizeActions);
         optimizePanel.Children.Add(Text("Se a etapa de disco já começou, o Nexo aguarda seu término para informar o resultado. A manutenção executada não é revertida pelo cancelamento.", 11, "Subtle"));
         PageContent.Children.Add(Card(optimizePanel));
+        PageContent.Children.Add(Card(DebloatCard()));
         UpdateToolsView();
+    }
+
+    // Remoção de apps e ajustes (#127): só pelo menu, nunca pelo modelo. Verificar não altera nada; Aplicar pede confirmação.
+    private DebloatUndoStore DebloatUndo() => new(Path.Combine(store.Root, "debloat-undo.json"));
+    private DebloatService DebloatServiceFor() => new(new WindowsDebloatSystem(), DebloatUndo(), item =>
+    {
+        lock (debloatAuditSync) File.AppendAllText(Path.Combine(store.Root, "debloat-audit.ndjson"), JsonSerializer.Serialize(item) + Environment.NewLine);
+    });
+
+    private StackPanel DebloatCard()
+    {
+        var panel = new StackPanel();
+        panel.Children.Add(SectionHeading("shield", "Apps pré-instalados e ajustes do Windows"));
+        panel.Children.Add(Text("Remove do seu usuário apps que vêm com o Windows e aplica ajustes de privacidade e de aparência. Primeiro o Nexo verifica o que existe neste PC e mostra cada item; nada muda antes de você clicar em Aplicar e confirmar.", 13, "Secondary"));
+        panel.Children.Add(Text(DebloatPresentation.CardNotice, 12, "Secondary"));
+        panel.Children.Add(Text(DebloatCatalog.Credit, 11, "Subtle"));
+        debloatProgressView = Text(debloatStatus, 12, "Secondary"); debloatProgressView.Margin = new Thickness(0, 12, 0, 10);
+        panel.Children.Add(debloatProgressView);
+        debloatListView = new StackPanel();
+        panel.Children.Add(debloatListView);
+        RenderDebloatList();
+        try { debloatCanUndo = DebloatServiceFor().UndoCandidate() != null; } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { debloatCanUndo = false; }
+        var actions = new WrapPanel();
+        debloatScanView = Action("Verificar este PC", async (_, _) => await GuardAsync(ScanDebloat));
+        debloatApplyView = Action("Aplicar selecionados", async (_, _) => await GuardAsync(ApplyDebloat), true);
+        debloatUndoView = Action("Desfazer a última aplicação", async (_, _) => await GuardAsync(UndoDebloat));
+        debloatCancelView = Action("Cancelar próximas etapas", (_, _) => debloatCancellation?.Cancel());
+        actions.Children.Add(debloatScanView); actions.Children.Add(debloatApplyView); actions.Children.Add(debloatUndoView); actions.Children.Add(debloatCancelView);
+        panel.Children.Add(actions);
+        panel.Children.Add(Text("Uma etapa já iniciada (o ponto de restauração com os serviços, ou a remoção dos apps) termina antes de o cancelamento valer.", 11, "Subtle"));
+        return panel;
+    }
+
+    private void RenderDebloatList()
+    {
+        if (debloatListView == null) return;
+        debloatListView.Children.Clear(); debloatChecks.Clear(); debloatRiskView = null;
+        if (debloatPreview == null) return;
+        if (debloatPreview.Items.Count == 0) { debloatListView.Children.Add(Text("Nenhum item do catálogo foi encontrado neste PC.", 12, "Secondary")); return; }
+        foreach (var group in debloatPreview.Items.GroupBy(i => i.Item.Category))
+        {
+            var heading = Text(group.Key, 13); heading.FontWeight = FontWeights.SemiBold; heading.Margin = new Thickness(0, 10, 0, 4);
+            debloatListView.Children.Add(heading);
+            foreach (var entry in group)
+            {
+                var label = entry.Item.Title + (entry.Availability == DebloatAvailability.AlreadyApplied ? " (já aplicado)" : "");
+                var check = new CheckBox { Content = label, IsChecked = entry.Item.Default && entry.Availability == DebloatAvailability.Available, Tag = entry.Availability, Margin = new Thickness(0, 4, 0, 0) };
+                AutomationProperties.SetName(check, label);
+                debloatChecks[entry.Item.Id] = check;
+                debloatListView.Children.Add(check);
+                if (entry.Detail.Length > 0) { var detail = Text(entry.Detail, 11, "Subtle"); detail.Margin = new Thickness(22, 0, 0, 2); debloatListView.Children.Add(detail); }
+                if (entry.Availability == DebloatAvailability.NeedsConfirmation)
+                {
+                    debloatRiskView = new CheckBox { Content = "Confirmo que o login do Minecraft e do Game Pass vai parar de funcionar neste usuário.", Margin = new Thickness(22, 4, 0, 4) };
+                    debloatListView.Children.Add(debloatRiskView);
+                }
+            }
+        }
+    }
+
+    private async Task ScanDebloat()
+    {
+        if (debloatRunning) return;
+        debloatRunning = true; debloatStatus = "Verificando apps, serviços e ajustes deste PC. Nada é alterado nesta etapa."; UpdateToolsView();
+        try
+        {
+            debloatPreview = await DebloatServiceFor().PreviewAsync(CancellationToken.None);
+            var windows = DebloatCatalog.IsWindows11(debloatPreview.Build) ? "Windows 11" : "Windows 10";
+            debloatStatus = $"{windows} (build {debloatPreview.Build}): {debloatPreview.Items.Count} item(ns) encontrado(s). Revise a seleção e clique em Aplicar.";
+        }
+        finally { debloatRunning = false; RenderDebloatList(); UpdateToolsView(); }
+    }
+
+    private async Task ApplyDebloat()
+    {
+        if (debloatRunning || debloatPreview == null) return;
+        var selected = debloatChecks.Where(c => c.Value.IsChecked == true).Select(c => c.Key).ToArray();
+        if (selected.Length == 0) { debloatStatus = "Nenhum item selecionado."; UpdateToolsView(); return; }
+        var question = DebloatPresentation.ApplyQuestion(debloatPreview.Items.Where(i => selected.Contains(i.Item.Id)).Select(i => i.Item.Title));
+        if (MessageBox.Show(this, question, "Confirmar remoção de apps e ajustes", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        debloatCancellation = new CancellationTokenSource(); debloatRunning = true;
+        debloatStatus = "Iniciando..."; UpdateToolsView();
+        var gate = new DebloatProgressGate();
+        try
+        {
+            var progress = new Progress<string>(gate.Guard(message => { debloatStatus = message; UpdateToolsView(); }));
+            var result = await DebloatServiceFor().ApplyAsync(debloatPreview, selected, debloatRiskView?.IsChecked == true, progress, debloatCancellation.Token);
+            gate.Finish();
+            debloatStatus = DebloatPresentation.Result(result, undo: false);
+            RecordDebloat("Remover apps e ajustes (Ferramentas)", selected, result);
+            debloatPreview = null;
+        }
+        finally { gate.Finish(); debloatRunning = false; debloatCancellation.Dispose(); debloatCancellation = null; RefreshDebloatUndo(); RenderDebloatList(); UpdateToolsView(); }
+    }
+
+    private async Task UndoDebloat()
+    {
+        if (debloatRunning) return;
+        var run = DebloatServiceFor().UndoCandidate();
+        if (run == null) { debloatCanUndo = false; debloatStatus = "Não há aplicação para desfazer."; UpdateToolsView(); return; }
+        var plan = string.Join("\n", DebloatServiceFor().DescribeUndo(run).Select(line => "• " + line));
+        if (MessageBox.Show(this, $"Desfazer a aplicação de {run.At.ToLocalTime():g}? O Nexo vai mudar:\n\n{plan}\n\nO Windows pode pedir autorização de administrador. Continuar?",
+                "Desfazer remoção de apps e ajustes", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        debloatCancellation = new CancellationTokenSource(); debloatRunning = true;
+        debloatStatus = "Desfazendo..."; UpdateToolsView();
+        var gate = new DebloatProgressGate();
+        try
+        {
+            var progress = new Progress<string>(gate.Guard(message => { debloatStatus = message; UpdateToolsView(); }));
+            var result = await DebloatServiceFor().UndoAsync(run, progress, debloatCancellation.Token);
+            gate.Finish();
+            debloatStatus = DebloatPresentation.Result(result, undo: true);
+            RecordDebloat("Desfazer remoção de apps e ajustes (Ferramentas)", run.Entries.Select(e => e.ItemId).Concat(run.ProtectedItems).Distinct(), result);
+            debloatPreview = null;
+        }
+        finally { gate.Finish(); debloatRunning = false; debloatCancellation.Dispose(); debloatCancellation = null; RefreshDebloatUndo(); RenderDebloatList(); UpdateToolsView(); }
+    }
+
+    private void RefreshDebloatUndo()
+    {
+        try { debloatCanUndo = DebloatServiceFor().UndoCandidate() != null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { debloatCanUndo = false; }
+    }
+
+    private void RecordDebloat(string action, IEnumerable<string> ids, DebloatResult result)
+    {
+        var summary = DebloatService.Summary(result.Status, result.Items);
+        try { store.Log(user, action + ": " + summary); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        if (healthStore == null) return;
+        try
+        {
+            healthStore.SaveIntervention(new InterventionRecord
+            {
+                Action = action, Target = string.Join(", ", ids), Authorized = true, Risk = "médio",
+                State = result.Status switch { "Completed" => "concluída", "Partial" => "parcial", "Canceled" => "cancelada", _ => "incerta" },
+                After = JsonSerializer.Serialize(result.Items), Summary = summary, RecoveryPointSequence = result.RestorePoint?.SequenceNumber,
+            });
+        }
+        catch (OperationalStoreException ex) { debloatStatus += "\nO registro no histórico operacional falhou: " + ex.Message; }
     }
     // Aparência (#143): o tema muda na hora e a preferência fica no data.json deste perfil.
     private Border AppearanceCard()

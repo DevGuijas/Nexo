@@ -14,6 +14,8 @@ public interface IAgentTools
 public sealed class AgentService(Store store, IAgentTools tools, HttpClient? client = null, Func<int, CancellationToken, Task>? workflowDelay = null, Func<DateTime>? utcNow = null)
 {
     private DateTime UtcNow() => (utcNow ?? (() => DateTime.UtcNow))();
+    // Build do Windows para a pergunta sobre um item do catálogo do debloat (#127): o catálogo muda entre o 10 e o 11.
+    public Func<int> WindowsBuild { get; init; } = () => Environment.OSVersion.Version.Build;
     private static readonly HttpClient shared = new() { Timeout = TimeSpan.FromMinutes(3) };
     internal const string NextStep = "Se o problema continuar, me diga o que ainda falha e desde quando, para direcionarmos a próxima verificação.";
     private const string ObservationPending = "O acompanhamento solicitado ainda não ocorreu. Consulte o alvo e chame wait_for_reconnect; se faltar informação para distinguir os alvos, use ask_user com missing_information ou ambiguous_target. Não afirme funcionamento baseado apenas no estado PnP.";
@@ -133,6 +135,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         de espaço, oriente revisar o uso do disco; o Nexo não apaga arquivos e não lista arquivos nem pastas:
         não ofereça identificar os maiores arquivos. Indique Configurações > Sistema > Armazenamento do Windows.
         O Nexo não verifica segurança: não sugira que um processo seja malicioso, vírus ou malware; fale do consumo medido.
+        O Nexo não remove nem desinstala apps pelo chat: não ofereça remover nem pergunte quais apps remover. Os apps que vêm com o Windows saem pelo cartão “Apps pré-instalados e ajustes do Windows”, no menu Ferramentas, onde “Verificar este PC” mostra o que existe no PC, com os itens sugeridos já marcados; explique isso com suas palavras, sem repetir uma resposta anterior.
         Não descreva o que um programa ou processo faz sem que uma ferramenta tenha trazido essa informação; fale só do nome e do consumo medido.
         Para uma pergunta sobre uma letra de unidade ("o que é o D:?"), consulte get_hardware_inventory(storage) antes de responder.
         Um alerta de memória "Estável em patamar alto" é informativo: não o apresente como causa da lentidão.
@@ -221,6 +224,14 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         evidence.AsksTemperature = SupportIntake.AsksTemperature(userRequest);
         evidence.AsksDiskHealth = SupportIntake.AsksDiskHealth(userRequest);
         evidence.AsksOnlyTemperature = SupportIntake.AsksOnlyTemperature(userRequest);
+        // Pergunta sobre remover um item conhecido ("e o Xbox, posso tirar?", PC 3a88880): o texto do Nexo, com o aviso do item.
+        var itemAnswer = AppRemovalQuestion.Answer(userRequest, WindowsBuild());
+        var appRemovalRequest = SupportIntake.AsksAppRemoval(userRequest) || itemAnswer != null;
+        // Seguimento sobre o que remover numa conversa em que o Nexo já indicou o cartão (#127, repetição no PC da a6fcbea).
+        var appRemovalFollowUp = SupportIntake.AsksWhatToRemove(userRequest)
+            && evidence.PriorAnswers.Any(prior => AgentProtocol.CitesAppRemovalPath(AgentProtocol.Normalize(prior)));
+        // A resposta do modelo que repete a última resposta do assistente é recusada (#127, PC a6fcbea: cópia palavra por palavra).
+        string? RepeatsPrior(string text) => AgentProtocol.RepeatsPriorAnswer(text, evidence.PriorAnswers.LastOrDefault(), userRequest) ? AgentProtocol.RepeatedAnswerReason : null;
         // Tópicos do incidente: os da última mensagem do usuário que tinha tópico. Uma continuação genérica do sistema
         // ("continua lento", "ainda tá demorando") soma o sistema aos tópicos anteriores, em vez de trocá-los.
         var incidentTopics = SupportIntake.ConversationTopics(conversation.Entries.Where(e => e.Role == "user").Reverse().Select(e => e.Text));
@@ -261,6 +272,11 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             }
             return final;
         }
+        // Pedido só de remover apps, sem outro sintoma (#127, repetição no PC da fcca5cd): o modelo respondeu "indique
+        // **Ferramentas > Apps pré-instalados** e ajustes do Windows", com o verbo da instrução e o nome do cartão cortado. Não há
+        // o que investigar nem ferramenta que remova apps: a resposta é o texto do Nexo, sem chamar o modelo.
+        if (appRemovalRequest && SupportIntake.InitialTopic(userRequest) == null && SupportIntake.IncidentTopics(userRequest).Count == 0)
+            return Finish(itemAnswer ?? AgentProtocol.AppRemovalGuidance);
         var initialObserved = false;
         var initialTopic = SupportIntake.InitialTopic(userRequest);
         if (initialTopic != null)
@@ -363,14 +379,14 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 // Tool calls are for observing/acting, not a mandatory format for conversation.
                 var rejection = observationOnly && !reconnectAttempted ? ObservationPending
                     : AgentProtocol.Validate(content.Contains('?') ? "ask_user" : "finish_support", JsonSerializer.SerializeToElement(new { reason = "manual_test" }), content, readOnly)
-                      ?? evidence.ValidateStatement(content, userConfirmedFunction);
+                      ?? RepeatsPrior(content) ?? evidence.ValidateStatement(content, userConfirmedFunction);
                 if (rejection == null) return Finish(ModelAnswer(content));
                 // A narrated intention is not a completed operation. This is controller feedback,
                 // never a fabricated user message or consent to change Windows settings.
                 if (!string.IsNullOrWhiteSpace(content)) history.Add(new AgentMessage { role = "assistant", content = content });
                 Rejected("texto sem ferramenta", rejection);
-                if (StopUnchanged(rejection, content)) return Finish(await GaveUp("A IA repetiu a mesma resposta recusada. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento.", rejection));
-                if (++protocolRetries > 3) return Finish(await GaveUp("A IA não conseguiu selecionar a próxima etapa. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento.", rejection));
+                if (StopUnchanged(rejection, content)) return Finish(await GaveUp("A IA repetiu a mesma resposta recusada. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento.", rejection, content));
+                if (++protocolRetries > 3) return Finish(await GaveUp("A IA não conseguiu selecionar a próxima etapa. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento.", rejection, content));
                 // O motivo da recusa vai junto (#83): sem ele, o modelo reescrevia a mesma frase até esgotar as tentativas.
                 control = "Controle de execução: sua resposta não chamou uma ferramenta e não foi aceita como conclusão. Motivo: " + Guidance(rejection, content) + " Se anunciou um teste ou consulta, execute-o agora. Para concluir chame finish_support com message; se não conseguir emitir tool_calls para esse controle, escreva exatamente finish_support seguido de um objeto JSON com message. Para informação indispensável ou teste manual use ask_user com message e reason. Não peça Ok nem autorização no chat. Nenhuma mudança foi autorizada por esta instrução; o executor mantém a confirmação do usuário.";
                 progress.Report("Continuando o diagnóstico e selecionando a próxima etapa…");
@@ -443,13 +459,13 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     var error = calls.Value.GetArrayLength() != 1 ? "Conclua somente após receber os resultados das ferramentas; envie uma chamada de controle por vez." : AgentProtocol.Validate(name, arguments, text, readOnly);
                     if (error == null && observationOnly && !reconnectAttempted && (name == "finish_support" || !arguments.TryGetProperty("reason", out var questionReason) || questionReason.GetString() == "manual_test"))
                         error = ObservationPending;
-                    if (error == null) error = evidence.ValidateStatement(text, userConfirmedFunction);
+                    if (error == null) error = RepeatsPrior(text) ?? evidence.ValidateStatement(text, userConfirmedFunction);
                     result = JsonSerializer.Serialize(new { success = error == null, error });
                     history.Add(new AgentMessage { role = "tool", tool_name = name, content = result });
                     if (error == null) return Finish(ModelAnswer(text));
                     Rejected(name, error);
-                    if (StopUnchanged(error, text)) return Finish(await GaveUp("A IA repetiu a mesma resposta recusada. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento.", error));
-                    if (++protocolRetries > 3) return Finish(await GaveUp("A IA não conseguiu selecionar a próxima etapa. Interrompi a tentativa; os resultados acima podem orientar a continuação do atendimento.", error));
+                    if (StopUnchanged(error, text)) return Finish(await GaveUp("A IA repetiu a mesma resposta recusada. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento.", error, text));
+                    if (++protocolRetries > 3) return Finish(await GaveUp("A IA não conseguiu selecionar a próxima etapa. Interrompi a tentativa; os resultados acima podem orientar a continuação do atendimento.", error, text));
                     control = "Controle de execução: " + Guidance(error, text);
                     continue;
                 }
@@ -652,9 +668,34 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         // começou solta ("Se a lentidão continuar…"): o modelo tirou a frase recusada e não pôs nada no lugar. Depois de uma
         // recusa da resposta neste turno, a resposta pobre (sem fato do turno, curta ou começando por uma condição solta) vem
         // depois do que as consultas mostraram.
-        string ModelAnswer(string text) => refusedMutations.Count > 0 ? evidence.Report("")
-            : refusals.Count > 0 && evidence.HasFindings && evidence.IsThinAnswer(text) ? evidence.Report(text.Trim())
-            : evidence.WithSensorFigures(evidence.WithStorageGuidance(evidence.WithMemoryFigures(text)));
+        // Pedido misto de remover apps ("meu pc ta lento, remove os apps inúteis", repetição no PC da fcca5cd): o turno investigou a
+        // lentidão e terminou com o texto do modelo, sem o caminho do cartão. A resposta aceita que não cita o cartão o ganha; vale
+        // também quando a oferta de remover foi recusada neste turno, porque o motivo diz que o Nexo acrescenta a orientação.
+        // Na repetição da e7c8b32, depois da recusa a resposta aceita foi só o caminho do cartão, sem a lentidão consultada: o
+        // caminho copiado não conta como conteúdo, e a resposta sem mais nada vem depois do que as consultas mostraram.
+        string ModelAnswer(string text)
+        {
+            var removal = appRemovalRequest || refusals.ContainsKey(AgentProtocol.AppRemovalReason);
+            var core = removal ? AgentProtocol.WithoutAppRemovalPath(text) : text;
+            // @qa: o modelo pode copiar o caminho do cartão já na 1ª resposta, sem recusa no turno; o caminho tirado conta como
+            // resposta pobre também nesse caso, para o que as consultas mostraram não sumir.
+            var stripped = removal && core.Trim().Length < text.Trim().Length;
+            var answer = refusedMutations.Count > 0 ? evidence.Report("")
+                : (refusals.Count > 0 || stripped) && evidence.HasFindings && evidence.IsThinAnswer(core) ? evidence.Report(core.Trim())
+                : evidence.WithSensorFigures(evidence.WithStorageGuidance(evidence.WithMemoryFigures(text)));
+            return removal ? InvestigationEvidence.WithAppRemovalGuidance(answer) : answer;
+        }
+        // O resto da resposta recusada pela oferta de remover só vira o fim se passar pelas mesmas travas da resposta aceita.
+        string? SalvagedAnswer(string text)
+        {
+            if (observationOnly && !reconnectAttempted) return null;
+            var rest = AgentProtocol.WithoutAppRemovalOffer(text);
+            if (rest.Length == 0 || evidence.IsThinAnswer(rest)) return null;
+            var name = rest.Contains('?') ? "ask_user" : "finish_support";
+            if ((AgentProtocol.Validate(name, JsonSerializer.SerializeToElement(new { reason = "manual_test" }), rest, readOnly)
+                ?? RepeatsPrior(rest) ?? evidence.ValidateStatement(rest, userConfirmedFunction)) != null) return null;
+            return ModelAnswer(rest);
+        }
         // Cada recusa do controle fica na auditoria com o motivo (#83): na validação no PC, o "[error]" não dizia qual regra recusou.
         // O motivo é sempre um texto fixo dos validadores; o texto do modelo não entra no registro.
         void Rejected(string what, string reason) => store.Log(actor, "Controle de execução recusou " + what + ": " + reason);
@@ -667,12 +708,24 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         // A recusa sobre um processo (função, malware, encerrado, patamar estável) também leva ao relatório de saúde (22/11, passo
         // 2.3: "o NexoMemTeste é vírus?" não tinha consulta no turno). Se o usuário perguntou sobre vírus, o fim diz que o Nexo
         // não tem verificação de segurança e aponta a Segurança do Windows.
-        async Task<string> GaveUp(string withoutEvidence, string? reason = null)
+        async Task<string> GaveUp(string withoutEvidence, string? reason = null, string? lastText = null)
         {
+            // Recusas só pela oferta de remover (PC f6a898c): o fim é a última resposta do modelo sem as frases recusadas, mais a
+            // linha do cartão (ModelAnswer). Resto pobre, vazio ou recusado por outra trava volta ao fim de antes. O seguimento "o
+            // que eu removo?" continua com a explicação curta.
+            if (reason == AgentProtocol.AppRemovalReason && lastText != null && !(appRemovalFollowUp && !appRemovalRequest)
+                && SalvagedAnswer(lastText) is { } salvaged) return salvaged;
             if (!evidence.HasFindings && (incidentTopics.Contains("system") || reason is InvestigationEvidence.ProcessPurposeReason or InvestigationEvidence.MalwareReason
                 or InvestigationEvidence.StaleProcessReason or InvestigationEvidence.StablePlateauReason))
                 await ControllerCall("Relatório de saúde antes de encerrar", "get_health_report", JsonSerializer.SerializeToElement(new { }));
-            var end = evidence.HasFindings ? NextStep : withoutEvidence;
+            // Pedido de remover apps ou recusa por oferecer remover (#127): o fim indica o cartão de Ferramentas, e não "A IA repetiu…".
+            // Com achados de consultas (pedido que também traz um sintoma, @qa), o próximo passo do sintoma continua antes do caminho.
+            // No seguimento "o que eu removo?" depois do cartão (PC a6fcbea), o fim é a explicação curta, e não o texto pronto de novo.
+            var end = appRemovalFollowUp && !appRemovalRequest
+                ? (evidence.HasFindings ? NextStep + "\n" + AgentProtocol.AppRemovalFollowUp : AgentProtocol.AppRemovalFollowUp)
+                : reason == AgentProtocol.AppRemovalReason || appRemovalRequest
+                ? (evidence.HasFindings ? NextStep + "\n" + AgentProtocol.AppRemovalLine : AgentProtocol.AppRemovalGuidance)
+                : evidence.HasFindings ? NextStep : withoutEvidence;
             return evidence.Report(evidence.UserRaisedSecurity ? end + "\n" + InvestigationEvidence.SecurityGuidance : end);
         }
         // Toda resposta final do turno passa por aqui e termina com a linha de fatos (#73, opção A).

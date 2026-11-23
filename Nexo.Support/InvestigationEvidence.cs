@@ -303,6 +303,7 @@ public sealed class InvestigationEvidence
             MalwareReason => SuggestsMalware,
             TemperatureSourceReason => SendsToTaskManagerForTemperature,
             AgentProtocol.PendingActionReason => part => AgentProtocol.PendingActionPhrase(part) != null,
+            AgentProtocol.AppRemovalReason => AgentProtocol.AppRemovalPassage,
             _ => null
         };
         var parts = Regex.Split(message, @"(?<=[!?;\n])|(?<=\.)(?=\s|$)").Select(part => part.Trim()).Where(part => part.Length > 0).ToArray();
@@ -837,6 +838,12 @@ public sealed class InvestigationEvidence
         if (StoragePath.IsMatch(text)) return answer;
         return BeforeQuestions(answer, StorageGuidance);
     }
+
+    // Pedido de remover apps (#127): a resposta aceita que não leva ao cartão de Ferramentas ganha o caminho, antes da oferta ou
+    // da pergunta final, como o caminho do Armazenamento.
+    public static string WithAppRemovalGuidance(string answer) =>
+        string.IsNullOrWhiteSpace(answer) || AgentProtocol.CitesAppRemovalPath(AgentProtocol.Normalize(answer)) ? answer
+            : BeforeQuestions(answer, AgentProtocol.AppRemovalLine);
 
     // A linha do Nexo entra no fim; uma pergunta ao usuário continua sendo a última coisa da resposta.
     // Na repetição no PC da 5b48461 (22/11, #135), a linha do RAID entrou entre "Se quiser, posso ajudar a verificar…" e

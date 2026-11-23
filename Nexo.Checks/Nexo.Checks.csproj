@@ -25,4 +25,5 @@
 <ItemGroup><Compile Include="../Nexo.Support/NetworkDecisionChannel.cs" Link="NetworkDecisionChannel.cs"/></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/EmbeddedCpuTemperature.cs" Link="EmbeddedCpuTemperature.cs"/><PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" /></ItemGroup>
 <ItemGroup><Compile Include="../Nexo.Support/LiveMetrics.cs" Link="LiveMetrics.cs"/></ItemGroup>
-<ItemGroup><Compile Include="../Nexo.Support/BasicOptimizationService.cs" Link="BasicOptimizationService.cs"/><Compile Include="../Nexo.Support/SafeTemporaryFiles.cs" Link="SafeTemporaryFiles.cs"/></ItemGroup></Project>
+<ItemGroup><Compile Include="../Nexo.Support/BasicOptimizationService.cs" Link="BasicOptimizationService.cs"/><Compile Include="../Nexo.Support/SafeTemporaryFiles.cs" Link="SafeTemporaryFiles.cs"/></ItemGroup>
+<ItemGroup><Compile Include="../Nexo.Support/DebloatCatalog.cs" Link="DebloatCatalog.cs"/><Compile Include="../Nexo.Support/AppRemovalQuestion.cs" Link="AppRemovalQuestion.cs"/><Compile Include="../Nexo.Support/DebloatService.cs" Link="DebloatService.cs"/><Compile Include="../Nexo.Support/DebloatPresentation.cs" Link="DebloatPresentation.cs"/><Compile Include="../Nexo.Support/ProtectedFolderScript.cs" Link="ProtectedFolderScript.cs"/></ItemGroup></Project>
