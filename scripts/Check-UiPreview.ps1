@@ -23,6 +23,7 @@ if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report }
 # #143: com -Theme glacial, as capturas saem com o prefixo glacial- e a preferência salva não muda.
 $process = Start-Process -FilePath $exe -ArgumentList @('--screenshot', '--theme', $Theme) -WindowStyle Hidden -Wait -PassThru
 if (-not (Test-Path -LiteralPath $report)) { throw 'A prévia não gerou ui-checks.txt.' }
-$result = Get-Content -LiteralPath $report -Raw
+# O PowerShell 5.1 lê o ui-checks.txt (UTF-8 sem BOM) como ANSI sem -Encoding (prints no PC, 23/11).
+$result = Get-Content -LiteralPath $report -Raw -Encoding UTF8
 if ($process.ExitCode -ne 0 -or $result.StartsWith('Falha na prévia:')) { throw $result }
 Write-Output $result.Trim()
