@@ -24,7 +24,16 @@ if (args.Contains("--pipe-peer"))
     return;
 }
 if (args.Contains("--optimization")) { await BasicOptimizationChecks.Run(Assert); return; }
-if (args.Contains("--debloat")) { await DebloatChecks.Run(Assert); Console.WriteLine($"{count} verificações aprovadas."); return; }
+if (args.Contains("--debloat"))
+{
+    await DebloatChecks.Run(Assert);
+    var appRemovalStore = new Store(Path.Combine(root, "app-removal"));
+    var appRemovalAdmin = appRemovalStore.Login("Guisbz", "1234");
+    appRemovalAdmin.MustChangePassword = false; appRemovalStore.Save();
+    await AppRemovalChatChecks.Run(appRemovalStore, appRemovalAdmin, Assert);
+    Console.WriteLine($"{count} verificações aprovadas.");
+    return;
+}
 if (args.Contains("--network-decision"))
 {
     await NetworkDecisionChecks.Run(Assert);
@@ -295,6 +304,7 @@ try
     await NetworkFollowUpChecks.Run(store, admin, Assert);
     await RaidTemperatureChecks.Run(store, admin, Assert);
     await ClosedOccurrenceChecks.Run(store, admin, Assert);
+    await AppRemovalChatChecks.Run(store, admin, Assert);
     await NetworkRecoveryChecks.Run(Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);

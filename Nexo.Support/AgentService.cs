@@ -133,6 +133,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         de espaço, oriente revisar o uso do disco; o Nexo não apaga arquivos e não lista arquivos nem pastas:
         não ofereça identificar os maiores arquivos. Indique Configurações > Sistema > Armazenamento do Windows.
         O Nexo não verifica segurança: não sugira que um processo seja malicioso, vírus ou malware; fale do consumo medido.
+        O Nexo não remove nem desinstala apps pelo chat: para os apps que vêm com o Windows, indique Ferramentas > Apps pré-instalados e ajustes do Windows.
         Não descreva o que um programa ou processo faz sem que uma ferramenta tenha trazido essa informação; fale só do nome e do consumo medido.
         Para uma pergunta sobre uma letra de unidade ("o que é o D:?"), consulte get_hardware_inventory(storage) antes de responder.
         Um alerta de memória "Estável em patamar alto" é informativo: não o apresente como causa da lentidão.
@@ -221,6 +222,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         evidence.AsksTemperature = SupportIntake.AsksTemperature(userRequest);
         evidence.AsksDiskHealth = SupportIntake.AsksDiskHealth(userRequest);
         evidence.AsksOnlyTemperature = SupportIntake.AsksOnlyTemperature(userRequest);
+        var appRemovalRequest = SupportIntake.AsksAppRemoval(userRequest);
         // Tópicos do incidente: os da última mensagem do usuário que tinha tópico. Uma continuação genérica do sistema
         // ("continua lento", "ainda tá demorando") soma o sistema aos tópicos anteriores, em vez de trocá-los.
         var incidentTopics = SupportIntake.ConversationTopics(conversation.Entries.Where(e => e.Role == "user").Reverse().Select(e => e.Text));
@@ -672,7 +674,9 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             if (!evidence.HasFindings && (incidentTopics.Contains("system") || reason is InvestigationEvidence.ProcessPurposeReason or InvestigationEvidence.MalwareReason
                 or InvestigationEvidence.StaleProcessReason or InvestigationEvidence.StablePlateauReason))
                 await ControllerCall("Relatório de saúde antes de encerrar", "get_health_report", JsonSerializer.SerializeToElement(new { }));
-            var end = evidence.HasFindings ? NextStep : withoutEvidence;
+            // Pedido de remover apps ou recusa por oferecer remover (#127): o fim indica o cartão de Ferramentas, e não "A IA repetiu…".
+            var end = reason == AgentProtocol.AppRemovalReason || appRemovalRequest ? AgentProtocol.AppRemovalGuidance
+                : evidence.HasFindings ? NextStep : withoutEvidence;
             return evidence.Report(evidence.UserRaisedSecurity ? end + "\n" + InvestigationEvidence.SecurityGuidance : end);
         }
         // Toda resposta final do turno passa por aqui e termina com a linha de fatos (#73, opção A).

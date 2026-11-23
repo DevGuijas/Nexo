@@ -49,6 +49,34 @@ public static class AgentProtocol
     private static bool Cleanup(string text) => Regex.IsMatch(text, @"\b(?:liber\w*|abr\w*|desocup\w*) (?:\w+ ){0,2}espaco\b")
         || Regex.IsMatch(text, @"\b(?:remov|apag|exclu|delet|limp)\w*") && Regex.IsMatch(text, @"\b(?:espaco|disco|discos|arquivos?|pastas?|armazenamento)\b") && !Regex.IsMatch(text, @"\bcache\b");
 
+    // Remoção de apps (#127). Na validação no PC da 63f01f0 (23/11/2026), "remove os apps inúteis do windows pra mim" teve
+    // 4 recusas pelo motivo genérico ("Use a ferramenta para a próxima consulta…") da oferta "Se você quiser remover
+    // aplicativos específicos, posso ajudar com isso… me diga quais aplicativos você deseja remover", e o turno terminou em
+    // "A IA repetiu a mesma resposta recusada", sem indicar o caminho. A remoção de apps existe só no menu Ferramentas: o
+    // modelo não a oferece nem a executa. É recusada a frase em 1ª pessoa que oferece remover, desinstalar ou excluir apps ou
+    // programas, ou que pede ao usuário a lista do que remover. Passam a negação ("não posso remover apps pelo chat"), a frase
+    // que leva ao cartão de Ferramentas e a explicação de como o usuário faz ("posso explicar como desinstalar um programa").
+    internal const string AppRemovalReason = "O Nexo não remove nem desinstala apps ou programas pelo chat: não ofereça remover e não pergunte quais apps remover. Para os apps que vêm com o Windows, indique Ferramentas > Apps pré-instalados e ajustes do Windows, onde o usuário verifica o PC, escolhe os itens e confirma antes de qualquer mudança; outros programas o usuário desinstala em Configurações > Aplicativos do Windows.";
+    // Resposta do controlador quando o turno de um pedido de remoção de apps termina sem resposta aceita.
+    internal const string AppRemovalGuidance = "O Nexo não remove apps pelo chat. Para os apps que vêm com o Windows, abra Ferramentas > Apps pré-instalados e ajustes do Windows: o Nexo verifica o que existe neste PC, você escolhe os itens e confirma antes de qualquer mudança, e pode desfazer depois. Outros programas são desinstalados em Configurações > Aplicativos do Windows.";
+    private const string AppObject = @"(?:apps?|aplicativos?|programas?|softwares?|bloatwares?)";
+    // Entre o verbo e o objeto cabem até 3 palavras, sem um alvo que não é app ("apagar o arquivo do programa", "limpar o cache
+    // do aplicativo", "remover o vírus do programa"). Particípio não conta ("verificar se o app foi removido").
+    private const string NotAppTarget = @"(?!(?:arquivos?|pastas?|dados|cache|historico|fila|atalhos?|icones?|virus|malware|notificac\w*|janelas?|abas?)\b)";
+    private const string RemovalVerb = @"(?:remov|desinstal|exclu|apag|delet|elimin)(?!\w*(?:id[oa]s?|ad[oa]s?)\b)\w*";
+    private static readonly Regex AppRemoval = new(@"\b" + RemovalVerb + @"(?:-(?:lo|la|los|las))?\s+(?:" + NotAppTarget + @"[\w-]+\s+){0,3}?" + AppObject + @"\b"
+        + @"|\b" + AppObject + @"\s+(?:[\w-]+\s+){0,3}?" + RemovalVerb
+        + @"|\blimp\w*\s+(?:(?:os|as|esses|estes|seus|alguns|todos os)\s+)?" + AppObject + @"\b|\bdebloat\w*"
+        // Desinstalar um app pelo nome ("vou desinstalar o Clipchamp"); driver, dispositivo e atualização ficam de fora.
+        + @"|\bdesinstal(?!\w*(?:id[oa]s?|ad[oa]s?)\b)\w*\b(?:-(?:lo|la|los|las))?(?!\s+(?:\w+\s+){0,2}?(?:drivers?|dispositivos?|atualizac\w*|updates?)\b)");
+    private static readonly Regex RemovalOffer = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo"
+        + @"|me (?:diga|informe|fale|avise|mande|liste|passe)(?: (?:quais|qual|os|o nome|os nomes))?)\b");
+    private static readonly Regex RemovalPath = new(@"\bferramentas\b[^.;!?]*\bpre-?\s?instalad|\bpre-?\s?instalad\w* e ajustes\b");
+    private static readonly Regex RemovalExplanation = new(@"\b(?:explic|orient|ensin)\w*|\b(?:mostrar|dizer|indicar)(?: a voce| para voce)? (?:como|onde)\b");
+    public static bool OffersAppRemoval(string normalized) => Regex.Split(normalized, @"[.!?;\n]+").Any(sentence =>
+        AppRemoval.IsMatch(sentence) && !RemovalPath.IsMatch(sentence) && !RemovalExplanation.IsMatch(sentence)
+        && RemovalOffer.Matches(sentence).Any(offer => !Regex.IsMatch(sentence[..offer.Index], @"\b(?:nao|nem|nunca)\s+(?:\w+\s+){0,2}$")));
+
     // Instrução que acompanha a recusa: o motivo fixo e, para a ação anunciada, o trecho e a saída quando não há ferramenta.
     public static string Guidance(string reason, string message) => reason == PendingActionReason && PendingActionPhrase(message) is { } phrase
         ? reason + " Trecho recusado: “" + phrase + "”. " + (Cleanup(Normalize(message)) ? NoCleanupTool
@@ -59,6 +87,8 @@ public static class AgentProtocol
     {
         if (string.IsNullOrWhiteSpace(message)) return "Informe uma conclusão ou pergunta não vazia.";
         var text = Normalize(message);
+        // Antes das regras gerais: com elas, a oferta de remover apps recebia "Use a ferramenta…", e não existe ferramenta (#127).
+        if (OffersAppRemoval(text)) return AppRemovalReason;
         if (Regex.IsMatch(text, @"\b(posso|podemos|devo)\b[^?.]{0,80}\b(permissao|autorizacao)\b"))
             return "Não solicite permissão no chat para uma ferramenta. Consulte o estado e use a ferramenta adequada; ela apresenta a autorização concreta.";
         if (message.Contains('?') && Regex.IsMatch(text, @"\b(posso confirmar se|voce esta|esta|se sente)\b[^?]{0,90}\b(confortavel|de acordo)\b|\btudo bem se\b[^?]{0,70}\b(reinici|ativ|habilit|alter|limp|instal|configur)"))

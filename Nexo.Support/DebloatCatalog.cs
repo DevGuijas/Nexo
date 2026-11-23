@@ -86,7 +86,11 @@ public static class DebloatCatalog
         ]),
         new("advertising-id", PrivacyCategory, "ID de publicidade", DebloatWindows.Both, DebloatKind.UserRegistry, true, [],
             [DWord(@"Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo", "Enabled", 0)]),
-        new("widgets-button", PrivacyCategory, "Ocultar o botão de Widgets", DebloatWindows.Both, DebloatKind.UserRegistry, true, [],
+        // TaskbarDa só existe no Windows 11 (validação no PC da 63f01f0, Windows 10 22H2, 23/11/2026: o item aparecia no 10 e não
+        // tinha efeito). O botão do 10 é "Notícias e interesses" (Feeds\ShellFeedsTaskbarViewMode), que fica de fora: gravar esse
+        // valor direto não é estável nas versões recentes do 10, e a política EnableFeeds faz o Windows mostrar "gerenciado pela
+        // organização", como a telemetria por política, que já está fora do escopo.
+        new("widgets-button", PrivacyCategory, "Ocultar o botão de Widgets", DebloatWindows.Windows11, DebloatKind.UserRegistry, true, [],
             [DWord(Advanced, "TaskbarDa", 0)]),
         new("ceip-tasks", PrivacyCategory, "Tarefas agendadas do CEIP", DebloatWindows.Both, DebloatKind.ScheduledTask, false,
         [

@@ -186,6 +186,19 @@ public static class SupportIntake
     public static bool AsksOnlyTemperature(string request) =>
         AsksTemperature(request) && !AsksDiskHealth(request) && IncidentTopics(request).Count == 0
         && !Regex.IsMatch(AgentProtocol.Normalize(request), OtherSymptom);
+    // Pedido de remover apps que vêm com o Windows (#127, validação no PC da 63f01f0: "remove os apps inúteis do windows pra mim").
+    // A remoção existe só no menu Ferramentas; o pedido marca o turno para que, se ele terminar sem resposta aceita, o Nexo
+    // indique o cartão. Não contam: reinstalar um app, um app que travou, vírus, arquivos temporários (Otimizar PC, #113) nem
+    // o cache, os dados ou os arquivos de um app.
+    private const string AppTarget = @"(?:apps?|aplicativos?|programas?|softwares?|bloatwares?)";
+    private const string AppRemovalRequest = @"\b(?:debloat\w*|bloatwares?)\b"
+        + @"|\b(?:remov|desinstal|tir|limp|exclu|apag|delet|elimin|arranc)\w*(?:-(?:lo|la|los|las))?\s+(?:(?!(?:arquivos?|pastas?|dados|cache|historico|fila|atalhos?|icones?|virus|malware|temporari\w*|prints?|fotos?|screenshots?|capturas?)\b)[\w-]+\s+){0,3}?" + AppTarget + @"\b"
+        + @"|\b" + AppTarget + @"\s+(?:\w+\s+)?(?:inute\w*|inutil|desnecessari\w*|que (?:eu )?nao (?:uso|usa)\b)";
+    public static bool AsksAppRemoval(string request)
+    {
+        var text = AgentProtocol.Normalize(request);
+        return Regex.IsMatch(text, AppRemovalRequest) && !Regex.IsMatch(text, @"\b(?:reinstal\w*|trav\w*|virus|malware)\b");
+    }
     public static bool AsksDiskHealth(string request)
     {
         var text = AgentProtocol.Normalize(request);

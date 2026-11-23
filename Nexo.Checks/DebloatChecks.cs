@@ -41,10 +41,10 @@ internal static class DebloatChecks
     {
         var ten = DebloatCatalog.ForBuild(Win10).Select(i => i.Id).ToHashSet();
         var eleven = DebloatCatalog.ForBuild(Win11).Select(i => i.Id).ToHashSet();
-        check(!ten.Overlaps(["bing-search", "clipchamp", "linkedin", "dev-home", "family", "power-automate", "teams-personal", "copilot-app", "recall"])
+        check(!ten.Overlaps(["bing-search", "clipchamp", "linkedin", "dev-home", "family", "power-automate", "teams-personal", "copilot-app", "recall", "widgets-button"])
             && ten.IsSupersetOf(["bing-news", "cortana", "xbox-services", "sysmain", "visual-effects", "file-extensions"]),
             "Debloat: o build 19045 usa o catálogo do Windows 10, sem os itens só do 11");
-        check(eleven.IsSupersetOf(["bing-search", "clipchamp", "linkedin", "dev-home", "recall", "bing-news", "xbox-login", "widgets-package"]),
+        check(eleven.IsSupersetOf(["bing-search", "clipchamp", "linkedin", "dev-home", "recall", "bing-news", "xbox-login", "widgets-package", "widgets-button"]),
             "Debloat: o build 22631 usa o catálogo do Windows 11 com os itens comuns");
         check(!DebloatCatalog.IsWindows11(21999) && DebloatCatalog.IsWindows11(22000), "Debloat: o Windows 11 começa no build 22000");
 
