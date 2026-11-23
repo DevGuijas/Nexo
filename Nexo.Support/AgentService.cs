@@ -385,8 +385,8 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 // never a fabricated user message or consent to change Windows settings.
                 if (!string.IsNullOrWhiteSpace(content)) history.Add(new AgentMessage { role = "assistant", content = content });
                 Rejected("texto sem ferramenta", rejection);
-                if (StopUnchanged(rejection, content)) return Finish(await GaveUp("A IA repetiu a mesma resposta recusada. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento.", rejection));
-                if (++protocolRetries > 3) return Finish(await GaveUp("A IA não conseguiu selecionar a próxima etapa. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento.", rejection));
+                if (StopUnchanged(rejection, content)) return Finish(await GaveUp("A IA repetiu a mesma resposta recusada. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento.", rejection, content));
+                if (++protocolRetries > 3) return Finish(await GaveUp("A IA não conseguiu selecionar a próxima etapa. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento.", rejection, content));
                 // O motivo da recusa vai junto (#83): sem ele, o modelo reescrevia a mesma frase até esgotar as tentativas.
                 control = "Controle de execução: sua resposta não chamou uma ferramenta e não foi aceita como conclusão. Motivo: " + Guidance(rejection, content) + " Se anunciou um teste ou consulta, execute-o agora. Para concluir chame finish_support com message; se não conseguir emitir tool_calls para esse controle, escreva exatamente finish_support seguido de um objeto JSON com message. Para informação indispensável ou teste manual use ask_user com message e reason. Não peça Ok nem autorização no chat. Nenhuma mudança foi autorizada por esta instrução; o executor mantém a confirmação do usuário.";
                 progress.Report("Continuando o diagnóstico e selecionando a próxima etapa…");
@@ -464,8 +464,8 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     history.Add(new AgentMessage { role = "tool", tool_name = name, content = result });
                     if (error == null) return Finish(ModelAnswer(text));
                     Rejected(name, error);
-                    if (StopUnchanged(error, text)) return Finish(await GaveUp("A IA repetiu a mesma resposta recusada. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento.", error));
-                    if (++protocolRetries > 3) return Finish(await GaveUp("A IA não conseguiu selecionar a próxima etapa. Interrompi a tentativa; os resultados acima podem orientar a continuação do atendimento.", error));
+                    if (StopUnchanged(error, text)) return Finish(await GaveUp("A IA repetiu a mesma resposta recusada. Interrompi a repetição; podemos usar os resultados acima para continuar o atendimento.", error, text));
+                    if (++protocolRetries > 3) return Finish(await GaveUp("A IA não conseguiu selecionar a próxima etapa. Interrompi a tentativa; os resultados acima podem orientar a continuação do atendimento.", error, text));
                     control = "Controle de execução: " + Guidance(error, text);
                     continue;
                 }
@@ -685,6 +685,17 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 : evidence.WithSensorFigures(evidence.WithStorageGuidance(evidence.WithMemoryFigures(text)));
             return removal ? InvestigationEvidence.WithAppRemovalGuidance(answer) : answer;
         }
+        // O resto da resposta recusada pela oferta de remover só vira o fim se passar pelas mesmas travas da resposta aceita.
+        string? SalvagedAnswer(string text)
+        {
+            if (observationOnly && !reconnectAttempted) return null;
+            var rest = AgentProtocol.WithoutAppRemovalOffer(text);
+            if (rest.Length == 0 || evidence.IsThinAnswer(rest)) return null;
+            var name = rest.Contains('?') ? "ask_user" : "finish_support";
+            if ((AgentProtocol.Validate(name, JsonSerializer.SerializeToElement(new { reason = "manual_test" }), rest, readOnly)
+                ?? RepeatsPrior(rest) ?? evidence.ValidateStatement(rest, userConfirmedFunction)) != null) return null;
+            return ModelAnswer(rest);
+        }
         // Cada recusa do controle fica na auditoria com o motivo (#83): na validação no PC, o "[error]" não dizia qual regra recusou.
         // O motivo é sempre um texto fixo dos validadores; o texto do modelo não entra no registro.
         void Rejected(string what, string reason) => store.Log(actor, "Controle de execução recusou " + what + ": " + reason);
@@ -697,8 +708,13 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         // A recusa sobre um processo (função, malware, encerrado, patamar estável) também leva ao relatório de saúde (22/11, passo
         // 2.3: "o NexoMemTeste é vírus?" não tinha consulta no turno). Se o usuário perguntou sobre vírus, o fim diz que o Nexo
         // não tem verificação de segurança e aponta a Segurança do Windows.
-        async Task<string> GaveUp(string withoutEvidence, string? reason = null)
+        async Task<string> GaveUp(string withoutEvidence, string? reason = null, string? lastText = null)
         {
+            // Recusas só pela oferta de remover (PC f6a898c): o fim é a última resposta do modelo sem as frases recusadas, mais a
+            // linha do cartão (ModelAnswer). Resto pobre, vazio ou recusado por outra trava volta ao fim de antes. O seguimento "o
+            // que eu removo?" continua com a explicação curta.
+            if (reason == AgentProtocol.AppRemovalReason && lastText != null && !(appRemovalFollowUp && !appRemovalRequest)
+                && SalvagedAnswer(lastText) is { } salvaged) return salvaged;
             if (!evidence.HasFindings && (incidentTopics.Contains("system") || reason is InvestigationEvidence.ProcessPurposeReason or InvestigationEvidence.MalwareReason
                 or InvestigationEvidence.StaleProcessReason or InvestigationEvidence.StablePlateauReason))
                 await ControllerCall("Relatório de saúde antes de encerrar", "get_health_report", JsonSerializer.SerializeToElement(new { }));

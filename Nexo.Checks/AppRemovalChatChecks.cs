@@ -45,6 +45,9 @@ internal static class AppRemovalChatChecks
             StepsAndUnused(assert);
             await PcXboxQuestion(store, actor, assert);
             await ChromeGoesToModel(store, actor, assert);
+            OfferCut(assert);
+            await PcTaskbarOffer(store, actor, assert);
+            await OfferCutFallbacks(store, actor, assert);
         }
         finally { store.Data.AiEnabled = previousAi; System.Globalization.CultureInfo.CurrentCulture = previousCulture; }
     }
@@ -602,6 +605,45 @@ internal static class AppRemovalChatChecks
         var answer = (await new AgentService(store, new FlowTools(), http) { WindowsBuild = () => Windows10 }.Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None)).ReplaceLineEndings("\n");
         assert(model.Calls >= 1 && answer.Contains("Chrome", StringComparison.Ordinal) && !answer.Contains("de propósito", StringComparison.Ordinal),
             "#127: \"posso tirar o Chrome?\" segue com o modelo · " + answer.Replace("\n", " "));
+    }
+
+    // Fim do turno pelas recusas da oferta de remover (PC f6a898c, 23/11): "como tiro o Teams da barra de tarefas?" não é pedido de
+    // remoção; o modelo deu os passos da barra e terminou oferecendo desinstalar o Teams, 3 vezes com o mesmo texto, e o turno acabou
+    // no texto pronto do cartão, sem os passos. Agora o fim é a resposta sem as frases recusadas, mais a linha do cartão.
+    private const string PcTaskbar = "Para tirar o Teams da barra de tarefas:\n1. Clique com o botão direito no ícone do Teams na barra de tarefas.\n"
+        + "2. Escolha “Desafixar da barra de tarefas”.\n\nSe desejar, posso ajudar a desinstalar o Teams completamente, se quiser.";
+
+    private static void OfferCut(Action<bool, string> assert)
+    {
+        var rest = AgentProtocol.WithoutAppRemovalOffer(PcTaskbar).ReplaceLineEndings("\n");
+        assert(rest == "Para tirar o Teams da barra de tarefas:\n1. Clique com o botão direito no ícone do Teams na barra de tarefas.\n2. Escolha “Desafixar da barra de tarefas”.",
+            "#127 (PC f6a898c): sem a oferta de desinstalar, os passos da barra ficam, com as quebras de linha · " + rest.Replace("\n", " | "));
+        var offerOnly = AgentProtocol.WithoutAppRemovalOffer(PcOffer);
+        assert(offerOnly.Length == 0, "#127: a resposta que só fala de remover apps fica vazia sem as frases de remoção · " + offerOnly);
+    }
+
+    private static async Task PcTaskbarOffer(Store store, Account actor, Action<bool, string> assert)
+    {
+        var model = new CapturingModel([Text(PcTaskbar), Text(PcTaskbar), Text(PcTaskbar)]);
+        var answer = await Ask(store, actor, "como tiro o Teams da barra de tarefas?", model);
+        var steps = answer.IndexOf("Desafixar da barra de tarefas", StringComparison.Ordinal);
+        var line = answer.IndexOf(AgentProtocol.AppRemovalLine, StringComparison.Ordinal);
+        assert(steps >= 0 && line > steps && !answer.Contains("posso ajudar a desinstalar", StringComparison.Ordinal)
+            && !answer.Contains(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal) && !answer.Contains("A IA repetiu", StringComparison.Ordinal),
+            "#127 (PC f6a898c): três recusas da oferta de desinstalar terminam com os passos da barra, sem a oferta, e com a linha do cartão · " + answer.Replace("\n", " "));
+    }
+
+    // O resto pobre (só "Ok.") ou recusado por outra trava (pedir permissão no chat) volta ao fim de antes: o texto pronto do cartão.
+    private static async Task OfferCutFallbacks(Store store, Account actor, Action<bool, string> assert)
+    {
+        const string thin = "Ok. Se desejar, posso desinstalar o Teams para você.";
+        var answer = await Ask(store, actor, "como tiro o Teams da barra de tarefas?", new CapturingModel([Text(thin), Text(thin), Text(thin)]));
+        assert(answer.Contains(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal) && !answer.Contains("Ok.", StringComparison.Ordinal),
+            "#127: o resto pobre da resposta recusada volta ao texto pronto do cartão · " + answer.Replace("\n", " "));
+        const string asks = "Abra as configurações da barra de tarefas e desative o ícone do Teams em 2 cliques. Posso fazer isso com a sua permissão? Se desejar, posso desinstalar o Teams para você.";
+        answer = await Ask(store, actor, "como tiro o Teams da barra de tarefas?", new CapturingModel([Text(asks), Text(asks), Text(asks)]));
+        assert(answer.Contains(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal) && !answer.Contains("permissão", StringComparison.Ordinal),
+            "#127: o resto recusado por outra trava (permissão no chat) volta ao texto pronto do cartão · " + answer.Replace("\n", " "));
     }
 
     private static async Task<string> Ask(Store store, Account actor, string request, CapturingModel model)

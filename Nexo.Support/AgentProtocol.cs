@@ -152,6 +152,18 @@ public static class AgentProtocol
     // Trecho citado na 2ª recusa: a oferta ou o passo do caminho inventado.
     public static bool AppRemovalPassage(string normalized) => OffersAppRemoval(normalized)
         || AppRemovalQuestion.RemovesCatalogItem(normalized) || Regex.IsMatch(normalized, @"\bclique\W+(?:em\W+)?\W*(?:remov|desinstal)\w*");
+    // Fim do turno pelas recusas da oferta de remover (PC f6a898c, "como tiro o Teams da barra de tarefas?"): o modelo deu os passos
+    // da barra e terminou com "Se desejar, posso ajudar a desinstalar o Teams completamente"; recusado 3 vezes com o mesmo texto, o
+    // turno acabava no texto pronto do cartão e a resposta sobre a barra se perdia. Aqui saem só as frases recusadas (a oferta, o
+    // passo do caminho inventado) e as que falam de remover apps sem oferecer ("Entendo que você quer remover aplicativos
+    // desnecessários"): esse assunto fica com a linha do cartão. As quebras de linha da resposta ficam, para uma lista numerada
+    // continuar lista. Se sobrar pouco, o fim volta a ser o de antes (AgentService.SalvagedAnswer).
+    public static string WithoutAppRemovalOffer(string text)
+    {
+        var lines = text.Replace("\r\n", "\n").Split('\n').Select(line => string.Join(" ", Regex.Split(line.Trim(), @"(?<=[.!?])\s+")
+            .Where(sentence => sentence.Length > 0 && !AppRemovalPassage(Normalize(sentence)) && !AppRemoval.IsMatch(Normalize(sentence)))));
+        return Regex.Replace(string.Join("\n", lines), @"\n{3,}", "\n\n").Trim();
+    }
     public static bool OffersAppRemoval(string normalized) => Regex.Split(normalized, @"[.!?;\n]+").Any(sentence =>
         AppRemoval.IsMatch(sentence) && !RemovalPath.IsMatch(sentence) && !RemovalExplanation.IsMatch(sentence)
         && RemovalOffer.Matches(sentence).Any(offer => !Regex.IsMatch(sentence[..offer.Index], @"\b(?:nao|nem|nunca)\s+(?:\w+\s+){0,2}$")));
