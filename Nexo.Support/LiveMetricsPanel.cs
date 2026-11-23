@@ -77,7 +77,7 @@ public sealed class LiveMetricsPanel : Border
             if (timer.IsEnabled) return;
             sampler.Resume(now);
             timer.Start();
-            _ = Tick();
+            if (sampler.NeedsBaseline) _ = Tick();
         }
         else if (timer.IsEnabled)
         {

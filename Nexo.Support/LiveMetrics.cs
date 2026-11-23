@@ -61,8 +61,10 @@ public sealed class LiveMetricsSampler
     private DateTimeOffset? pausedAt;
     // O PDH calcula a taxa entre a coleta anterior e a atual. Depois de uma pausa longa, a 1ª coleta seria a média do tempo
     // parado (validação no PC, fa1c668: "gravação 550,1 KB/s" logo ao restaurar, enquanto CPU e rede mostravam "medindo…").
-    // Essa coleta é descartada, e o disco espera a seguinte, como as outras métricas.
-    private bool diskStale;
+    // Essa coleta é descartada, e o disco espera a seguinte, como as outras métricas. Vale também para a 1ª coleta de um amostrador
+    // novo: a fonte do Windows abre a consulta com uma coleta e a seguinte vem logo depois, e o intervalo curto dá um tempo ativo
+    // falso (prints da #143, 746d023: "95% ativo" e "100% ativo" com "Leitura 0 B/s" na 1ª leitura, com CPU e rede em "medindo…").
+    private bool diskStale = true;
     private readonly Queue<double?>[] history = [new(), new(), new(), new()];
     // A amostra roda fora da thread da interface; pausa, retomada e histórico vêm da interface.
     private readonly object sync = new();
@@ -77,6 +79,10 @@ public sealed class LiveMetricsSampler
         loaded && panelVisible && windowVisible && !windowMinimized;
 
     public bool Paused { get { lock (sync) return pausedAt != null; } }
+    /// <summary>Sem amostra anterior (amostrador novo ou zerado por pausa longa): o painel pede uma leitura logo ao retomar, para
+    /// sair do "medindo…" um segundo antes. Depois de uma pausa curta (a tela recriada pelo monitor), não: a leitura extra cairia
+    /// num intervalo arbitrário e curto entre duas do temporizador.</summary>
+    public bool NeedsBaseline { get { lock (sync) return lastTime == null; } }
     public IReadOnlyList<double?> CpuHistory => History(0);
     public IReadOnlyList<double?> MemoryHistory => History(1);
     public IReadOnlyList<double?> DiskHistory => History(2);

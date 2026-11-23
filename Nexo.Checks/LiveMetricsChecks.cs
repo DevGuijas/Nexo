@@ -182,8 +182,14 @@ internal static class LiveMetricsChecks
     // pausa ("gravação 550,1 KB/s"), enquanto CPU e rede esperavam a 2ª leitura.
     private static void DiskAfterPause(Action<bool, string> assert)
     {
-        var source = new FakeSource { Disk = new DiskCounters(LiveStatus.Ok, 40, 1000, 2000) };
+        var source = new FakeSource { Disk = new DiskCounters(LiveStatus.Ok, 5, 0, 0) };
         var sampler = new LiveMetricsSampler(source);
+        // Prints da #143 (746d023): a 1ª leitura do cartão novo mostrou "95% ativo"/"100% ativo" com "Leitura 0 B/s" — a coleta de
+        // abertura do PDH seguida de outra logo depois dá um tempo ativo falso.
+        var opening = sampler.Sample(Start.AddSeconds(-1));
+        assert(opening.DiskActive.Status == LiveStatus.Waiting && opening.DiskReadBytesPerSecond == null,
+            "#141: a 1ª coleta de disco de um amostrador novo é descartada (\"medindo…\"), como a de depois da pausa");
+        source.Disk = new DiskCounters(LiveStatus.Ok, 40, 1000, 2000);
         var first = sampler.Sample(Start);
         assert(first.DiskActive.Status == LiveStatus.Ok && Math.Abs(first.DiskActive.Value!.Value - 60) < 0.001,
             "#141: sem pausa, o disco usa a coleta do PDH normalmente");
@@ -221,11 +227,20 @@ internal static class LiveMetricsChecks
         assert(!LiveMetricsSampler.ShouldRun(true, true, true, windowMinimized: true), "#141: não lê com a janela minimizada");
         assert(!LiveMetricsSampler.ShouldRun(true, true, windowVisible: false, false), "#141: não lê com a janela escondida na bandeja");
         assert(!LiveMetricsSampler.ShouldRun(loaded: false, true, true, false), "#141: não lê com o painel fora da tela (outra página)");
+        var baseline = new LiveMetricsSampler(new FakeSource());
+        assert(baseline.NeedsBaseline, "#141: amostrador novo pede uma leitura logo ao abrir");
+        baseline.Sample(Start);
+        baseline.Pause(Start.AddSeconds(1)); baseline.Resume(Start.AddSeconds(2));
+        assert(!baseline.NeedsBaseline, "#141: depois de pausa curta (tela recriada pelo monitor), não há leitura extra fora do temporizador");
+        baseline.Pause(Start.AddSeconds(3)); baseline.Resume(Start.AddMinutes(1));
+        assert(baseline.NeedsBaseline, "#141: depois de pausa longa (linha de base zerada), pede uma leitura logo ao retomar");
         var root = RepositoryRoot();
         if (root == null) return;
         var panel = Code(Path.Combine(root, "Nexo.Support", "LiveMetricsPanel.cs"));
         assert(System.Text.RegularExpressions.Regex.IsMatch(panel, @"(?m)^\s*IsVisibleChanged\s*\+="),
             "#141: o painel acompanha a própria visibilidade (IsVisibleChanged), não só a da janela");
+        assert(panel.Contains("if (sampler.NeedsBaseline) _ = Tick();", StringComparison.Ordinal),
+            "#141: ao retomar, o painel só lê fora do temporizador quando não há linha de base");
         assert(panel.Contains("LiveMetricsSampler.ShouldRun(loaded, IsVisible,", StringComparison.Ordinal),
             "#141: o painel decide se lê pela própria visibilidade (IsVisible) com a regra testada");
     }
