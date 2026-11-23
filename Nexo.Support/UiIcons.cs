@@ -29,7 +29,15 @@ public static class UiIcons
         ["plus"] = Geometry.Parse("M12,5 L12,19 M5,12 L19,12"),
         ["check"] = Geometry.Parse("M4,12 L9.5,17.5 20,7"),
         ["arrow"] = Geometry.Parse("M5,12 L19,12 M13,6 L19,12 13,18"),
-        ["shield"] = Geometry.Parse("M12,2 L20,5 20,11 C20,16 16.5,19.4 12,22 C7.5,19.4 4,16 4,11 L4,5 Z M9,12 L11,14 15,10")
+        ["shield"] = Geometry.Parse("M12,2 L20,5 20,11 C20,16 16.5,19.4 12,22 C7.5,19.4 4,16 4,11 L4,5 Z M9,12 L11,14 15,10"),
+        // #143: tela Início, busca da paleta Ctrl+K, barra lateral e botões da barra de título própria.
+        ["home"] = Geometry.Parse("M4,10.5 L12,4 20,10.5 M6,9 L6,20 18,20 18,9 M10,20 L10,14 14,14 14,20"),
+        ["search"] = Geometry.Parse("M10.5,17 A6.5,6.5 0 1 0 10.5,4 A6.5,6.5 0 1 0 10.5,17 Z M15.5,15.5 L20,20"),
+        ["sidebar"] = Geometry.Parse("M4,5 L20,5 20,19 4,19 Z M9,5 L9,19 M12.5,10 L15,12 12.5,14"),
+        ["minimize"] = Geometry.Parse("M5,12 L19,12"),
+        ["maximize"] = Geometry.Parse("M5,5 L19,5 19,19 5,19 Z"),
+        ["restore"] = Geometry.Parse("M5,9 L15,9 15,19 5,19 Z M9,9 L9,5 19,5 19,15 15,15"),
+        ["close"] = Geometry.Parse("M6,6 L18,18 M18,6 L6,18")
     };
 
     public static Viewbox Create(string name, double size) => Create(name, size, ThemeManager.Live("Accent"));

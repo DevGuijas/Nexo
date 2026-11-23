@@ -70,14 +70,16 @@ public partial class MainWindow : Window
     {
         InitializeComponent(); Title = "Nexo " + AppVersion.Current + " • Suporte inteligente"; this.store = store; support = new SupportService(store);
         ApplyNavigationIcons();
+        InitializeShell();
         user = store.GetLocalSession();
         RefreshIdentity();
         NewConversation();
-        ShowPage("chat");
         try { healthSettings = HealthSettings.Load(store.Root); }
         catch (Exception ex) { healthError = "Preferências inválidas; usando valores padrão. " + ex.Message; }
         try { healthStore = new OperationalStore(store.Root); }
         catch (Exception ex) { healthError = "Histórico operacional indisponível. " + ex.Message; }
+        // #143: a tela Início é a de abertura; ela lê o histórico operacional, por isso vem depois de abri-lo.
+        ShowPage("home");
         Loaded += (_, _) => StartHealthMonitoring();
         Loaded += async (_, _) => await OfferNetworkRecovery();
         Closed += async (_, _) =>
@@ -197,9 +199,10 @@ public partial class MainWindow : Window
             if (button.Tag is not string section || button.Content is not StackPanel previous) continue;
             var label = previous.Children.OfType<TextBlock>().Last().Text;
             var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            row.Children.Add(UiIcons.Create(section switch { "chat" => "chat", "health" => "health", "history" => "history", "tickets" => "tickets", "tools" => "tools", "users" => "users", "settings" => "settings", "audit" => "audit", _ => "brand" }, 19));
+            row.Children.Add(UiIcons.Create(section switch { "home" => "home", "chat" => "chat", "health" => "health", "history" => "history", "tickets" => "tickets", "tools" => "tools", "users" => "users", "settings" => "settings", "audit" => "audit", _ => "brand" }, 19));
             row.Children.Add(new TextBlock { Text = label, Margin = new Thickness(12, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center });
             button.Content = row;
+            button.ToolTip = label;
             button.Style = (Style)FindResource("NavigationButton");
         }
     }
@@ -343,7 +346,7 @@ public partial class MainWindow : Window
         }
         if (target == "chat") return;
         PageContent.Children.Clear();
-        switch (target) { case "profile": Profile(); break; case "users": Users(); break; case "history": History(); break; case "tickets": Tickets(); break; case "health": Health(); break; case "tools": Tools(); break; case "settings": Settings(); break; case "audit": Audits(); break; }
+        switch (target) { case "home": Home(); break; case "profile": Profile(); break; case "users": Users(); break; case "history": History(); break; case "tickets": Tickets(); break; case "health": Health(); break; case "tools": Tools(); break; case "settings": Settings(); break; case "audit": Audits(); break; }
         PageScroll.ScrollToTop();
     }
     private void RefreshChatActions()
@@ -386,12 +389,7 @@ public partial class MainWindow : Window
                 }
                 finally { Interlocked.Exchange(ref eventScanRunning, 0); }
             }
-            await Dispatcher.BeginInvoke(new Action(() =>
-            {
-                if (page != "health" || busy) return;
-                var position = PageScroll.VerticalOffset;
-                ShowPage("health"); PageScroll.ScrollToVerticalOffset(position);
-            }));
+            await Dispatcher.BeginInvoke(new Action(RefreshMonitoredPage));
         }
         catch (Exception ex) { healthError = ex.Message; }
     }
@@ -1172,6 +1170,7 @@ public partial class MainWindow : Window
             try { store.Save(); }
             catch { store.Data.Theme = stored; ThemeManager.Apply(previous); throw; }
         }
+        RefreshThemeButton();
         if (page == "settings") ShowPage("settings");
     }
     private void Settings()
@@ -1295,12 +1294,14 @@ public partial class MainWindow : Window
         {
         if (((Grid)Content).Background is not SolidColorBrush shellBrush || shellBrush.Color != ((SolidColorBrush)ThemeManager.Live("CanvasBg")).Color)
             throw new InvalidOperationException("O tema " + ThemeCatalog.DisplayName(ThemeManager.Current) + " não foi aplicado à janela principal.");
-        if (!HasVectorIcon(ChatNav)) throw new InvalidOperationException("A navegação não usa ícones vetoriais.");
+        if (!HasVectorIcon(ChatNav) || !HasVectorIcon(HomeNav)) throw new InvalidOperationException("A navegação não usa ícones vetoriais.");
         if (Shell.Visibility != Visibility.Visible || !Messages.Children.OfType<StackPanel>().Any()) throw new InvalidOperationException("Falha na abertura direta do aplicativo.");
         var shortcutGrid = Messages.Children.OfType<StackPanel>().SelectMany(s => s.Children.OfType<System.Windows.Controls.Primitives.UniformGrid>()).FirstOrDefault();
         if (shortcutGrid?.Children.Count != 6 || shortcutGrid.Children.OfType<Button>().Any(button => !HasVectorIcon(button)))
             throw new InvalidOperationException("Os seis atalhos iniciais precisam de ícones vetoriais.");
-        if (Shell.ColumnDefinitions[0].ActualWidth < 240) throw new InvalidOperationException("A navegação ficou estreita para o novo layout.");
+        if (Sidebar.ActualWidth < 220) throw new InvalidOperationException("A navegação ficou estreita para o novo layout.");
+        // #143, etapas 2 e 3: tela Início de abertura, atalhos, paleta Ctrl+K, barra de título e barra lateral.
+        await VerifyShellPreview(name => Capture(name));
         ShowPage("chat"); await Capture("nexo-preview.png");
         Width = 1060; Height = 720; UpdateLayout(); await Capture("nexo-preview-small.png");
         Width = 1380; Height = 900; UpdateLayout();
@@ -1403,6 +1404,7 @@ public partial class MainWindow : Window
         if (conversation?.Entries.Count != 2 || busy) throw new InvalidOperationException("Falha no fluxo de conversa local.");
         await Capture("nexo-conversation.png");
         ShowPage("history"); await Capture("nexo-history.png"); ShowPage("chat");
+        await VerifyHomeData(name => Capture(name));
         AddEntry("assistant", "Deseja que eu ative a conexão?");
         if (quickReplyPanel?.Children.Count != 2) throw new InvalidOperationException("Atalhos não apareceram na pergunta de confirmação.");
         Composer.Text = "Meu rascunho";
@@ -1535,7 +1537,7 @@ public partial class MainWindow : Window
             });
             if (accepted) throw new InvalidOperationException("A prévia não cancelou o diálogo de autorização.");
         }
-        File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "ui-checks.txt"), "Abertura direta e navegação, envio e resposta local: aprovados.\nPainel de saúde e controles de monitoramento renderizados.\nNovo atendimento na lateral; resolução e encaminhamento acima do compositor: aprovados em 1380x900 e 1060x720.\nAtalhos Sim/Não, rascunho e bloqueio de resposta antiga: aprovados.\nEnter livre para quebra de linha e manipulador Shift + Enter envia mensagem multilinha: aprovados.\nNomes, títulos e resultados longos verificados em 1060x720.\nDiálogos de autorização, licença e restauração de rede renderizados e cancelados sem mudanças no Windows.\n70 etapas com rolagem ao início/fim, controles acessíveis e rótulos alinhados. Nenhuma ação no Windows executada.");
+        File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "ui-checks.txt"), "Abertura direta e navegação, envio e resposta local: aprovados.\nPainel de saúde e controles de monitoramento renderizados.\nNovo atendimento na lateral; resolução e encaminhamento acima do compositor: aprovados em 1380x900 e 1060x720.\nAtalhos Sim/Não, rascunho e bloqueio de resposta antiga: aprovados.\nEnter livre para quebra de linha e manipulador Shift + Enter envia mensagem multilinha: aprovados.\nNomes, títulos e resultados longos verificados em 1060x720.\nDiálogos de autorização, licença e restauração de rede renderizados e cancelados sem mudanças no Windows.\n70 etapas com rolagem ao início/fim, controles acessíveis e rótulos alinhados.\nInício de abertura com estados de vazio e dados reais, atalhos que escrevem no Assistente sem enviar, paleta Ctrl+K (filtro, setas, Enter, Esc e ações), barra de título (botões, maximizar/restaurar, área do snap layouts), lateral recolhida e nenhum texto abaixo de 11 px: aprovados. Nenhuma ação no Windows executada.");
         Application.Current.Shutdown();
         }
         catch (Exception ex)

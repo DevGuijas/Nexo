@@ -40,7 +40,9 @@ internal static class ThemeChecks
         // temas e toda chave dos temas é usada.
         var sources = Path.Combine(baseDir, "ThemeSources");
         var app = File.ReadAllText(Path.Combine(sources, "App.xaml")); var window = File.ReadAllText(Path.Combine(sources, "MainWindow.xaml"));
-        var code = File.ReadAllText(Path.Combine(sources, "MainWindow.xaml.cs")) + File.ReadAllText(Path.Combine(sources, "UiIcons.cs"));
+        // #143, etapas 2 e 3: a moldura (barra de título, lateral, paleta) e a tela Início seguem as mesmas regras de cor e tamanho.
+        var code = File.ReadAllText(Path.Combine(sources, "MainWindow.xaml.cs")) + File.ReadAllText(Path.Combine(sources, "UiIcons.cs"))
+            + string.Concat(new[] { "WindowShell.cs", "CommandPalette.cs", "HomePage.cs", "ShellPreview.cs" }.Select(file => File.ReadAllText(Path.Combine(sources, "Code", file))));
         var keys = onyx.Keys.ToHashSet(StringComparer.Ordinal);
         var dynamicKeys = Regex.Matches(app + window, @"\{DynamicResource (\w+)\}").Select(m => m.Groups[1].Value).ToHashSet();
         var staticColorKeys = Regex.Matches(app + window, @"\{StaticResource (\w+)\}").Select(m => m.Groups[1].Value).Where(keys.Contains).ToArray();
