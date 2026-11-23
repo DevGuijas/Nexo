@@ -1080,15 +1080,17 @@ public partial class MainWindow : Window
         if (MessageBox.Show(this, question, "Confirmar remoção de apps e ajustes", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
         debloatCancellation = new CancellationTokenSource(); debloatRunning = true;
         debloatStatus = "Iniciando..."; UpdateToolsView();
+        var gate = new DebloatProgressGate();
         try
         {
-            var progress = new Progress<string>(message => { debloatStatus = message; UpdateToolsView(); });
+            var progress = new Progress<string>(gate.Guard(message => { debloatStatus = message; UpdateToolsView(); }));
             var result = await DebloatServiceFor().ApplyAsync(debloatPreview, selected, debloatRiskView?.IsChecked == true, progress, debloatCancellation.Token);
-            ShowDebloatResult("Aplicação", result);
+            gate.Finish();
+            debloatStatus = DebloatPresentation.Result(result, undo: false);
             RecordDebloat("Remover apps e ajustes (Ferramentas)", selected, result);
             debloatPreview = null;
         }
-        finally { debloatRunning = false; debloatCancellation.Dispose(); debloatCancellation = null; RefreshDebloatUndo(); RenderDebloatList(); UpdateToolsView(); }
+        finally { gate.Finish(); debloatRunning = false; debloatCancellation.Dispose(); debloatCancellation = null; RefreshDebloatUndo(); RenderDebloatList(); UpdateToolsView(); }
     }
 
     private async Task UndoDebloat()
@@ -1101,37 +1103,23 @@ public partial class MainWindow : Window
                 "Desfazer remoção de apps e ajustes", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
         debloatCancellation = new CancellationTokenSource(); debloatRunning = true;
         debloatStatus = "Desfazendo..."; UpdateToolsView();
+        var gate = new DebloatProgressGate();
         try
         {
-            var progress = new Progress<string>(message => { debloatStatus = message; UpdateToolsView(); });
+            var progress = new Progress<string>(gate.Guard(message => { debloatStatus = message; UpdateToolsView(); }));
             var result = await DebloatServiceFor().UndoAsync(run, progress, debloatCancellation.Token);
-            ShowDebloatResult("Desfazer", result);
+            gate.Finish();
+            debloatStatus = DebloatPresentation.Result(result, undo: true);
             RecordDebloat("Desfazer remoção de apps e ajustes (Ferramentas)", run.Entries.Select(e => e.ItemId).Concat(run.ProtectedItems).Distinct(), result);
             debloatPreview = null;
         }
-        finally { debloatRunning = false; debloatCancellation.Dispose(); debloatCancellation = null; RefreshDebloatUndo(); RenderDebloatList(); UpdateToolsView(); }
+        finally { gate.Finish(); debloatRunning = false; debloatCancellation.Dispose(); debloatCancellation = null; RefreshDebloatUndo(); RenderDebloatList(); UpdateToolsView(); }
     }
 
     private void RefreshDebloatUndo()
     {
         try { debloatCanUndo = DebloatServiceFor().UndoCandidate() != null; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { debloatCanUndo = false; }
-    }
-
-    private void ShowDebloatResult(string stage, DebloatResult result)
-    {
-        static string Label(DebloatStatus status) => status switch
-        {
-            DebloatStatus.Ok => "ok", DebloatStatus.Partial => "parcial", DebloatStatus.NotFound => "não encontrado",
-            DebloatStatus.Failed => "falha", _ => "não aplicado",
-        };
-        var point = result.RestorePoint == null ? "" : result.RestorePoint.Ready
-            ? $" Ponto de restauração {result.RestorePoint.SequenceNumber} confirmado."
-            : " Ponto de restauração não confirmado: " + result.RestorePoint.Reason + ".";
-        debloatStatus = stage + ": " + DebloatService.Summary(result.Status, result.Items) + point + "\n"
-            + string.Join("\n", result.Items.Select(i => $"{i.Title}: {Label(i.Status)}. {i.Detail}"))
-            + (result.Warning == null ? "" : "\n" + result.Warning)
-            + "\nClique em Verificar este PC para ver o estado atual.";
     }
 
     private void RecordDebloat(string action, IEnumerable<string> ids, DebloatResult result)

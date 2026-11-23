@@ -34,6 +34,7 @@ internal static class DebloatChecks
         finally { CultureInfo.CurrentCulture = previous; }
         await Store(check);
         await Review(check);
+        await Screen(check);
         await DebloatScriptChecks.Run(check);
     }
 
@@ -649,6 +650,108 @@ internal static class DebloatChecks
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         check(done is { Status: "Completed", Warning: { } dw } && dw.Contains("não foi atualizado") && done.Items.Single().Status == DebloatStatus.Ok,
             "Debloat: Desfazer que não consegue marcar o arquivo local devolve o resultado com o aviso, sem exceção");
+    }
+
+    // A tela do cartão: o texto do resultado e a trava do progresso, com o Progress<T> postando numa fila como o Dispatcher do WPF.
+    private static async Task Screen(Action<bool, string> check)
+    {
+        using var dir = new TempDir();
+        var system = new FakeSystem(Inventory());
+        var store = new DebloatUndoStore(Path.Combine(dir.Path, "undo.json"));
+        var service = new DebloatService(system, store, _ => { });
+        var preview = await service.PreviewAsync(CancellationToken.None);
+        string[] chosen = ["visual-effects", "file-extensions", "bing-news"];
+
+        var applied = await OnScreen(progress => service.ApplyAsync(preview, chosen, false, progress, CancellationToken.None), undo: false, gated: true);
+        check(applied.Status == applied.Final && applied.Status.StartsWith("Aplicação: Resultado concluído", StringComparison.Ordinal)
+            && applied.Status.Contains("\nNotícias") && applied.Status.EndsWith("Clique em Verificar este PC para ver o estado atual.", StringComparison.Ordinal),
+            "Debloat: na tela, o progresso que chega depois do fim da aplicação não apaga o resultado com as linhas por item");
+        var notice = DebloatCatalog.Find("visual-effects")!.Warning;
+        var visualLine = applied.Status.Split('\n').Single(l => l.StartsWith("Efeitos visuais para desempenho: ", StringComparison.Ordinal));
+        check(visualLine.StartsWith("Efeitos visuais para desempenho: ok.", StringComparison.Ordinal) && visualLine.EndsWith(" " + notice, StringComparison.Ordinal)
+            && notice.Contains("próximo logon") && !visualLine.Contains("..") && CountOf(applied.Status, "próximo logon") == 1,
+            "Debloat: o resultado da aplicação avisa na linha dos efeitos visuais que o efeito completo vem no próximo logon");
+
+        var run = store.Latest()!;
+        check(run.ProtectedItems.Count == 0, "Debloat: o cenário do Desfazer na tela não tem item elevado, então termina sem await real");
+        var undone = await OnScreen(progress => service.UndoAsync(run, progress, CancellationToken.None), undo: true, gated: true);
+        check(undone.Status == undone.Final && undone.Status.StartsWith("Desfazer: Resultado concluído", StringComparison.Ordinal)
+            && undone.Status.Contains("\nNotícias") && undone.Status.Contains(DebloatService.StoreGuidance) && !undone.Status.Contains("próximo logon"),
+            "Debloat: na tela, o progresso que chega depois do fim do Desfazer não apaga o prefixo, as linhas nem a orientação da Store");
+
+        // Sem a trava, o mesmo roteiro reproduz o defeito visto no Windows: sobra só o resumo do último Report.
+        var again = await service.PreviewAsync(CancellationToken.None);
+        var raw = await OnScreen(progress => service.ApplyAsync(again, ["file-extensions"], false, progress, CancellationToken.None), undo: false, gated: false);
+        var rawUndo = await OnScreen(progress => service.UndoAsync(store.Latest()!, progress, CancellationToken.None), undo: true, gated: false);
+        check(raw.Status.StartsWith("Resultado ", StringComparison.Ordinal) && raw.Status != raw.Final && rawUndo.Status.StartsWith("Resultado ", StringComparison.Ordinal) && rawUndo.Status != rawUndo.Final,
+            "Debloat: o roteiro da tela reproduz a corrida do Progress quando não há trava (controle do teste)");
+
+        var gate = new DebloatProgressGate(); var shown = new List<string>(); var show = gate.Guard(shown.Add);
+        show("antes"); gate.Finish(); show("depois");
+        check(shown.SequenceEqual(["antes"]) && gate.Finished, "Debloat: depois do fim, nenhuma mensagem de progresso passa pela trava");
+
+        static DebloatResult Point(string reason) => new("Partial", new(false, null, reason), [], null);
+        var dotted = DebloatPresentation.Result(Point("O novo ponto de restauração não foi confirmado."), undo: false);
+        var bare = DebloatPresentation.Result(Point("a autorização de administrador foi recusada"), undo: false);
+        var empty = DebloatPresentation.Result(Point(""), undo: false);
+        check(dotted.Contains(" Ponto de restauração não confirmado: O novo ponto de restauração não foi confirmado.\n") && !dotted.Contains("..")
+            && bare.Contains(" Ponto de restauração não confirmado: a autorização de administrador foi recusada.\n")
+            && empty.Contains(" Ponto de restauração não confirmado.\n") && !empty.Contains(": .") && !empty.Contains(".."),
+            "Debloat: o motivo do ponto de restauração não confirmado sai com um único ponto final");
+
+        var title = DebloatCatalog.Find("visual-effects")!.Title;
+        DebloatResult Visual(DebloatStatus status, string detail) => new("Completed", null, [new("visual-effects", title, status, detail)], null);
+        check(DebloatPresentation.Result(Visual(DebloatStatus.Ok, "9 valor(es) gravado(s) no seu perfil"), undo: false).Contains(": ok. 9 valor(es) gravado(s) no seu perfil. " + notice)
+            && !DebloatPresentation.Result(Visual(DebloatStatus.Ok, "9 valor(es) restaurado(s)."), undo: true).Contains("próximo logon")
+            && !DebloatPresentation.Result(Visual(DebloatStatus.Partial, "UserPreferencesMask: acesso negado"), undo: false).Contains("próximo logon")
+            && !DebloatPresentation.Result(Visual(DebloatStatus.Failed, "acesso negado"), undo: false).Contains("próximo logon")
+            && !DebloatPresentation.Result(new("Completed", null, [new("file-extensions", "Mostrar extensões de arquivo", DebloatStatus.Ok, "1 valor(es) gravado(s) no seu perfil.")], null), undo: false).Contains("próximo logon"),
+            "Debloat: o aviso do próximo logon sai só quando os efeitos visuais são aplicados com Ok, nunca no Desfazer");
+    }
+
+    private static int CountOf(string text, string part) => (text.Length - text.Replace(part, "").Length) / part.Length;
+
+    // Roda o mesmo roteiro do MainWindow (Progress<string> criado na thread da tela, await, Finish e texto final) numa fila FIFO.
+    private static async Task<(string Status, string Final)> OnScreen(Func<IProgress<string>, Task<DebloatResult>> operation, bool undo, bool gated)
+    {
+        var context = new QueuedContext();
+        var previous = SynchronizationContext.Current;
+        string status = "", final = "";
+        Task handler;
+        SynchronizationContext.SetSynchronizationContext(context);
+        try
+        {
+            handler = Handler();
+            var deadline = DateTime.UtcNow.AddSeconds(30);
+            while ((!handler.IsCompleted || context.Pending) && DateTime.UtcNow < deadline)
+                if (!context.RunOne()) Thread.Sleep(1);
+        }
+        finally { SynchronizationContext.SetSynchronizationContext(previous); }
+        await handler;
+        return (status, final);
+
+        async Task Handler()
+        {
+            var gate = new DebloatProgressGate();
+            var progress = new Progress<string>(gated ? gate.Guard(message => status = message) : message => status = message);
+            var result = await operation(progress);
+            gate.Finish();
+            status = final = DebloatPresentation.Result(result, undo);
+        }
+    }
+
+    private sealed class QueuedContext : SynchronizationContext
+    {
+        private readonly System.Collections.Concurrent.ConcurrentQueue<(SendOrPostCallback Callback, object? State)> posts = new();
+        public bool Pending => !posts.IsEmpty;
+        public override void Post(SendOrPostCallback d, object? state) => posts.Enqueue((d, state));
+        public override void Send(SendOrPostCallback d, object? state) => d(state);
+        public bool RunOne()
+        {
+            if (!posts.TryDequeue(out var post)) return false;
+            post.Callback(post.State);
+            return true;
+        }
     }
 
     private sealed class TempDir : IDisposable
