@@ -70,8 +70,9 @@
               AutomationProperties.Name="Recolher a barra lateral" ToolTip="Recolher a barra lateral"/>
      </StackPanel>
 
-     <ScrollViewer x:Name="NavigationScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-      <StackPanel x:Name="Navigation">
+     <!-- #143: a margem negativa da rolagem e a positiva da lista mantêm a largura dos botões e deixam espaço para o anel de foco externo, que a área de rolagem cortaria. -->
+     <ScrollViewer x:Name="NavigationScroll" Margin="-4,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <StackPanel x:Name="Navigation" Margin="4,0">
        <TextBlock x:Name="WorkLabel" Text="ÁREA DE TRABALHO" FontSize="11" FontWeight="SemiBold"
                   Foreground="{DynamicResource Subtle}" Margin="12,0,0,12" TextWrapping="NoWrap"/>
        <Button x:Name="HomeNav" Tag="home" Click="NavigateClick" Margin="0,0,0,4" AutomationProperties.Name="Início"><StackPanel><TextBlock Text="Início"/></StackPanel></Button>
