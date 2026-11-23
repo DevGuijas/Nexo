@@ -420,7 +420,8 @@ public partial class MainWindow : Window
     private void Health()
     {
         Heading("Saúde do computador", "Leituras locais enquanto o Nexo está em execução. Achados são hipóteses até a função ser testada.",
-            "Monitoramento local · leitura a cada " + healthSettings.IntervalSeconds + " s");
+            // Sem o histórico operacional o monitor não inicia (StartHealthMonitoring): a linha não promete leitura periódica.
+            healthStore == null ? "Monitoramento local · histórico indisponível" : "Monitoramento local · leitura a cada " + healthSettings.IntervalSeconds + " s");
         LiveMetricsSection();
         // Estados da tela (#143): erro (histórico indisponível), aviso (falha de coleta), carregando (sem a 1ª leitura) e vazio por seção.
         if (healthStore == null) { PageContent.Children.Add(PageKit.Notice("shield", "Histórico operacional indisponível", healthError ?? "", "Danger")); return; }
@@ -461,7 +462,9 @@ public partial class MainWindow : Window
                 else
                 {
                     var failed = latest.CpuTemperature?.State is "error" or "invalid";
-                    var unavailable = PageKit.Notice("health", failed ? "Leitura de temperatura descartada" : "Temperatura indisponível neste computador", temperatureText, failed ? "Warning" : "Neutral");
+                    // "invalid" é valor descartado; "error" é falha de leitura (o sensor não respondeu), não descarte.
+                    var title = latest.CpuTemperature?.State == "invalid" ? "Leitura de temperatura descartada" : failed ? "Falha na leitura de temperatura" : "Temperatura indisponível neste computador";
+                    var unavailable = PageKit.Notice("health", title, temperatureText, failed ? "Warning" : "Neutral");
                     unavailable.Margin = new Thickness(0, 8, 0, 0); overview.Children.Add(unavailable);
                 }
 
