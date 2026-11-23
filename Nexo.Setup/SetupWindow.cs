@@ -20,7 +20,7 @@ public sealed class SetupWindow : Window
     public SetupWindow(string[] args)
     {
         this.args = args;
-        Title = "Instalação do Nexo";
+        Title = Installer.IsPreview ? "Instalação do Nexo 1.7.0 (prévia)" : "Instalação do Nexo";
         Width = 590;
         Height = 425;
         MinWidth = MaxWidth = Width;
@@ -33,7 +33,7 @@ public sealed class SetupWindow : Window
         var banner = new Grid { Height = 80, Background = new SolidColorBrush(Color.FromRgb(247, 249, 252)) };
         banner.ColumnDefinitions.Add(new ColumnDefinition());
         banner.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var name = new TextBlock { Text = "✦  Nexo", FontSize = 27, FontWeight = FontWeights.Bold, Foreground = new SolidColorBrush(Color.FromRgb(35, 58, 110)), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(26, 0, 0, 0) };
+        var name = new TextBlock { Text = Installer.IsPreview ? "✦  Nexo Prévia" : "✦  Nexo", FontSize = 27, FontWeight = FontWeights.Bold, Foreground = new SolidColorBrush(Color.FromRgb(35, 58, 110)), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(26, 0, 0, 0) };
         banner.Children.Add(name);
         var mark = new Border { Background = new SolidColorBrush(Color.FromRgb(129, 163, 235)), CornerRadius = new CornerRadius(9), Width = 42, Height = 42, Margin = new Thickness(0, 0, 26, 0), VerticalAlignment = VerticalAlignment.Center };
         mark.Child = new TextBlock { Text = "N", Foreground = Brushes.White, FontSize = 24, FontWeight = FontWeights.Bold, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
@@ -76,7 +76,7 @@ public sealed class SetupWindow : Window
         else if (page == 1)
         {
             heading.Text = "Pronto para instalar";
-            subheading.Text = "O instalador vai baixar a versão publicada e o modelo de IA.";
+            subheading.Text = Installer.IsPreview ? "O instalador vai baixar a prévia 1.7.0 e o modelo de IA." : "O instalador vai baixar a versão publicada e o modelo de IA.";
             content.Children.Add(heading); content.Children.Add(subheading);
             content.Children.Add(new TextBlock { Text = "Destino: " + System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Nexo")
                 + "\n\nInclui o Nexo, o Ollama e o modelo qwen3:8b. Os pacotes são conferidos por assinatura e SHA-256 antes do uso. É necessária conexão com a internet e espaço livre para o modelo.",

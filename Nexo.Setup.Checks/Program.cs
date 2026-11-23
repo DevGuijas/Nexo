@@ -22,6 +22,14 @@ try
 {
     Installer.ValidateManifestUri(new Uri("https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/ns/b/nexo/o/latest.json"));
     Check(true, "Manifesto Oracle por HTTPS aceito");
+    var releaseRoot = "https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/ns/b/nexo/o/";
+    Check(Installer.PackageBaseUrl(new Uri(releaseRoot + "latest.json")).AbsoluteUri == releaseRoot,
+        "Canal estável resolve pacotes na raiz do bucket");
+    Check(Installer.PackageBaseUrl(new Uri(releaseRoot + "preview/latest.json")).AbsoluteUri == releaseRoot,
+        "Canal de prévia reutiliza pacotes na raiz do bucket");
+    var signatureProcess = Installer.CreateSignatureCheckProcess(Path.Combine(Environment.SystemDirectory, "notepad.exe"));
+    Check(signatureProcess.Environment["PSModulePath"] == Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "Modules"),
+        "Checagem Authenticode usa somente módulos do Windows, mesmo quando iniciada pelo PowerShell 7");
     Reject(() => Installer.ValidateManifestUri(new Uri("http://example.com/latest.json")), "Manifesto sem HTTPS rejeitado");
     Reject(() => Installer.ValidateManifestUri(new Uri("https://example.com/other.json")), "Manifesto fora do nome esperado rejeitado");
     var hash = new string('a', 64);
@@ -63,6 +71,13 @@ try
     await Installer.InstallModelArchive(modelArchive, modelRoot);
     Check(File.Exists(Path.Combine(modelRoot, "blobs", "sha256-" + digest))
         && File.Exists(Path.Combine(modelRoot, "manifests", "registry.ollama.ai", "library", "qwen3", "8b")), "Modelo validado por digest e manifesto publicado por último");
+    var installedBlob = Path.Combine(modelRoot, "blobs", "sha256-" + digest);
+    File.Delete(installedBlob);
+    using (var zip = ZipFile.OpenRead(modelArchive))
+    using (var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(modelRoot, "manifests", "registry.ollama.ai", "library", "qwen3", "8b"))))
+        await Installer.EnsureModelManifestBlobs(zip, document.RootElement, modelRoot);
+    Check(File.Exists(installedBlob) && Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(installedBlob))).Equals(digest, StringComparison.OrdinalIgnoreCase),
+        "Blob removido durante a importação é restaurado antes de ativar o manifesto");
     var corruptArchive = Path.Combine(root, "corrupt-model.zip");
     using (var zip = ZipFile.Open(corruptArchive, ZipArchiveMode.Create))
     {

@@ -16,6 +16,7 @@ artifacts/
 **/secrets/
 *.pfx
 *.pem
+!Nexo.Setup/preview-public.pem
 *.key
 
 # Estado gerado por execução e testes
@@ -27,3 +28,6 @@ artifacts/
 /log.txt
 *.tmp
 coverage/
+
+# Arquivos pessoais recuperados da instalação anterior
+/Documentos Nexo e relatórios/

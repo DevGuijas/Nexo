@@ -7,8 +7,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>NexoSetup</AssemblyName>
     <Version>1.0.0</Version>
+    <Version Condition="'$(NexoPreview)' == 'true'">1.1.1</Version>
+    <DefineConstants Condition="'$(NexoPreview)' == 'true'">$(DefineConstants);NEXO_PREVIEW</DefineConstants>
     <Product>Nexo</Product>
     <Description>Instalador do Nexo que baixa a versão publicada no manifesto assinado.</Description>
   </PropertyGroup>
-  <ItemGroup><EmbeddedResource Include="release-public.pem" /></ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="release-public.pem" Condition="'$(NexoPreview)' != 'true'" />
+    <EmbeddedResource Include="preview-public.pem" LogicalName="Nexo.Setup.release-public.pem" Condition="'$(NexoPreview)' == 'true'" />
+  </ItemGroup>
 </Project>

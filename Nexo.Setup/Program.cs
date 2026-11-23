@@ -17,7 +17,13 @@ public sealed record ReleaseManifest(int Schema, string Version, string Model, P
 public static class Installer
 {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int MessageBoxW(IntPtr owner, string text, string caption, uint type);
+#if NEXO_PREVIEW
+    public const string DefaultManifestUrl = "https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/preview/latest.json";
+    public const bool IsPreview = true;
+#else
     public const string DefaultManifestUrl = "https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/latest.json";
+    public const bool IsPreview = false;
+#endif
     private static readonly HttpClient Client = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromHours(2) };
     private static readonly string LocalAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 
@@ -59,7 +65,7 @@ public static class Installer
             var manifest = JsonSerializer.Deserialize<ReleaseManifest>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                 ?? throw new InvalidDataException("Manifesto vazio.");
             ValidateManifest(manifest);
-            var baseUrl = new Uri(manifestUrl, ".");
+            var baseUrl = PackageBaseUrl(manifestUrl);
             if (checkOnly)
             {
                 foreach (var package in new[] { manifest.App, manifest.ModelArchive }.Concat(manifest.Ollama == null ? [] : [manifest.Ollama]))
@@ -132,6 +138,9 @@ public static class Installer
             || !uri.AbsolutePath.EndsWith("/latest.json", StringComparison.Ordinal))
             throw new InvalidDataException("Use um manifesto latest.json publicado por HTTPS.");
     }
+
+    public static Uri PackageBaseUrl(Uri manifestUrl) =>
+        new(manifestUrl, manifestUrl.AbsolutePath.EndsWith("/preview/latest.json", StringComparison.Ordinal) ? "../" : ".");
 
     public static bool VerifyReleaseSignature(byte[] manifest, string signatureText)
     {
@@ -271,15 +280,35 @@ public static class Installer
         {
             manifest.ExtractToFile(tempManifest, true);
             using var document = JsonDocument.Parse(await File.ReadAllTextAsync(tempManifest));
-            var digests = new[] { document.RootElement.GetProperty("config").GetProperty("digest").GetString() }
-                .Concat(document.RootElement.GetProperty("layers").EnumerateArray().Select(layer => layer.GetProperty("digest").GetString()));
-            foreach (var digest in digests)
-                if (digest == null || !Regex.IsMatch(digest, "^sha256:[0-9a-f]{64}$")
-                    || !File.Exists(Path.Combine(modelsRoot, "blobs", digest.Replace(':', '-'))))
-                    throw new InvalidDataException("O manifesto do modelo referencia um blob ausente.");
+            await EnsureModelManifestBlobs(zip, document.RootElement, modelsRoot);
             File.Move(tempManifest, targetManifest, true);
         }
         finally { if (File.Exists(tempManifest)) File.Delete(tempManifest); }
+    }
+
+    public static async Task EnsureModelManifestBlobs(ZipArchive zip, JsonElement modelManifest, string modelsRoot)
+    {
+        var digests = new[] { modelManifest.GetProperty("config").GetProperty("digest").GetString() }
+            .Concat(modelManifest.GetProperty("layers").EnumerateArray().Select(layer => layer.GetProperty("digest").GetString()));
+        foreach (var digest in digests)
+        {
+            if (digest == null || !Regex.IsMatch(digest, "^sha256:[0-9a-f]{64}$"))
+                throw new InvalidDataException("Digest inválido no manifesto do modelo.");
+            var name = digest.Replace(':', '-');
+            var destination = Path.Combine(modelsRoot, "blobs", name);
+            if (File.Exists(destination)) continue;
+            var entry = zip.GetEntry("blobs/" + name)
+                ?? throw new InvalidDataException("O manifesto do modelo referencia um blob ausente.");
+            var temporary = destination + ".nexo-new";
+            try
+            {
+                entry.ExtractToFile(temporary, true);
+                if (!await HashMatches(temporary, digest[7..]))
+                    throw new InvalidDataException("Blob do modelo não corresponde ao digest: " + name);
+                File.Move(temporary, destination, true);
+            }
+            finally { if (File.Exists(temporary)) File.Delete(temporary); }
+        }
     }
 
     private static async Task Run(string program, string arguments, TimeSpan timeout)
@@ -320,23 +349,34 @@ public static class Installer
         return quoted.Append('\'').ToString();
     }
 
-    private static async Task<bool> VerifyOllamaSignature(string path)
+    public static ProcessStartInfo CreateSignatureCheckProcess(string path)
     {
         var script = "$s=Get-AuthenticodeSignature -LiteralPath " + Quote(path) + "; [pscustomobject]@{Status=[string]$s.Status;Subject=[string]$s.SignerCertificate.Subject} | ConvertTo-Json -Compress";
         var command = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
-        using var process = Process.Start(new ProcessStartInfo("powershell.exe")
+        var windowsPowerShell = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0");
+        var startInfo = new ProcessStartInfo(Path.Combine(windowsPowerShell, "powershell.exe"))
         {
             Arguments = "-NoProfile -NonInteractive -EncodedCommand " + command,
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true
-        }) ?? throw new IOException("Não foi possível validar a assinatura do Ollama.");
+        };
+        startInfo.Environment["PSModulePath"] = Path.Combine(windowsPowerShell, "Modules");
+        return startInfo;
+    }
+
+    private static async Task<bool> VerifyOllamaSignature(string path)
+    {
+        using var process = Process.Start(CreateSignatureCheckProcess(path))
+            ?? throw new IOException("Não foi possível validar a assinatura do Ollama.");
         var output = await process.StandardOutput.ReadToEndAsync();
+        var errors = await process.StandardError.ReadToEndAsync();
         await process.WaitForExitAsync();
-        if (process.ExitCode != 0) throw new IOException("Falha ao validar a assinatura do Ollama.");
+        if (process.ExitCode != 0) throw new IOException("Falha ao validar a assinatura do Ollama: " + errors);
         using var result = JsonDocument.Parse(output);
         var status = result.RootElement.GetProperty("Status").GetString();
+        var subject = result.RootElement.GetProperty("Subject").GetString() ?? "";
         if (status == "NotSigned") return false;
-        if (status != "Valid" || !(result.RootElement.GetProperty("Subject").GetString() ?? "").Contains("Ollama", StringComparison.OrdinalIgnoreCase))
-            throw new IOException("A assinatura do Ollama é inválida ou pertence a outro fornecedor.");
+        if (status != "Valid" || !subject.Contains("Ollama", StringComparison.OrdinalIgnoreCase))
+            throw new IOException($"A assinatura do Ollama é inválida ou pertence a outro fornecedor (status: {status}; titular: {subject}; erro: {errors}).");
         return true;
     }
 }
