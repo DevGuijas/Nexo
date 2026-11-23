@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -36,6 +37,7 @@ internal static class AppRemovalChatChecks
             await QaCases(store, actor, assert);
             await PcMixedRefusal(store, actor, assert);
             await SelfOfferGetsLine(store, actor, assert);
+            await CopiedWithoutRefusal(store, actor, assert);
         }
         finally { store.Data.AiEnabled = previousAi; System.Globalization.CultureInfo.CurrentCulture = previousCulture; }
     }
@@ -304,6 +306,14 @@ internal static class AppRemovalChatChecks
         var mixed = AgentProtocol.WithoutAppRemovalPath(kept + " " + AgentProtocol.AppRemovalLine);
         if (mixed != kept) wrong.Add("misto → " + mixed);
         if (AgentProtocol.WithoutAppRemovalPath("Reinicie o PC e me diga se a lentidão continua.") != "Reinicie o PC e me diga se a lentidão continua.") wrong.Add("sem caminho");
+        // @qa: orientação real que cita Configurações > Aplicativos ou outro cartão de Ferramentas não é cópia do caminho.
+        foreach (var legit in new[]
+        {
+            "Abra Configurações > Aplicativos > Inicialização e desative os programas que abrem junto com o Windows.",
+            "Para limpar os temporários, use Ferramentas > Otimizar PC.",
+            "O Office pode ser instalado pelo menu Ferramentas.",
+        })
+            if (AgentProtocol.WithoutAppRemovalPath(legit) != legit) wrong.Add("legítima → " + legit);
         assert(wrong.Count == 0, "#127 (PC e7c8b32): a cópia do caminho do cartão sai antes de medir o conteúdo da resposta; o resto fica" + (wrong.Count > 0 ? " · " + string.Join(" | ", wrong) : ""));
     }
 
@@ -347,6 +357,21 @@ internal static class AppRemovalChatChecks
         assert(answer.Contains(accepted, StringComparison.Ordinal) && line > answer.IndexOf(accepted, StringComparison.Ordinal)
             && answer.IndexOf(AgentProtocol.AppRemovalLine, line + 1, StringComparison.Ordinal) < 0,
             "#127 (PC e7c8b32): sem pedido de remoção, a oferta recusada do modelo faz a resposta aceita ganhar a linha do cartão · " + answer.Replace("\n", " "));
+    }
+
+    // @qa: no pedido misto, o modelo copia o caminho do cartão já na 1ª resposta, sem recusa no turno. O que as consultas mostraram
+    // não pode sumir: a resposta vira o relato das consultas, com a linha do cartão uma vez.
+    private static async Task CopiedWithoutRefusal(Store store, Account actor, Action<bool, string> assert)
+    {
+        var model = new CapturingModel([Text(AgentProtocol.AppRemovalGuidance)]);
+        using var http = new HttpClient(model);
+        var conversation = new Conversation { UserId = actor.Id, Entries = [new Entry { Role = "user", Text = "meu pc ta lento, remove os apps inúteis" }] };
+        var tools = new FlowTools(name => name == "get_health_report" ? WindowsTools.Ok("Espaço livre por volume: C: 77,7% livre.") : null);
+        var answer = (await new AgentService(store, tools, http).Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None)).ReplaceLineEndings("\n");
+        var findings = answer.IndexOf("O monitor de saúde", StringComparison.Ordinal);
+        var cards = Regex.Matches(answer, "Apps pré-instalados e ajustes do Windows").Count;
+        assert(model.Consumed && tools.Calls.Contains("get_health_report") && findings >= 0 && cards == 1 && answer.IndexOf("Apps pré-instalados", StringComparison.Ordinal) > findings,
+            "#127 (@qa): no pedido misto, a 1ª resposta que só copia o caminho do cartão, sem recusa, vira o relato das consultas com o cartão uma vez · " + answer.Replace("\n", " "));
     }
 
     private static async Task<string> Ask(Store store, Account actor, string request, CapturingModel model)

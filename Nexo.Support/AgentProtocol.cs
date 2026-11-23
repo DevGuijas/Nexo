@@ -80,7 +80,10 @@ public static class AgentProtocol
         var normalized = Normalize(sentence);
         var plain = Regex.Replace(normalized, @"\W+", " ").Trim();
         return plain.Length > 0 && !RemovalPath.IsMatch(normalized) && !(plain.Length >= 12 && NexoRemovalSentences.Any(nexo => nexo.Contains(plain, StringComparison.Ordinal)))
-            && !Regex.IsMatch(normalized, @"\bnao remove\w*\b[^.]*\bpelo chat\b|\bconfigurac\w*\W+aplicativos\b");
+            && !Regex.IsMatch(normalized, @"\bnao remove\w*\b[^.]*\bpelo chat\b")
+            // @qa: Configurações > Aplicativos só é cópia quando a frase fala de desinstalar ou remover; "abra Configurações >
+            // Aplicativos > Inicialização e desative…" é orientação real de lentidão e fica.
+            && !(Regex.IsMatch(normalized, @"\bconfigurac\w*\W+aplicativos\b") && Regex.IsMatch(normalized, @"\b(?:desinstal|remov)\w*"));
     }));
     // A resposta já leva ao cartão: o nome "Apps pré-instalados e ajustes" (com ou sem Ferramentas antes) basta.
     public static bool CitesAppRemovalPath(string normalized) => RemovalPath.IsMatch(normalized);

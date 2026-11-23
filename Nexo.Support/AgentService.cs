@@ -668,8 +668,11 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         {
             var removal = appRemovalRequest || refusals.ContainsKey(AgentProtocol.AppRemovalReason);
             var core = removal ? AgentProtocol.WithoutAppRemovalPath(text) : text;
+            // @qa: o modelo pode copiar o caminho do cartão já na 1ª resposta, sem recusa no turno; o caminho tirado conta como
+            // resposta pobre também nesse caso, para o que as consultas mostraram não sumir.
+            var stripped = removal && core.Trim().Length < text.Trim().Length;
             var answer = refusedMutations.Count > 0 ? evidence.Report("")
-                : refusals.Count > 0 && evidence.HasFindings && evidence.IsThinAnswer(core) ? evidence.Report(core.Trim())
+                : (refusals.Count > 0 || stripped) && evidence.HasFindings && evidence.IsThinAnswer(core) ? evidence.Report(core.Trim())
                 : evidence.WithSensorFigures(evidence.WithStorageGuidance(evidence.WithMemoryFigures(text)));
             return removal ? InvestigationEvidence.WithAppRemovalGuidance(answer) : answer;
         }
