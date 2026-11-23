@@ -1761,8 +1761,11 @@ public partial class MainWindow : Window
                 }
                 else if (license != null || !options[1].IsEnabled) throw new InvalidOperationException("A autorização comum ficou indisponível.");
                 visual.UpdateLayout();
-                var bitmap = new RenderTargetBitmap((int)visual.ActualWidth, (int)visual.ActualHeight, 96, 96, PixelFormats.Pbgra32);
-                bitmap.Render(visual);
+                // #143: o cartão tem margem de 16 px na janela e o RenderTargetBitmap desenha o visual já deslocado por ela, o que cortava a borda
+                // da direita e de baixo. A captura usa a raiz da área cliente do diálogo (sem deslocamento), com o cartão inteiro e a margem.
+                var root = (FrameworkElement)VisualTreeHelper.GetChild(dialog, 0);
+                var bitmap = new RenderTargetBitmap((int)Math.Ceiling(root.ActualWidth), (int)Math.Ceiling(root.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+                bitmap.Render(root);
                 var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
                 using var output = File.Create(Path.Combine(AppContext.BaseDirectory, PreviewFile(file))); encoder.Save(output);
             });

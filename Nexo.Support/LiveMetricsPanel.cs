@@ -185,7 +185,8 @@ public sealed class LiveMetricsPanel : Border
                 var x = ChartWidth * index / Math.Max(1, LiveMetricsSampler.HistoryCapacity - 1);
                 points.Add(new Point(x, ChartHeight - ChartHeight * Math.Clamp(sample / max, 0, 1)));
             }
-            line.Points = points;
+            // #143: com menos de 2 amostras não há linha; um ponto só aparecia solto na Memória, enquanto CPU e Disco não desenhavam nada.
+            line.Points = points.Count >= 2 ? points : new PointCollection();
         }
     }
 }
