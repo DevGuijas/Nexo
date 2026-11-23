@@ -404,8 +404,9 @@ public partial class MainWindow : Window
                 var overview = new StackPanel();
                 overview.Children.Add(Text("Última leitura · " + latest.Time.ToLocalTime().ToString("g"), 12, "Secondary"));
                 var metrics = new System.Windows.Controls.Primitives.UniformGrid { Columns = 3, Margin = new Thickness(0, 15, 0, 14) };
-                metrics.Children.Add(MetricTile("CPU", MetricPercent(latest.CpuPercent), "performance"));
-                metrics.Children.Add(MetricTile("Memória", MetricPercent(latest.MemoryUsedPercent), "health"));
+                // Sem leitura, "indisponível" é texto: usa a fonte do corpo como o estado da rede, para não cortar com reticências.
+                metrics.Children.Add(MetricTile("CPU", MetricPercent(latest.CpuPercent), "performance", numeric: latest.CpuPercent.HasValue));
+                metrics.Children.Add(MetricTile("Memória", MetricPercent(latest.MemoryUsedPercent), "health", numeric: latest.MemoryUsedPercent.HasValue));
                 metrics.Children.Add(MetricTile("Rede local", latest.Connectivity switch { "local" => "Interface ativa", "none" => "Sem interface", _ => "Indisponível" }, "network", numeric: false));
                 overview.Children.Add(metrics);
                 var collectionStatus = latest.CollectionStatus switch { "complete" => "completa", "partial" => "parcial", _ => latest.CollectionStatus };

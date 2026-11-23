@@ -142,6 +142,8 @@ internal static class ThemeChecks
         assert(panel.Contains("TryFindResource(\"MonoFont\") is FontFamily mono) value.FontFamily = mono"), "Os números do cartão Agora usam a fonte mono do tema");
         assert(code.Contains("\"network\", numeric: false)") && code.Contains("if (numeric) { valueText.FontFamily = Font(\"MonoFont\");")
             && code.Contains("TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis"), "O estado da rede local usa a fonte do corpo e não quebra em duas linhas");
+        assert(code.Contains("\"performance\", numeric: latest.CpuPercent.HasValue)") && code.Contains("\"health\", numeric: latest.MemoryUsedPercent.HasValue)"),
+            "CPU e memória sem leitura (\"indisponível\") usam a fonte do corpo, não o mono cortado com reticências");
 
         // O PowerShell 5.1 lê um .ps1 sem BOM como ANSI e quebra os acentos no console (Check-UiPreview no PC, 23/11). Os scripts
         // rodados por -File (scripts/ e Nexo.Checks/) com caractere fora do ASCII ficam em UTF-8 com BOM. Os .ps1 do Nexo.Support
