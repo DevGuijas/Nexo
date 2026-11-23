@@ -122,8 +122,9 @@
          <TextBlock Text="Local e privado" Foreground="{DynamicResource Accent}" FontSize="11" FontWeight="SemiBold" Margin="7,0,0,0"/>
         </StackPanel>
        </Border>
-       <StackPanel><TextBlock Text="ASSISTENTE" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource Subtle}"/>
-        <TextBlock Text="Seu espaço de suporte" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource Ink}" Margin="0,4,0,0"/>
+       <StackPanel><StackPanel Orientation="Horizontal"><Border Width="7" Height="7" Background="{DynamicResource Accent}" VerticalAlignment="Center"/>
+         <TextBlock Text="ASSISTENTE · ATENDIMENTO LOCAL" FontFamily="{StaticResource MonoFont}" FontSize="11" Foreground="{DynamicResource Secondary}" Margin="9,0,0,0" VerticalAlignment="Center"/></StackPanel>
+        <TextBlock Text="Seu espaço de suporte" FontFamily="{StaticResource DisplayFont}" FontSize="26" FontWeight="SemiBold" Foreground="{DynamicResource Ink}" Margin="0,4,0,0"/>
        </StackPanel>
       </DockPanel>
      </Border>
@@ -137,7 +138,7 @@
        <Grid>
         <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <ScrollViewer x:Name="ProgressScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-         <TextBlock x:Name="ProgressText" Foreground="{DynamicResource Secondary}" LineHeight="22" Margin="0,0,7,0"/>
+         <TextBlock x:Name="ProgressText" Foreground="{DynamicResource Secondary}" FontSize="13" LineHeight="22" Margin="0,0,7,0" AutomationProperties.Name="Etapas do atendimento"/>
         </ScrollViewer>
         <ProgressBar x:Name="BusyBar" Grid.Row="1" IsIndeterminate="True" Height="3" Foreground="{DynamicResource Accent}"
                      Background="{DynamicResource AccentSoft}" Visibility="Collapsed" Margin="0,10,0,0"/>
@@ -147,8 +148,8 @@
       </Border>
 
       <WrapPanel x:Name="ChatActions" HorizontalAlignment="Right" Visibility="Collapsed">
-       <Button x:Name="ResolvedButton" Content="Meu problema foi resolvido" Click="ResolvedClick" Margin="0,0,8,12" FontSize="12"/>
-       <Button x:Name="TicketButton" Content="Encaminhar para a TI" Click="EscalateClick" Margin="0,0,0,12" FontSize="12"/>
+       <Button x:Name="ResolvedButton" Content="Meu problema foi resolvido" Click="ResolvedClick" Margin="0,0,8,12" FontSize="13" Padding="14,8" BorderBrush="{DynamicResource Success}" AutomationProperties.Name="Meu problema foi resolvido"/>
+       <Button x:Name="TicketButton" Content="Encaminhar para a TI" Click="EscalateClick" Margin="0,0,0,12" FontSize="13" Padding="14,8" AutomationProperties.Name="Encaminhar para a TI"/>
       </WrapPanel>
 
       <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Stroke}" BorderThickness="1" CornerRadius="14" Padding="12">
