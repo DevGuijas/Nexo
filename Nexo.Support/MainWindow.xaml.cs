@@ -1523,9 +1523,13 @@ public partial class MainWindow : Window
             throw new InvalidOperationException("O tema " + ThemeCatalog.DisplayName(ThemeManager.Current) + " não foi aplicado à janela principal.");
         if (!HasVectorIcon(ChatNav) || !HasVectorIcon(HomeNav)) throw new InvalidOperationException("A navegação não usa ícones vetoriais.");
         if (Shell.Visibility != Visibility.Visible || !Messages.Children.OfType<StackPanel>().Any()) throw new InvalidOperationException("Falha na abertura direta do aplicativo.");
+        // #143: o Nexo abre na Início com o Assistente recolhido, e um botão recolhido não tem o modelo visual aplicado.
+        // Os atalhos do Assistente são conferidos com ele visível, e a prévia volta à Início antes das checagens do shell.
+        ShowPage("chat"); UpdateLayout();
         var shortcutGrid = Messages.Children.OfType<StackPanel>().SelectMany(s => s.Children.OfType<System.Windows.Controls.Primitives.UniformGrid>()).FirstOrDefault();
         if (shortcutGrid?.Children.Count != 6 || shortcutGrid.Children.OfType<Button>().Any(button => !HasVectorIcon(button)))
             throw new InvalidOperationException("Os seis atalhos iniciais precisam de ícones vetoriais.");
+        ShowPage("home"); UpdateLayout();
         if (Sidebar.ActualWidth < 220) throw new InvalidOperationException("A navegação ficou estreita para o novo layout.");
         // #143, etapas 2 e 3: tela Início de abertura, atalhos, paleta Ctrl+K, barra de título e barra lateral.
         await VerifyShellPreview(name => Capture(name));
