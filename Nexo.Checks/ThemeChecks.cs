@@ -158,6 +158,7 @@ internal static class ThemeChecks
         }
         assert(NeedsBom(Encoding.UTF8.GetBytes("# Prévia")) && !NeedsBom([0xEF, 0xBB, 0xBF, .. Encoding.UTF8.GetBytes("# Prévia")]) && !NeedsBom(Encoding.UTF8.GetBytes("# Previa")),
             "A regra do BOM pega o script com acento sem BOM e aceita o com BOM e o só ASCII");
+        PageLayoutChecks.Run(assert);
     }
 
     private static bool NeedsBom(byte[] bytes) => !(bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) && bytes.Any(b => b > 0x7F);
