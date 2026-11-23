@@ -40,6 +40,15 @@ if (args.Contains("--raid-temperature"))
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
+if (args.Contains("--closed-occurrence"))
+{
+    var closedStore = new Store(Path.Combine(root, "closed"));
+    var closedAdmin = closedStore.Login("Guisbz", "1234");
+    closedAdmin.MustChangePassword = false; closedStore.Save();
+    await ClosedOccurrenceChecks.Run(closedStore, closedAdmin, Assert);
+    Console.WriteLine($"{count} verificações aprovadas.");
+    return;
+}
 if (args.Contains("--network-followup"))
 {
     var followUpStore = new Store(Path.Combine(root, "followup"));
@@ -285,6 +294,7 @@ try
     await PcRetestChecks.Run(store, admin, Assert);
     await NetworkFollowUpChecks.Run(store, admin, Assert);
     await RaidTemperatureChecks.Run(store, admin, Assert);
+    await ClosedOccurrenceChecks.Run(store, admin, Assert);
     await NetworkRecoveryChecks.Run(Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);
