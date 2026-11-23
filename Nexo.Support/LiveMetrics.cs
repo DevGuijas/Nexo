@@ -59,11 +59,22 @@ public sealed class LiveMetricsSampler
     private TimeSpan? lastProcessCpu;
     private DateTimeOffset? lastTime;
     private DateTimeOffset? pausedAt;
+    // O PDH calcula a taxa entre a coleta anterior e a atual. Depois de uma pausa longa, a 1ª coleta seria a média do tempo
+    // parado (validação no PC, fa1c668: "gravação 550,1 KB/s" logo ao restaurar, enquanto CPU e rede mostravam "medindo…").
+    // Essa coleta é descartada, e o disco espera a seguinte, como as outras métricas.
+    private bool diskStale;
     private readonly Queue<double?>[] history = [new(), new(), new(), new()];
     // A amostra roda fora da thread da interface; pausa, retomada e histórico vêm da interface.
     private readonly object sync = new();
 
     public LiveMetricsSampler(ILiveMetricsSource source) => this.source = source;
+
+    /// <summary>
+    /// Se o painel deve ler agora: carregado, ele mesmo visível (não basta a janela: na página Assistente a MainWindow só recolhe a
+    /// área das páginas e o painel continua carregado — validação no PC, fa1c668), com a janela visível e não minimizada.
+    /// </summary>
+    public static bool ShouldRun(bool loaded, bool panelVisible, bool windowVisible, bool windowMinimized) =>
+        loaded && panelVisible && windowVisible && !windowMinimized;
 
     public bool Paused { get { lock (sync) return pausedAt != null; } }
     public IReadOnlyList<double?> CpuHistory => History(0);
@@ -90,6 +101,7 @@ public sealed class LiveMetricsSampler
     private void ResetLocked()
     {
         lastCpu = null; lastAdapters = null; lastProcessCpu = null; lastTime = null;
+        diskStale = true;
         foreach (var queue in history) queue.Clear();
     }
 
@@ -146,6 +158,11 @@ public sealed class LiveMetricsSampler
         DiskCounters counters;
         try { counters = source.ReadDisk(); }
         catch (Exception ex) { return (LiveMetric.Unavailable(ex.Message), null, null); }
+        if (diskStale)
+        {
+            diskStale = false;
+            if (counters.Status == LiveStatus.Ok) return (LiveMetric.Waiting, null, null);
+        }
         return counters.Status switch
         {
             LiveStatus.Ok when double.IsFinite(counters.IdlePercent) && double.IsFinite(counters.ReadBytesPerSecond) && double.IsFinite(counters.WriteBytesPerSecond) =>

@@ -37,6 +37,8 @@ internal static class LiveMetricsChecks
             IndependentFailures(assert);
             CounterEdges(assert);
             PauseAndResume(assert);
+            DiskAfterPause(assert);
+            VisibilityPolicy(assert);
             HistoryLimit(assert);
             Units(assert);
             Separation(assert);
@@ -174,6 +176,58 @@ internal static class LiveMetricsChecks
             "#141: depois de pausa longa, a 1ª leitura não é a média do tempo parado: espera a próxima amostra");
         sampler.Resume(Start.AddMinutes(6));
         assert(sampler.CpuHistory.Count == 1, "#141: retomar sem pausa não apaga nada");
+    }
+
+    // Validação no PC (fa1c668, 23/11): ao restaurar a janela depois de minutos parada, o disco mostrava a média do PDH sobre a
+    // pausa ("gravação 550,1 KB/s"), enquanto CPU e rede esperavam a 2ª leitura.
+    private static void DiskAfterPause(Action<bool, string> assert)
+    {
+        var source = new FakeSource { Disk = new DiskCounters(LiveStatus.Ok, 40, 1000, 2000) };
+        var sampler = new LiveMetricsSampler(source);
+        var first = sampler.Sample(Start);
+        assert(first.DiskActive.Status == LiveStatus.Ok && Math.Abs(first.DiskActive.Value!.Value - 60) < 0.001,
+            "#141: sem pausa, o disco usa a coleta do PDH normalmente");
+        sampler.Pause(Start.AddSeconds(1));
+        sampler.Resume(Start.AddSeconds(2));
+        assert(sampler.Sample(Start.AddSeconds(2)).DiskActive.Status == LiveStatus.Ok, "#141: depois de pausa curta, o disco segue sem esperar");
+
+        sampler.Pause(Start.AddSeconds(3));
+        sampler.Resume(Start.AddMinutes(4));
+        source.Disk = new DiskCounters(LiveStatus.Ok, 98, 6758, 563_200);
+        var resumed = sampler.Sample(Start.AddMinutes(4));
+        assert(resumed.DiskActive.Status == LiveStatus.Waiting && resumed.DiskReadBytesPerSecond == null && resumed.DiskWriteBytesPerSecond == null,
+            "#141: depois de pausa longa, a 1ª coleta do disco (média do tempo parado) é descartada: aparece \"medindo…\"");
+        assert(LiveMetricsSampler.FormatPercent(resumed.DiskActive) == "medindo…", "#141: o disco em espera aparece como \"medindo…\", como CPU e rede");
+        source.Disk = new DiskCounters(LiveStatus.Ok, 75, 2048, 4096);
+        var next = sampler.Sample(Start.AddMinutes(4).AddSeconds(1));
+        assert(next.DiskActive.Status == LiveStatus.Ok && Math.Abs(next.DiskActive.Value!.Value - 25) < 0.001 && next.DiskWriteBytesPerSecond == 4096,
+            "#141: a coleta seguinte do disco já sai normalmente");
+
+        var waiting = new FakeSource { Disk = new DiskCounters(LiveStatus.Waiting) };
+        var fresh = new LiveMetricsSampler(waiting);
+        fresh.Reset();
+        assert(fresh.Sample(Start).DiskActive.Status == LiveStatus.Waiting, "#141: se o PDH já está esperando, o disco espera só uma vez");
+        waiting.Disk = new DiskCounters(LiveStatus.Ok, 50, 0, 0);
+        assert(fresh.Sample(Start.AddSeconds(1)).DiskActive.Status == LiveStatus.Ok, "#141: e não descarta a coleta seguinte, que já é nova");
+    }
+
+    // Validação no PC (fa1c668, 23/11): na página Assistente o painel não pausava, porque a MainWindow só recolhe a área das páginas
+    // e o painel continua carregado; o custo de CPU ficou igual ao da tela visível.
+    private static void VisibilityPolicy(Action<bool, string> assert)
+    {
+        assert(LiveMetricsSampler.ShouldRun(loaded: true, panelVisible: true, windowVisible: true, windowMinimized: false), "#141: lê com o painel e a janela visíveis");
+        assert(!LiveMetricsSampler.ShouldRun(loaded: true, panelVisible: false, windowVisible: true, windowMinimized: false),
+            "#141: não lê com o painel carregado mas recolhido (página Assistente)");
+        assert(!LiveMetricsSampler.ShouldRun(true, true, true, windowMinimized: true), "#141: não lê com a janela minimizada");
+        assert(!LiveMetricsSampler.ShouldRun(true, true, windowVisible: false, false), "#141: não lê com a janela escondida na bandeja");
+        assert(!LiveMetricsSampler.ShouldRun(loaded: false, true, true, false), "#141: não lê com o painel fora da tela (outra página)");
+        var root = RepositoryRoot();
+        if (root == null) return;
+        var panel = Code(Path.Combine(root, "Nexo.Support", "LiveMetricsPanel.cs"));
+        assert(System.Text.RegularExpressions.Regex.IsMatch(panel, @"(?m)^\s*IsVisibleChanged\s*\+="),
+            "#141: o painel acompanha a própria visibilidade (IsVisibleChanged), não só a da janela");
+        assert(panel.Contains("LiveMetricsSampler.ShouldRun(loaded, IsVisible,", StringComparison.Ordinal),
+            "#141: o painel decide se lê pela própria visibilidade (IsVisible) com a regra testada");
     }
 
     private static void HistoryLimit(Action<bool, string> assert)
