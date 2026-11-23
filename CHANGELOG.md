@@ -28,6 +28,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - [x] Validar no PC o patamar estável na resposta, sem culpar o processo pela lentidão quando a memória está abaixo de 80% (#71).
 - [ ] Validar no PC as métricas ao vivo contra o Gerenciador de Tarefas e medir o custo de CPU do Nexo (#141).
 - [ ] Validar no PC os temas da #143: `scripts/Check-UiPreview.ps1` com `-Theme onyx` e `-Theme glacial` sem falha, as capturas dos dois temas conferidas a olho e a troca em Configurações > Aparência mantida depois de fechar e abrir o Nexo.
+- [ ] Validar no PC a janela e a Início da #143 (etapas 2 e 3): `scripts/Check-UiPreview.ps1 -Theme onyx` e `-Theme glacial` sem falha, snap layouts ao passar sobre o maximizar no Windows 11, maximizar sem cortar a borda e a janela em 100%, 125% e 150% de escala.
 - [ ] Trocar "não publicada" pela data de publicação, gerar os pacotes e registrar abaixo o commit e os hashes impressos pelo script.
 
 ### Saúde do computador
@@ -98,6 +99,8 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 
 - Navegação, formulários e confirmações redesenhados, com tema claro e ícones vetoriais.
 - Novo layout, etapa 1 (#143): temas **Ônix** (escuro, padrão) e **Glacial** (claro), escolhidos em **Configurações > Aparência** e aplicados na hora, inclusive ao texto já aberto; a escolha fica no `data.json` do perfil. Cores com contraste AA (4,5:1) conferido nos testes; no Glacial, o acento é o azul da logo escurecido para passar no AA. Fontes IBM Plex Sans, Barlow Condensed e IBM Plex Mono embutidas (OFL 1.1, avisos em `ThirdParty/Fonts`), sem texto abaixo de 11 px, e logo nova em vetor na lateral e nas mensagens. O ícone do executável e da bandeja ainda é o anterior.
+- Novo layout, etapa 2 (#143): barra de título própria (arrastar, duplo clique, minimizar, maximizar/restaurar, fechar, redimensionar pelas bordas e snap layouts do Windows 11 sobre o maximizar), barra lateral de ícones que expande e recolhe com a escolha salva no `data.json`, e paleta **Ctrl+K** para abrir as telas, começar um atendimento, trocar o tema e recolher a lateral, toda pelo teclado (setas, Enter, Esc). Foco visível, nomes para leitor de tela e animação desligada quando o Windows pede menos movimento.
+- Novo layout, etapa 3 (#143): tela **Início**, a de abertura, com o estado do computador pelo monitor de saúde, o cartão Agora da #141, seis atalhos "Resolver rápido" numerados (cliques ou teclas 1 a 6) que escrevem o pedido no Assistente sem enviar, as ocorrências de hoje e os atendimentos recentes. Só dados do Nexo, com estados de carregando, vazio e indisponível.
 - A opção de monitoramento em segundo plano mantém o Nexo na bandeja quando escolhida; fechar a janela sem essa opção encerra o aplicativo (#111).
 - Em **Ferramentas**, a instalação do Office LTSC Professional Plus 2024 (64 bits, pt-BR) pede confirmação e UAC, valida o instalador oficial da Microsoft e confere a instalação no Windows. Não inclui licença nem ativação (#117).
 - Em **Ferramentas**, **Otimizar PC** remove arquivos antigos apenas das pastas temporárias permitidas e solicita ao Windows a manutenção de discos elegíveis, sem prometer ganho de desempenho. Registra cada etapa e trata acesso negado ou resultado não confirmado como parcial ou desconhecido (#118).
