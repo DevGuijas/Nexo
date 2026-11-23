@@ -56,9 +56,16 @@ public static class AgentProtocol
     // modelo não a oferece nem a executa. É recusada a frase em 1ª pessoa que oferece remover, desinstalar ou excluir apps ou
     // programas, ou que pede ao usuário a lista do que remover. Passam a negação ("não posso remover apps pelo chat"), a frase
     // que leva ao cartão de Ferramentas e a explicação de como o usuário faz ("posso explicar como desinstalar um programa").
-    internal const string AppRemovalReason = "O Nexo não remove nem desinstala apps ou programas pelo chat: não ofereça remover e não pergunte quais apps remover. Para os apps que vêm com o Windows, indique Ferramentas > Apps pré-instalados e ajustes do Windows, onde o usuário verifica o PC, escolhe os itens e confirma antes de qualquer mudança; outros programas o usuário desinstala em Configurações > Aplicativos do Windows.";
-    // Resposta do controlador quando o turno de um pedido de remoção de apps termina sem resposta aceita.
-    internal const string AppRemovalGuidance = "O Nexo não remove apps pelo chat. Para os apps que vêm com o Windows, abra Ferramentas > Apps pré-instalados e ajustes do Windows: o Nexo verifica o que existe neste PC, você escolhe os itens e confirma antes de qualquer mudança, e pode desfazer depois. Outros programas são desinstalados em Configurações > Aplicativos do Windows.";
+    // Na repetição no PC da fcca5cd (23/11, #127), o modelo copiou o verbo da instrução para o usuário ("indique **Ferramentas >
+    // Apps pré-instalados** e ajustes do Windows"), com o negrito cortando o nome do cartão. O motivo traz a frase já dirigida
+    // ao usuário, com o nome inteiro do cartão entre aspas, para o modelo repetir.
+    internal const string AppRemovalReason = "O Nexo não remove nem desinstala apps ou programas pelo chat: não ofereça remover e não pergunte quais apps remover. Diga ao usuário, com estas palavras: \"" + AppRemovalPath + "\"";
+    private const string AppRemovalPath = "Para os apps que vêm com o Windows, use o cartão “Apps pré-instalados e ajustes do Windows”, no menu Ferramentas: o Nexo verifica o que existe neste PC, você escolhe os itens e confirma antes de qualquer mudança, e pode desfazer depois. Outros programas são desinstalados em Configurações > Aplicativos do Windows.";
+    // Texto do Nexo, sem o modelo: a resposta ao pedido só de remover apps, o fim do turno de um pedido de remoção e a linha
+    // acrescentada à resposta de um pedido misto que não citou o cartão (repetição no PC da fcca5cd).
+    internal const string AppRemovalGuidance = "O Nexo não remove apps pelo chat. " + AppRemovalPath;
+    // A resposta já leva ao cartão: o nome "Apps pré-instalados e ajustes" (com ou sem Ferramentas antes) basta.
+    public static bool CitesAppRemovalPath(string normalized) => RemovalPath.IsMatch(normalized);
     private const string AppObject = @"(?:apps?|aplicativos?|programas?|softwares?|bloatwares?)";
     // Entre o verbo e o objeto cabem até 3 palavras, sem um alvo que não é app ("apagar o arquivo do programa", "limpar o cache
     // do aplicativo", "remover o vírus do programa"). Particípio não conta ("verificar se o app foi removido").

@@ -839,6 +839,12 @@ public sealed class InvestigationEvidence
         return BeforeQuestions(answer, StorageGuidance);
     }
 
+    // Pedido de remover apps (#127): a resposta aceita que não leva ao cartão de Ferramentas ganha o caminho, antes da oferta ou
+    // da pergunta final, como o caminho do Armazenamento.
+    public static string WithAppRemovalGuidance(string answer) =>
+        string.IsNullOrWhiteSpace(answer) || AgentProtocol.CitesAppRemovalPath(AgentProtocol.Normalize(answer)) ? answer
+            : BeforeQuestions(answer, AgentProtocol.AppRemovalGuidance);
+
     // A linha do Nexo entra no fim; uma pergunta ao usuário continua sendo a última coisa da resposta.
     // Na repetição no PC da 5b48461 (22/11, #135), a linha do RAID entrou entre "Se quiser, posso ajudar a verificar…" e
     // "Deseja que eu faça isso?", e o "isso" parecia falar da linha. A oferta ao usuário que vem logo antes das perguntas finais

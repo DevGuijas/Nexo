@@ -133,7 +133,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         de espaço, oriente revisar o uso do disco; o Nexo não apaga arquivos e não lista arquivos nem pastas:
         não ofereça identificar os maiores arquivos. Indique Configurações > Sistema > Armazenamento do Windows.
         O Nexo não verifica segurança: não sugira que um processo seja malicioso, vírus ou malware; fale do consumo medido.
-        O Nexo não remove nem desinstala apps pelo chat: para os apps que vêm com o Windows, indique Ferramentas > Apps pré-instalados e ajustes do Windows.
+        O Nexo não remove nem desinstala apps pelo chat: para os apps que vêm com o Windows, diga ao usuário para usar o cartão “Apps pré-instalados e ajustes do Windows”, no menu Ferramentas.
         Não descreva o que um programa ou processo faz sem que uma ferramenta tenha trazido essa informação; fale só do nome e do consumo medido.
         Para uma pergunta sobre uma letra de unidade ("o que é o D:?"), consulte get_hardware_inventory(storage) antes de responder.
         Um alerta de memória "Estável em patamar alto" é informativo: não o apresente como causa da lentidão.
@@ -263,6 +263,11 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
             }
             return final;
         }
+        // Pedido só de remover apps, sem outro sintoma (#127, repetição no PC da fcca5cd): o modelo respondeu "indique
+        // **Ferramentas > Apps pré-instalados** e ajustes do Windows", com o verbo da instrução e o nome do cartão cortado. Não há
+        // o que investigar nem ferramenta que remova apps: a resposta é o texto do Nexo, sem chamar o modelo.
+        if (appRemovalRequest && SupportIntake.InitialTopic(userRequest) == null && SupportIntake.IncidentTopics(userRequest).Count == 0)
+            return Finish(AgentProtocol.AppRemovalGuidance);
         var initialObserved = false;
         var initialTopic = SupportIntake.InitialTopic(userRequest);
         if (initialTopic != null)
@@ -654,9 +659,15 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         // começou solta ("Se a lentidão continuar…"): o modelo tirou a frase recusada e não pôs nada no lugar. Depois de uma
         // recusa da resposta neste turno, a resposta pobre (sem fato do turno, curta ou começando por uma condição solta) vem
         // depois do que as consultas mostraram.
-        string ModelAnswer(string text) => refusedMutations.Count > 0 ? evidence.Report("")
-            : refusals.Count > 0 && evidence.HasFindings && evidence.IsThinAnswer(text) ? evidence.Report(text.Trim())
-            : evidence.WithSensorFigures(evidence.WithStorageGuidance(evidence.WithMemoryFigures(text)));
+        // Pedido misto de remover apps ("meu pc ta lento, remove os apps inúteis", repetição no PC da fcca5cd): o turno investigou a
+        // lentidão e terminou com o texto do modelo, sem o caminho do cartão. A resposta aceita que não cita o cartão o ganha.
+        string ModelAnswer(string text)
+        {
+            var answer = refusedMutations.Count > 0 ? evidence.Report("")
+                : refusals.Count > 0 && evidence.HasFindings && evidence.IsThinAnswer(text) ? evidence.Report(text.Trim())
+                : evidence.WithSensorFigures(evidence.WithStorageGuidance(evidence.WithMemoryFigures(text)));
+            return appRemovalRequest ? InvestigationEvidence.WithAppRemovalGuidance(answer) : answer;
+        }
         // Cada recusa do controle fica na auditoria com o motivo (#83): na validação no PC, o "[error]" não dizia qual regra recusou.
         // O motivo é sempre um texto fixo dos validadores; o texto do modelo não entra no registro.
         void Rejected(string what, string reason) => store.Log(actor, "Controle de execução recusou " + what + ": " + reason);
