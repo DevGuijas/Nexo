@@ -136,7 +136,8 @@ public sealed class LiveMetricsPanel : Border
 
     private static string Gigabytes(ulong bytes) => (bytes / 1024d / 1024 / 1024).ToString("F1", CultureInfo.CurrentCulture);
 
-    private static Brush Resource(string key) => Application.Current?.TryFindResource(key) as Brush ?? Brushes.Gray;
+    // Pincel vivo do tema (#143): muda de cor na troca entre Ônix e Glacial sem recriar o cartão.
+    private static Brush Resource(string key) => ThemeManager.Live(key);
 
     private sealed class Tile
     {
