@@ -909,7 +909,7 @@ public partial class MainWindow : Window
     private Task<bool> ConfirmChange(ChangeRequest request) => ConfirmChange(request, null);
     private Task<bool> ConfirmChange(ChangeRequest request, Action<Window>? onRendered)
     {
-        var dialog = new Window { Owner = this, Title = request.Title, Width = 700, Height = 600, WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize, Style = (Style)FindResource(typeof(Window)), Icon = Icon };
+        var dialog = new Window { Owner = this, Title = request.Title, Width = 700, Height = 600, WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize, UseLayoutRounding = true, Style = (Style)FindResource(typeof(Window)), Icon = Icon };
         AutomationProperties.SetName(dialog, "Confirmação de ação: " + request.Title);
         var panel = new DockPanel { Margin = new Thickness(25) };
         var header = new StackPanel { Margin = new Thickness(0, 0, 0, 16) };
@@ -1183,7 +1183,10 @@ public partial class MainWindow : Window
         hero.Children.Add(new TextBlock { Text = number.ToString("00"), FontFamily = Font("DisplayFont"), FontWeight = FontWeights.Bold, FontSize = 54, Foreground = Brush("Accent"),
             Margin = new Thickness(0, 0, 14, -8), VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Right });
         hero.ClipToBounds = true;
-        content.Children.Add(new Border { Background = Brush("SurfaceMuted"), CornerRadius = new CornerRadius(9, 9, 0, 0), Child = hero });
+        // #143: cartão com raio 8 e borda de 1 px; o cabeçalho segue o raio interno (7) só em cima e o conteúdo inteiro é recortado
+        // no mesmo raio, para nenhum fundo vazar nos cantos. No hover o cabeçalho acompanha o AccentSoft do cartão.
+        var heroBand = new Border { Background = Brush("SurfaceMuted"), CornerRadius = new CornerRadius(7, 7, 0, 0), Child = hero };
+        content.Children.Add(heroBand);
         var text = new StackPanel { Margin = new Thickness(14, 12, 14, 12) };
         text.Children.Add(new TextBlock { Text = title, FontFamily = Font("DisplayFont"), FontWeight = FontWeights.SemiBold, FontSize = 22, Foreground = Brush("Ink"), TextWrapping = TextWrapping.Wrap });
         var about = Text(description, 13, "Secondary"); about.Margin = new Thickness(0, 4, 0, 10); text.Children.Add(about);
@@ -1192,8 +1195,10 @@ public partial class MainWindow : Window
         bottom.Children.Add(Mono(footer, 11, "Secondary"));
         text.Children.Add(bottom);
         Grid.SetRow(text, 1); content.Children.Add(text);
-        var card = new Button { Content = content, Padding = new Thickness(0), Margin = new Thickness(0, 0, 12, 12), HorizontalContentAlignment = HorizontalAlignment.Stretch,
-            VerticalContentAlignment = VerticalAlignment.Top, FontWeight = FontWeights.Normal, ClipToBounds = true };
+        PageKit.ClipRounded(content, 7);
+        var card = new Button { Content = content, Margin = new Thickness(0, 0, 12, 12), Style = (Style)FindResource("ToolCardButton") };
+        card.MouseEnter += (_, _) => heroBand.Background = Brush("AccentSoft");
+        card.MouseLeave += (_, _) => heroBand.Background = Brush("SurfaceMuted");
         AutomationProperties.SetName(card, number.ToString("00") + ", " + title + ": " + description);
         card.Click += (_, _) => section.BringIntoView();
         return card;

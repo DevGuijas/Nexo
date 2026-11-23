@@ -54,8 +54,7 @@ public static class UiIcons
             StrokeStartLineCap = PenLineCap.Round,
             StrokeEndLineCap = PenLineCap.Round,
             StrokeLineJoin = PenLineJoin.Round,
-            Fill = Brushes.Transparent,
-            SnapsToDevicePixels = true
+            Fill = Brushes.Transparent
         };
         return new Viewbox
         {

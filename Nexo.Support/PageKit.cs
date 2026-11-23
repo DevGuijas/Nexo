@@ -22,6 +22,11 @@ internal static class PageKit
     private static Brush Brush(string key) => ThemeManager.Live(key);
     internal static FontFamily Font(string key) => (FontFamily)Application.Current.FindResource(key);
 
+    /// <summary>Recorta o conteúdo de um cartão arredondado no raio interno (raio externo menos a borda), para fundos e faixas
+    /// internas não vazarem nos cantos (#143). O recorte acompanha o tamanho do elemento.</summary>
+    internal static void ClipRounded(FrameworkElement element, double radius)
+        => element.SizeChanged += (_, e) => element.Clip = new RectangleGeometry(new Rect(e.NewSize), radius, radius);
+
     /// <summary>Linha acima do título da página: marcador no acento e um contexto real em caixa alta, em mono.</summary>
     internal static StackPanel Kicker(string text)
     {
@@ -140,8 +145,9 @@ internal static class PageKit
             content.Children.Add(new ProgressBar { IsIndeterminate = true, Height = 3, Margin = new Thickness(26, 12, 0, 0), Foreground = Brush("Accent"),
                 Background = Brush("AccentSoft"), BorderThickness = new Thickness(0) });
         var card = new Border { Background = Brush("Surface"), BorderBrush = Brush("Stroke"), BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10),
-            Margin = new Thickness(0, 0, 0, 14), ClipToBounds = true };
+            Margin = new Thickness(0, 0, 0, 14) };
         var layout = new DockPanel();
+        ClipRounded(layout, 9);
         var stripe = new Border { Width = 3, Background = Brush(accent) };
         DockPanel.SetDock(stripe, Dock.Left); layout.Children.Add(stripe);
         layout.Children.Add(new Border { Padding = new Thickness(16, 14, 18, 14), Child = content });

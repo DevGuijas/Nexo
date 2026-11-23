@@ -22,6 +22,7 @@ internal static class ShellChecks
         Window(assert);
         AppIcon(assert);
         ActionButtons(assert);
+        SmoothEdges(assert);
     }
 
     private static void Palette(Action<bool, string> assert)
@@ -251,10 +252,10 @@ internal static class ShellChecks
     {
         var app = Source("App.xaml"); var code = Source("MainWindow.xaml.cs"); var home = Source("HomePage.cs"); var xaml = Source("MainWindow.xaml");
         var template = Regex.Match(app, "<ControlTemplate x:Key=\"ActionTemplate\".*?</ControlTemplate>", RegexOptions.Singleline).Value;
-        assert(template.Contains("CornerRadius=\"7\"") && template.Contains("Property=\"IsEnabled\" Value=\"False\"") && template.Contains("Property=\"IsKeyboardFocused\" Value=\"True\"")
+        assert(template.Contains("CornerRadius=\"8\"") && template.Contains("Property=\"IsEnabled\" Value=\"False\"") && template.Contains("Property=\"IsKeyboardFocused\" Value=\"True\"")
             && Regex.IsMatch(app, "x:Key=\"SecondaryAction\"[^\n]*Property=\"IsPressed\"") && Regex.IsMatch(app, "x:Key=\"Primary\"[^\n]*BasedOn=\"\\{StaticResource SecondaryAction\\}\"[^\n]*Property=\"IsPressed\"")
             && !app.Contains("Storyboard") && !Regex.IsMatch(app, "x:Key=\"Secondary\"\\s"),
-            "#143: botões de ação com cantos de 7 px, hover, pressionado, desabilitado e foco visível, sem animação e sem esconder a cor Secondary");
+            "#143: botões de ação com cantos de 8 px, hover, pressionado, desabilitado e foco visível, sem animação e sem esconder a cor Secondary");
         assert(code.Contains("MinHeight = 36, Style = (Style)FindResource(primary ? \"Primary\" : \"SecondaryAction\")") && code.Contains("AutomationProperties.SetName(b, label);"),
             "#143: Action usa os estilos de ação e mantém o texto como nome acessível quando tem ícone");
         assert(Regex.IsMatch(xaml, "x:Name=\"ThemeButton\".*?x:Name=\"ThemeGlyph\".*?Binding=\"\\{Binding\\}\" Value=\"Glacial\"", RegexOptions.Singleline),
@@ -262,6 +263,46 @@ internal static class ShellChecks
         assert(home.Contains("Style = (Style)FindResource(\"QuickTile\")") && home.Contains("? 6 : 3") && home.Contains("glyph.HorizontalAlignment = HorizontalAlignment.Left")
             && Source("ShellPreview.cs").Contains("button.ActualHeight >= 76 && button.ActualWidth >= 130"),
             "#143: atalhos Resolver rápido compactos, com ícone à esquerda, seis por linha quando cabem e área de clique conferida na prévia");
+    }
+
+    // Bordas e cantos (#143): SnapsToDevicePixels serrilha a curva de um Border arredondado; as linhas retas ficam nítidas pelo
+    // UseLayoutRounding da janela. O foco é um anel externo (sem trocar a espessura da borda) e o Primary escurece ao pressionar.
+    private static void SmoothEdges(Action<bool, string> assert)
+    {
+        var app = Source("App.xaml"); var xaml = Source("MainWindow.xaml");
+        var code = Directory.GetFiles(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Code"), "*.cs").ToDictionary(file => Path.GetFileName(file), File.ReadAllText);
+        var snappedXaml = Regex.Matches(app + xaml, @"<Border\b[^>]*>").Select(m => m.Value)
+            .Where(tag => tag.Contains("CornerRadius=") && tag.Contains("SnapsToDevicePixels=\"True\"")).ToArray();
+        var snappedCode = code.Where(file => file.Value.Split(';').Any(statement => statement.Contains("new Border") && statement.Contains("CornerRadius")
+            && Regex.IsMatch(statement, @"SnapsToDevicePixels\s*=\s*true"))).Select(file => file.Key).ToArray();
+        assert(snappedXaml.Length == 0 && snappedCode.Length == 0,
+            "#143: nenhum Border com CornerRadius usa SnapsToDevicePixels=True" + (snappedCode.Length > 0 ? ": " + string.Join(", ", snappedCode) : ""));
+
+        var windowStyle = Regex.Match(app, "<Style TargetType=\"Window\">.*?</Style>", RegexOptions.Singleline).Value;
+        var root = XDocument.Parse(xaml).Root!;
+        assert(windowStyle.Contains("<Setter Property=\"UseLayoutRounding\" Value=\"True\"/>") && (string?)root.Attribute("UseLayoutRounding") == "True"
+            && Source("MainWindow.xaml.cs").Contains("UseLayoutRounding = true, Style = (Style)FindResource(typeof(Window))"),
+            "#143: a janela principal e o diálogo de confirmação usam UseLayoutRounding");
+
+        var buttonTemplates = Regex.Matches(app, "<ControlTemplate (?:x:Key=\"\\w+\" )?TargetType=\"Button\">.*?</ControlTemplate>", RegexOptions.Singleline).Select(m => m.Value).ToArray();
+        string FocusTrigger(string template) => Regex.Match(template, "<Trigger Property=\"IsKeyboardFocused\" Value=\"True\">.*?</Trigger>", RegexOptions.Singleline).Value;
+        assert(buttonTemplates.Length >= 2 && buttonTemplates.All(template => FocusTrigger(template) is var focus && focus.Length > 0
+                && !focus.Contains("BorderThickness") && focus.Contains("<Setter TargetName=\"FocusRing\" Property=\"Visibility\" Value=\"Visible\"/>")
+                && Regex.IsMatch(template, "<Border x:Name=\"FocusRing\" Margin=\"-3\" BorderThickness=\"2\"[^>]*BorderBrush=\"\\{DynamicResource (Accent|Ink)\\}\"[^>]*Visibility=\"Collapsed\"/>")
+                && Regex.Matches(template, "CornerRadius=\"(\\d+)\"").Select(m => m.Groups[1].Value).SequenceEqual(["8", "11"])),
+            "#143: botões com raio 8 e foco por anel externo de 2 px, sem trocar BorderThickness (o conteúdo não salta)");
+
+        var primary = Regex.Match(app, "<Style x:Key=\"Primary\"[^\n]*</Style>").Value;
+        string? Rest(string property) => Regex.Match(primary, "^<Style[^>]*>(?:<Setter [^>]*/>)*?<Setter Property=\"" + property + "\" Value=\"([^\"]+)\"/>").Groups[1].Value;
+        string Pressed(string property) => Regex.Match(primary, "<Trigger Property=\"IsPressed\" Value=\"True\">.*?<Setter Property=\"" + property + "\" Value=\"([^\"]+)\"/>").Groups[1].Value;
+        assert(Rest("Background") == "{DynamicResource Accent}" && Pressed("Background") == "{DynamicResource AccentPressed}" && Pressed("Background") != Rest("Background")
+            && Pressed("BorderBrush") != Rest("BorderBrush") && ThemeCatalog.ReadablePairs.Contains(("OnAccent", "AccentPressed")),
+            "#143: o Primary pressionado usa AccentPressed, diferente do repouso, com contraste AA no texto OnAccent");
+
+        var tool = Regex.Match(Source("MainWindow.xaml.cs"), @"private Button ToolCard\(.*?\n    \}", RegexOptions.Singleline).Value;
+        assert(tool.Contains("CornerRadius = new CornerRadius(7, 7, 0, 0)") && tool.Contains("PageKit.ClipRounded(content, 7);") && tool.Contains("FindResource(\"ToolCardButton\")")
+            && !tool.Contains("ClipToBounds = true }") && code["PageKit.cs"].Contains("ClipRounded(layout, 9);"),
+            "#143: cartões das Ferramentas e avisos com faixa interna recortados no raio interno, sem vazar nos cantos");
     }
 
     // Ícone do Nexo (#143): o .exe, o atalho, a janela e a bandeja usam o mesmo Assets/nexo.ico. Confere o csproj, o arquivo e a janela;
@@ -295,7 +336,7 @@ internal static class ShellChecks
             "#143: Assets/nexo.ico é um ICO válido com as entradas 16, 32, 48 e 256 (lidas: " + string.Join(", ", sizes) + ")");
 
         var window = XDocument.Parse(Source("MainWindow.xaml")).Root!;
-        assert(((string?)window.Attribute("Icon"))?.EndsWith("/Assets/nexo.ico", StringComparison.Ordinal) == true
+        assert((string?)window.Attribute("Icon") == "pack://application:,,,/Nexo;component/Assets/nexo.ico"
             && Source("MainWindow.xaml.cs").Contains("Style = (Style)FindResource(typeof(Window)), Icon = Icon };")
             && Source("MainWindow.xaml.cs").Contains("GetManifestResourceStream(\"Nexo.Tray.ico\")"),
             "#143: a janela, o diálogo de confirmação e a bandeja usam o ícone do Nexo");
