@@ -48,6 +48,8 @@ internal static class AppRemovalChatChecks
             OfferCut(assert);
             await PcTaskbarOffer(store, actor, assert);
             await OfferCutFallbacks(store, actor, assert);
+            OfferCutKeepsOtherRemovals(assert);
+            await OfferCutOtherLocks(store, actor, assert);
         }
         finally { store.Data.AiEnabled = previousAi; System.Globalization.CultureInfo.CurrentCulture = previousCulture; }
     }
@@ -644,6 +646,49 @@ internal static class AppRemovalChatChecks
         answer = await Ask(store, actor, "como tiro o Teams da barra de tarefas?", new CapturingModel([Text(asks), Text(asks), Text(asks)]));
         assert(answer.Contains(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal) && !answer.Contains("permissão", StringComparison.Ordinal),
             "#127: o resto recusado por outra trava (permissão no chat) volta ao texto pronto do cartão · " + answer.Replace("\n", " "));
+    }
+
+    // @qa (bf6c7cd): o corte só tira o que fala de remover apps. Remover o pendrive, tirar o cabo, desinstalar uma atualização ou
+    // reinstalar um app para corrigir uma falha são orientações reais e ficam no resto aproveitado.
+    private static void OfferCutKeepsOtherRemovals(Action<bool, string> assert)
+    {
+        string[] kept =
+        [
+            "Remova o pendrive com segurança antes de desconectá-lo.",
+            "Tire o cabo de rede e conecte de novo.",
+            "Desinstale a atualização KB5034441 em Configurações > Windows Update > Histórico de atualizações.",
+            "Se o problema continuar, desinstale e reinstale o Teams pela Microsoft Store.",
+            "Exclua o cache do aplicativo e abra de novo.",
+        ];
+        foreach (var sentence in kept)
+        {
+            var text = sentence + "\nSe desejar, posso desinstalar o Teams para você.";
+            var rest = AgentProtocol.WithoutAppRemovalOffer(text);
+            assert(rest == sentence, "#127 (@qa): o corte da oferta mantém a orientação que não é remover apps · " + sentence + " → " + rest);
+            assert(AgentProtocol.WithoutAppRemovalPath(sentence).Trim() == sentence, "#127 (@qa): o filtro do caminho copiado mantém · " + sentence);
+        }
+    }
+
+    // @qa (bf6c7cd): o resto aproveitado passa pelas mesmas travas da resposta aceita. Com a oferta de verificar o PawnIO (#135) ou a
+    // promessa de executar uma ação, o fim volta ao texto pronto, sem levar essa frase adiante.
+    private static async Task OfferCutOtherLocks(Store store, Account actor, Action<bool, string> assert)
+    {
+        const string pawnio = "Para tirar o Teams da barra de tarefas, clique com o botão direito no ícone e escolha Desafixar da barra de tarefas. "
+            + "A temperatura da CPU está indisponível; posso verificar se o driver PawnIO está instalado. Se desejar, posso desinstalar o Teams para você.";
+        var answer = await Ask(store, actor, "como tiro o Teams da barra de tarefas?", new CapturingModel([Text(pawnio), Text(pawnio), Text(pawnio)]));
+        assert(!answer.Contains("PawnIO", StringComparison.Ordinal) && !answer.Contains("posso desinstalar", StringComparison.Ordinal),
+            "#127 (@qa): o resto com a oferta de verificar o PawnIO não vira o fim · " + answer.Replace("\n", " "));
+        const string promise = "Para tirar o Teams da barra de tarefas, clique com o botão direito no ícone e escolha Desafixar da barra de tarefas. "
+            + "Vou reiniciar o Explorador de Arquivos agora para aplicar. Se desejar, posso desinstalar o Teams para você.";
+        answer = await Ask(store, actor, "como tiro o Teams da barra de tarefas?", new CapturingModel([Text(promise), Text(promise), Text(promise)]));
+        assert(!answer.Contains("Vou reiniciar", StringComparison.Ordinal) && !answer.Contains("posso desinstalar", StringComparison.Ordinal),
+            "#127 (@qa): o resto com a promessa de executar uma ação não vira o fim · " + answer.Replace("\n", " "));
+        // Trava de evidência (#114): afirmar o conteúdo de uma unidade. Só o ValidateStatement recusa essa frase.
+        const string drive = "Para tirar o Teams da barra de tarefas, clique com o botão direito no ícone e escolha Desafixar da barra de tarefas. "
+            + "O pendrive D: está vazio, sem arquivos visíveis. Se desejar, posso desinstalar o Teams para você.";
+        answer = await Ask(store, actor, "como tiro o Teams da barra de tarefas?", new CapturingModel([Text(drive), Text(drive), Text(drive)]));
+        assert(!answer.Contains("está vazio", StringComparison.Ordinal) && !answer.Contains("posso desinstalar", StringComparison.Ordinal),
+            "#127 (@qa): o resto que afirma o conteúdo de uma unidade não vira o fim · " + answer.Replace("\n", " "));
     }
 
     private static async Task<string> Ask(Store store, Account actor, string request, CapturingModel model)

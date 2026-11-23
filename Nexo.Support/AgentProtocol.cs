@@ -161,9 +161,11 @@ public static class AgentProtocol
     public static string WithoutAppRemovalOffer(string text)
     {
         var lines = text.Replace("\r\n", "\n").Split('\n').Select(line => string.Join(" ", Regex.Split(line.Trim(), @"(?<=[.!?])\s+")
-            .Where(sentence => sentence.Length > 0 && !AppRemovalPassage(Normalize(sentence)) && !AppRemoval.IsMatch(Normalize(sentence)))));
+            .Where(sentence => sentence.Length > 0 && !AppRemovalPassage(Normalize(sentence)) && !RemovalTalk(Normalize(sentence)))));
         return Regex.Replace(string.Join("\n", lines), @"\n{3,}", "\n\n").Trim();
     }
+    // @qa (bf6c7cd): "desinstale e reinstale o Teams" é reparo, não remoção; fica no resto aproveitado.
+    private static bool RemovalTalk(string normalized) => AppRemoval.IsMatch(normalized) && !Regex.IsMatch(normalized, @"\breinstal\w*");
     public static bool OffersAppRemoval(string normalized) => Regex.Split(normalized, @"[.!?;\n]+").Any(sentence =>
         AppRemoval.IsMatch(sentence) && !RemovalPath.IsMatch(sentence) && !RemovalExplanation.IsMatch(sentence)
         && RemovalOffer.Matches(sentence).Any(offer => !Regex.IsMatch(sentence[..offer.Index], @"\b(?:nao|nem|nunca)\s+(?:\w+\s+){0,2}$")));
