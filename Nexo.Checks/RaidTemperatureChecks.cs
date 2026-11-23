@@ -46,9 +46,13 @@ internal static class RaidTemperatureChecks
                 RaidInAnswer(assert, culture);
                 ClosedDiskUsageRetest(assert, culture);
                 SensorDriverOffer(assert, culture);
+                DiskUsageOffer(assert, culture);
+                NoteBeforeOffer(assert, culture);
+                OnlyTemperatureRequest(assert, culture);
             }
             await DiskHealthFlow(store, actor, assert);
             await TemperatureFlow(store, actor, assert);
+            await TemperatureOnlyReport(store, actor, assert);
         }
         finally { store.Data.AiEnabled = previousAi; System.Globalization.CultureInfo.CurrentCulture = previousCulture; }
     }
@@ -350,6 +354,135 @@ internal static class RaidTemperatureChecks
         assert(wrong.Count == 0 && InvestigationEvidence.SensorDriverOfferReason.Contains("PawnIO") && InvestigationEvidence.SensorDriverOfferReason.Contains("decisão do usuário"),
             "#135 (PC afeefb7), " + culture + ": oferecer verificar, instalar ou procurar o driver do sensor (PawnIO) é recusado; explicação, nova consulta e drivers que o Nexo consulta passam"
             + (wrong.Count > 0 ? " · erradas: " + string.Join(" | ", wrong) : ""));
+    }
+
+    // Repetição no PC da 5b48461 (22/11, #135), 1b: a resposta aceita terminava com "Se quiser, posso ajudar a verificar o uso
+    // do disco ou identificar quais processos estão utilizando mais espaço" e a nota do RAID entrou antes de "Deseja que eu faça
+    // isso?". Na pergunta 2, o relatório da 3ª recusa idêntica trouxe as ocorrências e o espaço livre num pedido só de temperatura.
+    private const string Answer1b = "O estado dos discos físicos está estável e sem alertas informados pelo sistema. O volume C: também tem **77,7% de espaço livre**. "
+        + "Se quiser, posso ajudar a verificar o uso do disco ou identificar quais processos estão utilizando mais espaço. Deseja que eu faça isso?";
+    private const string Answer2 = "A temperatura da CPU está indisponível no momento, pois o driver PawnIO não está instalado. Se você deseja, posso ajudar a verificar se há um driver disponível para instalar.";
+
+    private static void DiskUsageOffer(Action<bool, string> assert, string culture)
+    {
+        var closed = Observed(PcReport());
+        var plain = new InvestigationEvidence();
+        (string Text, string? Expected)[] cases =
+        [
+            (Answer1b, InvestigationEvidence.FileSearchReason),
+            (Answer1b.Replace(". Se", ".\r\nSe"), InvestigationEvidence.FileSearchReason),
+            ("Se quiser, posso ajudar a identificar quais processos estão utilizando mais espaço.", InvestigationEvidence.FileSearchReason),
+            ("Posso verificar o uso do disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso analisar o uso do espaço em disco no C:.", InvestigationEvidence.FileSearchReason),
+            ("Deseja que eu verifique o uso do T:?", InvestigationEvidence.FileSearchReason),
+            ("Quer que eu identifique quais programas estão ocupando mais espaço?", InvestigationEvidence.FileSearchReason),
+            ("Posso verificar quais aplicativos consomem mais espaço.", InvestigationEvidence.FileSearchReason),
+            ("Posso ver o uso de armazenamento do volume C:.", InvestigationEvidence.FileSearchReason),
+            // @qa: outros verbos, o uso coordenado, a utilização, o consumo e "o que está consumindo espaço".
+            ("Posso ajudar a revisar o uso do disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso checar o uso do disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso conferir o uso do disco C:.", InvestigationEvidence.FileSearchReason),
+            ("Posso consultar o uso do disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso avaliar o uso do armazenamento.", InvestigationEvidence.FileSearchReason),
+            ("Posso verificar o uso da CPU e do disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso verificar a utilização do disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso analisar o consumo de espaço no disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso ajudar a identificar o que está consumindo espaço.", InvestigationEvidence.FileSearchReason),
+            ("Posso verificar o que está usando o espaço do disco.", InvestigationEvidence.FileSearchReason),
+            // Negação, memória e CPU, estado e saúde do disco, orientação do Armazenamento e o ":" passam.
+            ("Não posso verificar o uso do disco.", null),
+            ("Posso verificar o uso de memória.", null),
+            ("Posso verificar o uso da CPU.", null),
+            ("Posso verificar o estado do disco.", null),
+            ("Posso consultar a saúde do disco de novo.", null),
+            ("Se quiser, posso orientar você a ver o uso do disco em Configurações > Sistema > Armazenamento.", null),
+            ("Vou verificar o relatório: o uso do disco não aparece nele.", null),
+            ("Posso verificar se algum processo está usando muito o processador.", null),
+            ("O C: tem 77,7% livre e o uso do disco está normal.", null),
+            ("Posso te mostrar como ver o uso do disco em Configurações > Sistema > Armazenamento.", null),
+            ("Quer que eu explique como verificar o uso do disco em Configurações > Sistema > Armazenamento?", null),
+            ("Posso consultar o relatório de saúde de novo para ver o estado dos discos.", null),
+            ("Posso verificar o uso da CPU e da memória.", null),
+            ("Quer que eu verifique a temperatura de novo?", null),
+            ("Posso verificar o espaço livre do C:.", null),
+        ];
+        var wrong = cases.Where(c => plain.ValidateStatement(c.Text, false) != c.Expected || c.Expected != null && closed.ValidateStatement(c.Text, false) == null)
+            .Select(c => c.Text + " → " + plain.ValidateStatement(c.Text, false) + " / " + closed.ValidateStatement(c.Text, false)).ToList();
+        var repeated = plain.RepeatedGuidance(InvestigationEvidence.FileSearchReason, Answer1b);
+        if (!repeated.Contains("verificar o uso do disco", StringComparison.Ordinal) || repeated.Contains("77,7%", StringComparison.Ordinal)) wrong.Add("2ª recusa: " + repeated);
+        assert(wrong.Count == 0 && InvestigationEvidence.FileSearchReason.Contains("o uso do disco") && InvestigationEvidence.FileSearchReason.Contains("processos que usam espaço"),
+            "#135 (PC 5b48461), " + culture + ": oferecer verificar o uso do disco ou os processos que usam espaço é recusado pelo motivo da busca; memória, CPU, estado do disco, negação e Armazenamento passam"
+            + (wrong.Count > 0 ? " · erradas: " + string.Join(" | ", wrong) : ""));
+    }
+
+    // A nota entra antes da oferta que precede a pergunta final; sem oferta, como antes.
+    private static void NoteBeforeOffer(Action<bool, string> assert, string culture)
+    {
+        var disks = Observed(PcReport()); disks.AsksDiskHealth = true;
+        const string start = "Os discos estão sem alertas informados pelo Windows.";
+        var note = "Pelo monitor de saúde: “AMD-RAID Array 1” — " + HealthReportPresentation.RaidScope + ".";
+        (string Text, string Expected)[] cases =
+        [
+            (start + " Se quiser, posso consultar o relatório de novo. Deseja que eu faça isso?", start + "\n\n" + note + "\n\nSe quiser, posso consultar o relatório de novo. Deseja que eu faça isso?"),
+            (start + "\n\nSe quiser, posso consultar o relatório de novo.\n\nDeseja que eu faça isso?", start + "\n\n" + note + "\n\nSe quiser, posso consultar o relatório de novo.\n\nDeseja que eu faça isso?"),
+            (start + " Se precisar, posso consultar de novo.", start + "\n\n" + note + "\n\nSe precisar, posso consultar de novo."),
+            (start + " Caso queira, posso repetir a consulta. Quer?", start + "\n\n" + note + "\n\nCaso queira, posso repetir a consulta. Quer?"),
+            (start + " Se precisar de mais alguma coisa, estou à disposição.", start + "\n\n" + note + "\n\nSe precisar de mais alguma coisa, estou à disposição."),
+            // Sem oferta: a pergunta final continua a última coisa, e a frase condicional que orienta não é oferta.
+            (start + " Quer saber mais?", start + "\n\n" + note + "\n\nQuer saber mais?"),
+            (start + " Se a lentidão continuar, reinicie o PC.", start + " Se a lentidão continuar, reinicie o PC.\n\n" + note),
+            (start, start + "\n\n" + note),
+            // @qa: frase declarativa com "posso … que" não é oferta, e a resposta toda de fechamento não leva a nota para o topo.
+            ("Posso confirmar que os discos estão sem alertas informados pelo Windows.", "Posso confirmar que os discos estão sem alertas informados pelo Windows.\n\n" + note),
+            (start + " Posso afirmar que não há falhas.", start + " Posso afirmar que não há falhas.\n\n" + note),
+            ("Se quiser, posso consultar de novo: os discos estão sem alertas informados pelo Windows.", "Se quiser, posso consultar de novo: os discos estão sem alertas informados pelo Windows.\n\n" + note),
+            ("Se quiser, posso consultar de novo: os discos estão sem alertas informados pelo Windows. Quer?", "Se quiser, posso consultar de novo: os discos estão sem alertas informados pelo Windows.\n\n" + note + "\n\nQuer?"),
+        ];
+        var wrong = cases.Select(c => (c, Shown: disks.WithSensorFigures(c.Text).ReplaceLineEndings("\n"))).Where(x => x.Shown != x.c.Expected)
+            .Select(x => x.c.Text.Replace("\n", "⏎") + " → " + x.Shown.Replace("\n", "⏎")).ToList();
+        assert(wrong.Count == 0, "#135 (PC 5b48461), " + culture + ": a nota do monitor entra antes da oferta ao usuário que precede a pergunta final, e a oferta e a pergunta ficam juntas"
+            + (wrong.Count > 0 ? " · erradas: " + string.Join(" | ", wrong) : ""));
+    }
+
+    private static void OnlyTemperatureRequest(Action<bool, string> assert, string culture)
+    {
+        (string Text, bool Only)[] cases =
+        [
+            ("qual a temperatura da CPU?", true),
+            ("quantos graus está o processador?", true),
+            ("o processador está muito quente?", true),
+            ("meu pc ta esquentando muito", true),
+            ("meu pc ta esquentando e desligando sozinho", false),
+            ("o pc esquenta e dá tela azul", false),
+            ("meu pc ta lento e esquentando", false),
+            ("como está a saúde dos meus discos e a temperatura?", false),
+            ("como está a saúde do PC e a temperatura?", false),
+            ("meu disco ta cheio", false),
+        ];
+        var wrong = cases.Where(c => SupportIntake.AsksOnlyTemperature(c.Text) != c.Only).Select(c => c.Text).ToArray();
+        assert(wrong.Length == 0, "#135 (PC 5b48461), " + culture + ": pedido só de temperatura é reconhecido; com outro sintoma, lentidão, discos ou saúde geral, não"
+            + (wrong.Length > 0 ? " · erradas: " + string.Join(" | ", wrong) : ""));
+    }
+
+    // Pergunta 2 do PC: a mesma oferta recusada 3 vezes encerra com o relatório; só a linha da temperatura do relatório de saúde.
+    private static async Task TemperatureOnlyReport(Store store, Account actor, Action<bool, string> assert)
+    {
+        var tools = new FlowTools((name, _) => name == "get_health_report" ? WindowsTools.Ok(PcReport()) : throw new Exception("Ferramenta inesperada: " + name));
+        var only = await Ask(store, actor, [User("qual a temperatura da CPU?")], tools, new CapturingModel([Text(Answer2), Text(Answer2), Text(Answer2)]));
+        var general = await Ask(store, actor, [User("como está a saúde do PC e a temperatura?")], tools, new CapturingModel([Text(Answer2), Text(Answer2), Text(Answer2)]));
+        // @qa: uma ocorrência ATIVA continua no relatório do pedido só de temperatura (aqui, o T: com pouco espaço ainda presente).
+        var activeReport = PcReport().Replace("resolvida: o volume não está mais presente em 2 leituras seguidas", "persiste nas leituras atuais", StringComparison.Ordinal);
+        var activeTools = new FlowTools((name, _) => name == "get_health_report" ? WindowsTools.Ok(activeReport) : throw new Exception("Ferramenta inesperada: " + name));
+        var active = await Ask(store, actor, [User("qual a temperatura da CPU?")], activeTools, new CapturingModel([Text(Answer2), Text(Answer2), Text(Answer2)]));
+        assert(only.Contains("Temperatura da CPU, pelo monitor de saúde: indisponível", StringComparison.Ordinal) && only.Contains("PawnIO", StringComparison.Ordinal)
+            && !only.Contains("Espaço livre por volume", StringComparison.Ordinal) && !only.Contains("monitor de saúde não mostra ocorrência", StringComparison.Ordinal)
+            && !only.Contains("Ocorrência", StringComparison.Ordinal) && !only.Contains("posso ajudar a verificar", StringComparison.Ordinal)
+            && general.Contains("Espaço livre por volume", StringComparison.Ordinal) && general.Contains("Temperatura da CPU, pelo monitor de saúde", StringComparison.Ordinal)
+            && activeReport.Contains("persiste nas leituras atuais", StringComparison.Ordinal) && active.Contains("Ocorrência ativa no monitor de saúde", StringComparison.Ordinal)
+            && active.Contains("Pouco espaço no volume T:", StringComparison.Ordinal) && active.Contains("Temperatura da CPU, pelo monitor de saúde", StringComparison.Ordinal)
+            && !active.Contains("Espaço livre por volume", StringComparison.Ordinal),
+            "#135 (PC 5b48461): no pedido só de temperatura, o relatório da 3ª recusa idêntica traz só a linha da temperatura do relatório de saúde, mais a ocorrência ativa se houver; no pedido da saúde geral, o relatório inteiro"
+            + " · " + only.Replace("\n", " ") + " ‖ " + general.Replace("\n", " ")[..Math.Min(general.Length, 200)] + " ‖ " + active.Replace("\n", " "));
     }
 
     private static int Occurrences(string text, string part) => (text.Length - text.Replace(part, "", StringComparison.Ordinal).Length) / part.Length;
