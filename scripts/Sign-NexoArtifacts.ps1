@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string[]]$Paths,
     [string]$Thumbprint,
     [string]$TimestampServer,

@@ -173,7 +173,9 @@ public partial class MainWindow : Window
     }
     private static TextBlock Text(string text, double size = 14, string color = "Ink") => new() { Text = text, FontSize = size, Foreground = Brush(color), TextWrapping = TextWrapping.Wrap };
     private static string MetricPercent(double? value) => value.HasValue ? value.Value.ToString("F0") + "%" : "indisponível";
-    private static Brush Brush(string color) => color.StartsWith('#') ? new SolidColorBrush((Color)ColorConverter.ConvertFromString(color)) : (Brush)Application.Current.FindResource(color);
+    // Chaves da paleta vêm do ThemeManager (#143): o pincel acompanha a troca de tema sem reconstruir a tela.
+    private static Brush Brush(string color) => color.StartsWith('#') ? new SolidColorBrush((Color)ColorConverter.ConvertFromString(color)) : ThemeManager.Live(color);
+    private static FontFamily Font(string key) => (FontFamily)Application.Current.FindResource(key);
     private void ApplyNavigationIcons()
     {
         foreach (var button in Navigation.Children.OfType<Button>())
@@ -219,7 +221,8 @@ public partial class MainWindow : Window
             FontWeight = FontWeights.SemiBold, Margin = new Thickness(10, 0, 0, 0) });
         return row;
     }
-    private static Border MetricTile(string label, string value, string icon)
+    // #143: números em IBM Plex Mono; um estado em texto ("Interface ativa") usa a fonte do corpo numa linha só, sem quebrar em 1060x720.
+    private static Border MetricTile(string label, string value, string icon, bool numeric = true)
     {
         var panel = new StackPanel();
         var top = new StackPanel { Orientation = Orientation.Horizontal };
@@ -227,8 +230,11 @@ public partial class MainWindow : Window
         top.Children.Add(new TextBlock { Text = label, Foreground = Brush("Secondary"), FontSize = 12,
             Margin = new Thickness(8, 0, 0, 0) });
         panel.Children.Add(top);
-        panel.Children.Add(new TextBlock { Text = value, Foreground = Brush("Ink"), FontFamily = new FontFamily("Segoe UI Variable Display, Segoe UI"),
-            FontSize = 23, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 9, 0, 0) });
+        var valueText = new TextBlock { Text = value, Foreground = Brush("Ink"), FontWeight = FontWeights.Medium, Margin = new Thickness(0, 9, 0, 0),
+            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = value };
+        if (numeric) { valueText.FontFamily = Font("MonoFont"); valueText.FontSize = 23; }
+        else valueText.FontSize = 19;
+        panel.Children.Add(valueText);
         return new Border { Background = Brush("SurfaceMuted"), CornerRadius = new CornerRadius(10),
             Padding = new Thickness(16), Margin = new Thickness(0, 0, 10, 0), Child = panel };
     }
@@ -272,12 +278,12 @@ public partial class MainWindow : Window
         RefreshChatActions();
         var welcome = new StackPanel { Margin = new Thickness(0, 24, 0, 0) };
         var kicker = new StackPanel { Orientation = Orientation.Horizontal };
-        kicker.Children.Add(UiIcons.Create("brand", 16));
+        kicker.Children.Add(UiIcons.Logo(16));
         kicker.Children.Add(new TextBlock { Text = "UM ESPAÇO PARA RESOLVER", FontSize = 11, FontWeight = FontWeights.SemiBold,
             Foreground = Brush("Accent"), Margin = new Thickness(9, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center });
         welcome.Children.Add(kicker);
         welcome.Children.Add(new TextBlock { Text = "Olá, " + user.Name.Split(' ')[0] + ".\nComo posso ajudar hoje?",
-            FontFamily = new FontFamily("Georgia"), FontSize = 36, Foreground = Brush("Ink"),
+            FontFamily = Font("DisplayFont"), FontWeight = FontWeights.SemiBold, FontSize = 36, Foreground = Brush("Ink"),
             Margin = new Thickness(0, 17, 0, 12), LineHeight = 45 });
         welcome.Children.Add(Text("Escolha um assunto ou descreva o que aconteceu. Vamos entender o próximo passo juntos.", 15, "Secondary"));
         var tiles = new System.Windows.Controls.Primitives.UniformGrid { Columns = 3, Margin = new Thickness(0, 30, 0, 20) };
@@ -335,7 +341,7 @@ public partial class MainWindow : Window
     }
     private void Heading(string title, string description)
     {
-        PageContent.Children.Add(new TextBlock { Text = title, FontFamily = new FontFamily("Segoe UI Variable Display, Segoe UI"),
+        PageContent.Children.Add(new TextBlock { Text = title, FontFamily = Font("DisplayFont"),
             FontWeight = FontWeights.SemiBold, FontSize = 30, Foreground = Brush("Ink") });
         var subtitle = Text(description, 14, "Secondary"); subtitle.Margin = new Thickness(0, 9, 0, 27); PageContent.Children.Add(subtitle);
     }
@@ -398,9 +404,10 @@ public partial class MainWindow : Window
                 var overview = new StackPanel();
                 overview.Children.Add(Text("Última leitura · " + latest.Time.ToLocalTime().ToString("g"), 12, "Secondary"));
                 var metrics = new System.Windows.Controls.Primitives.UniformGrid { Columns = 3, Margin = new Thickness(0, 15, 0, 14) };
-                metrics.Children.Add(MetricTile("CPU", MetricPercent(latest.CpuPercent), "performance"));
-                metrics.Children.Add(MetricTile("Memória", MetricPercent(latest.MemoryUsedPercent), "health"));
-                metrics.Children.Add(MetricTile("Rede local", latest.Connectivity switch { "local" => "Interface ativa", "none" => "Sem interface", _ => "Indisponível" }, "network"));
+                // Sem leitura, "indisponível" é texto: usa a fonte do corpo como o estado da rede, para não cortar com reticências.
+                metrics.Children.Add(MetricTile("CPU", MetricPercent(latest.CpuPercent), "performance", numeric: latest.CpuPercent.HasValue));
+                metrics.Children.Add(MetricTile("Memória", MetricPercent(latest.MemoryUsedPercent), "health", numeric: latest.MemoryUsedPercent.HasValue));
+                metrics.Children.Add(MetricTile("Rede local", latest.Connectivity switch { "local" => "Interface ativa", "none" => "Sem interface", _ => "Indisponível" }, "network", numeric: false));
                 overview.Children.Add(metrics);
                 var collectionStatus = latest.CollectionStatus switch { "complete" => "completa", "partial" => "parcial", _ => latest.CollectionStatus };
                 overview.Children.Add(Text("Coleta: " + collectionStatus, 12, "Secondary"));
@@ -588,7 +595,7 @@ public partial class MainWindow : Window
             var byline = new Grid();
             byline.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             byline.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            if (entry.Role != "user") byline.Children.Add(UiIcons.Create("brand", 12));
+            if (entry.Role != "user") byline.Children.Add(UiIcons.Logo(12));
             var bylineText = new TextBlock { Text = (entry.Role == "user" ? user.Name : "Nexo") + "  ·  " + entry.Time.ToString("HH:mm"),
                 FontSize = 11, Foreground = Brush(entry.Role == "user" ? "Secondary" : "Accent"),
                 TextWrapping = TextWrapping.Wrap, Margin = new Thickness(entry.Role == "user" ? 0 : 7, 0, 0, 0) };
@@ -975,9 +982,41 @@ public partial class MainWindow : Window
         PageContent.Children.Add(Card(optimizePanel));
         UpdateToolsView();
     }
+    // Aparência (#143): o tema muda na hora e a preferência fica no data.json deste perfil.
+    private Border AppearanceCard()
+    {
+        var panel = new StackPanel();
+        var heading = SectionHeading("settings", "Aparência"); heading.Margin = new Thickness(0, 0, 0, 8); panel.Children.Add(heading);
+        panel.Children.Add(Text("O tema muda na hora e fica salvo neste perfil do Windows.", 13, "Secondary"));
+        var options = new WrapPanel { Margin = new Thickness(0, 12, 0, 0) };
+        foreach (var theme in ThemeCatalog.Names)
+        {
+            var selected = ThemeManager.Current == theme;
+            var option = Action(ThemeCatalog.DisplayName(theme), (_, _) => Guard(() => ApplyTheme(theme, persist: true)), selected);
+            option.Tag = "theme:" + theme;
+            AutomationProperties.SetName(option, "Tema " + ThemeCatalog.DisplayName(theme) + (selected ? ", selecionado" : ""));
+            options.Children.Add(option);
+        }
+        panel.Children.Add(options);
+        return Card(panel);
+    }
+    private void ApplyTheme(string theme, bool persist)
+    {
+        var previous = ThemeManager.Current;
+        ThemeManager.Apply(theme);
+        if (persist)
+        {
+            var stored = store.Data.Theme;
+            store.Data.Theme = ThemeManager.Current;
+            try { store.Save(); }
+            catch { store.Data.Theme = stored; ThemeManager.Apply(previous); throw; }
+        }
+        if (page == "settings") ShowPage("settings");
+    }
     private void Settings()
     {
         Heading("Configurações", "Um agente local conectado às ferramentas deste computador.");
+        PageContent.Children.Add(AppearanceCard());
         var panel = new StackPanel(); var agentHeading = SectionHeading("chat", "Agente de suporte · Ollama"); agentHeading.Margin = new Thickness(0, 0, 0, 8); panel.Children.Add(agentHeading);
         panel.Children.Add(Text("A IA escolhe ferramentas, consulta o Windows, solicita as alterações necessárias e verifica os resultados. O modelo recebe o histórico recente e as saídas das ferramentas no serviço local 127.0.0.1:11434.", 14, "Secondary"));
         var enabled = Check(panel, "Usar agente IA para conduzir os atendimentos", store.Data.AiEnabled); var model = Field(panel, "Modelo com suporte a ferramentas", store.Data.Model);
@@ -1080,18 +1119,21 @@ public partial class MainWindow : Window
                 foreach (var nested in Descendants<T>(child)) yield return nested;
             }
         }
-        async Task Capture(string name)
+        // #143: com "--theme glacial", toda captura da prévia (telas e diálogos) ganha o prefixo do tema e não sobrescreve as do Ônix.
+        static string PreviewFile(string name) => ThemeManager.Current == ThemeCatalog.Onyx ? name : ThemeManager.Current + "-" + name;
+        async Task Capture(string name, bool themed = true)
         {
             await Task.Delay(200); UpdateLayout();
             var visual = (FrameworkElement)Content;
             var bitmap = new RenderTargetBitmap((int)visual.ActualWidth, (int)visual.ActualHeight, 96, 96, PixelFormats.Pbgra32); bitmap.Render(visual);
             var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
-            using var output = File.Create(Path.Combine(AppContext.BaseDirectory, name)); encoder.Save(output);
+            var file = themed ? PreviewFile(name) : name;
+            using var output = File.Create(Path.Combine(AppContext.BaseDirectory, file)); encoder.Save(output);
         }
         try
         {
-        if (((Grid)Content).Background is not SolidColorBrush shellBrush || shellBrush.Color.R < 230 || shellBrush.Color.G < 230 || shellBrush.Color.B < 230)
-            throw new InvalidOperationException("O tema claro não foi aplicado à janela principal.");
+        if (((Grid)Content).Background is not SolidColorBrush shellBrush || shellBrush.Color != ((SolidColorBrush)ThemeManager.Live("CanvasBg")).Color)
+            throw new InvalidOperationException("O tema " + ThemeCatalog.DisplayName(ThemeManager.Current) + " não foi aplicado à janela principal.");
         if (!HasVectorIcon(ChatNav)) throw new InvalidOperationException("A navegação não usa ícones vetoriais.");
         if (Shell.Visibility != Visibility.Visible || !Messages.Children.OfType<StackPanel>().Any()) throw new InvalidOperationException("Falha na abertura direta do aplicativo.");
         var shortcutGrid = Messages.Children.OfType<StackPanel>().SelectMany(s => s.Children.OfType<System.Windows.Controls.Primitives.UniformGrid>()).FirstOrDefault();
@@ -1157,6 +1199,25 @@ public partial class MainWindow : Window
         if (!new[] { "Verificar gateway", "Verificar DNS", "Verificar destino externo" }.All(label => Descendants<CheckBox>(PageContent).Any(check => check.Content?.ToString()?.Contains(label) == true && check.IsChecked == false)))
             throw new InvalidOperationException("As três sondagens precisam de opções independentes desligadas por padrão.");
         await Capture("nexo-health-settings.png");
+        // #143: a troca de tema atualiza a janela e o texto já criado na conversa, sem gravar a preferência na prévia.
+        var themeOptions = Descendants<Button>(PageContent).Where(button => (button.Tag as string)?.StartsWith("theme:", StringComparison.Ordinal) == true).ToArray();
+        if (themeOptions.Length != ThemeCatalog.Names.Count || themeOptions.Count(button => ReferenceEquals(button.Style, FindResource("Primary"))) != 1)
+            throw new InvalidOperationException("A aparência precisa mostrar os dois temas, com o atual destacado.");
+        var originalTheme = ThemeManager.Current; var storedTheme = store.Data.Theme;
+        var otherTheme = originalTheme == ThemeCatalog.Onyx ? ThemeCatalog.Glacial : ThemeCatalog.Onyx;
+        var shellBefore = ((SolidColorBrush)((Grid)Content).Background).Color;
+        var chatText = Descendants<TextBlock>(Messages).First(text => text.Foreground is SolidColorBrush { IsFrozen: false });
+        var chatBefore = ((SolidColorBrush)chatText.Foreground).Color;
+        ApplyTheme(otherTheme, persist: false); UpdateLayout();
+        if (((SolidColorBrush)((Grid)Content).Background).Color == shellBefore || ((SolidColorBrush)chatText.Foreground).Color == chatBefore || store.Data.Theme != storedTheme)
+            throw new InvalidOperationException("A troca de tema não atualizou a janela e o texto já criado, ou gravou a preferência na prévia.");
+        // O nome diz a troca (origem e destino), não o tema de destino. Configurações é redesenhada pelo ApplyTheme (para destacar o
+        // tema escolhido), então a 1ª captura é igual à da tela aberta no outro tema; a 2ª é a conversa, que não é recriada e prova a
+        // recoloração ao vivo do texto já criado.
+        var switchName = "nexo-theme-switch-" + originalTheme + "-to-" + otherTheme;
+        await Capture(switchName + ".png", themed: false);
+        ShowPage("chat"); await Capture(switchName + "-chat.png", themed: false); ShowPage("settings");
+        ApplyTheme(originalTheme, persist: false); UpdateLayout();
         Width = 1060; Height = 720; UpdateLayout(); await Capture("nexo-health-settings-small.png");
         Width = 1380; Height = 900; UpdateLayout();
         ShowPage("tools");
@@ -1309,7 +1370,7 @@ public partial class MainWindow : Window
                 var bitmap = new RenderTargetBitmap((int)visual.ActualWidth, (int)visual.ActualHeight, 96, 96, PixelFormats.Pbgra32);
                 bitmap.Render(visual);
                 var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
-                using var output = File.Create(Path.Combine(AppContext.BaseDirectory, file)); encoder.Save(output);
+                using var output = File.Create(Path.Combine(AppContext.BaseDirectory, PreviewFile(file))); encoder.Save(output);
             });
             if (accepted) throw new InvalidOperationException("A prévia não cancelou o diálogo de autorização.");
         }

@@ -103,6 +103,18 @@ internal static class LiveMetricsChecks
         assert(sampler.Sample(Start.AddSeconds(4)).Memory.Status == LiveStatus.Unavailable, "#141: memória total zero é leitura inválida, não 0% nem 100%");
         source.Memory = new MemoryStatus(8, 9);
         assert(sampler.Sample(Start.AddSeconds(5)).Memory.Status == LiveStatus.Unavailable, "#141: memória disponível maior que a total é leitura inválida");
+
+        // Falha ao ler o tempo de CPU do próprio processo: só o custo do Nexo fica indisponível, e a linha de base recomeça.
+        var own = new FakeSource { Cpu = new CpuTimes(1000, 3000, 2000), ProcessCpu = TimeSpan.FromSeconds(10) };
+        var ownSampler = new LiveMetricsSampler(own);
+        ownSampler.Sample(Start);
+        own.Cpu = new CpuTimes(1500, 4000, 3000); own.ProcessFails = true;
+        var failed = ownSampler.Sample(Start.AddSeconds(1));
+        assert(failed.NexoCpu.Status == LiveStatus.Unavailable && failed.NexoCpu.Detail == "processo" && failed.Cpu.Status == LiveStatus.Ok,
+            "#141: falha ao ler a CPU do Nexo vira indisponível, sem derrubar a CPU do PC");
+        own.ProcessFails = false; own.ProcessCpu = TimeSpan.FromSeconds(10.5); own.Cpu = new CpuTimes(2000, 5000, 4000);
+        assert(ownSampler.Sample(Start.AddSeconds(2)).NexoCpu.Status == LiveStatus.Waiting,
+            "#141: depois da falha, a CPU do Nexo recomeça a linha de base (espera a próxima amostra)");
     }
 
     private static void CounterEdges(Action<bool, string> assert)

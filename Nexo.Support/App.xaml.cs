@@ -15,6 +15,9 @@ public partial class App : Application
         try
         {
             var store = new Store(preview ? Path.Combine(AppContext.BaseDirectory, ".preview-data") : null, directAccess: true);
+            // #143: a prévia aceita "--theme glacial" para capturar o tema claro sem gravar a preferência.
+            var themeArgument = Array.IndexOf(e.Args, "--theme");
+            ThemeManager.Apply(preview && themeArgument >= 0 && themeArgument + 1 < e.Args.Length ? e.Args[themeArgument + 1] : store.Data.Theme);
             var window = new MainWindow(store);
             var workArea = SystemParameters.WorkArea;
             window.Width = Math.Min(window.Width, Math.Max(window.MinWidth, workArea.Width));

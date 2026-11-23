@@ -138,7 +138,8 @@ public sealed class LiveMetricsPanel : Border
 
     private static string Gigabytes(ulong bytes) => (bytes / 1024d / 1024 / 1024).ToString("F1", CultureInfo.CurrentCulture);
 
-    private static Brush Resource(string key) => Application.Current?.TryFindResource(key) as Brush ?? Brushes.Gray;
+    // Pincel vivo do tema (#143): muda de cor na troca entre Ônix e Glacial sem recriar o cartão.
+    private static Brush Resource(string key) => ThemeManager.Live(key);
 
     private sealed class Tile
     {
@@ -156,7 +157,9 @@ public sealed class LiveMetricsPanel : Border
             top.Children.Add(UiIcons.Create(icon, 16));
             top.Children.Add(new TextBlock { Text = label, Foreground = Resource("Secondary"), FontSize = 12, Margin = new Thickness(8, 0, 0, 0) });
             panel.Children.Add(top);
-            value = new TextBlock { Foreground = Resource("Ink"), FontSize = 21, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 8, 0, 2) };
+            // #143: os números do cartão usam IBM Plex Mono, como os da "Última leitura" (o Plex Mono embutido tem 400 e 500).
+            value = new TextBlock { Foreground = Resource("Ink"), FontSize = 21, FontWeight = FontWeights.Medium, Margin = new Thickness(0, 8, 0, 2) };
+            if (Application.Current?.TryFindResource("MonoFont") is FontFamily mono) value.FontFamily = mono;
             panel.Children.Add(value);
             detail = new TextBlock { Foreground = Resource("Secondary"), FontSize = 12, TextWrapping = TextWrapping.Wrap, MinHeight = 32 };
             panel.Children.Add(detail);

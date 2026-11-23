@@ -85,6 +85,8 @@ public sealed class Database
     public string Model { get; set; } = "";
     public bool AiEnabled { get; set; }
     public int AgentVersion { get; set; }
+    // Tema da interface (#143): "onyx" (padrão) ou "glacial". Ausente num data.json antigo, fica no padrão.
+    public string Theme { get; set; } = ThemeCatalog.Onyx;
 }
 public sealed record SupportMetrics(int Open, int Resolved, int Escalated, double? ResolutionRate, double? EscalationRate, double? AverageClosureMinutes)
 {

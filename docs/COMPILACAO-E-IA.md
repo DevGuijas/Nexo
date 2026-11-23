@@ -219,7 +219,7 @@ dotnet run --project .\Nexo.Checks\Nexo.Checks.csproj -- --diagnostics --agent-l
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\Check-UiPreview.ps1
 ```
 
-O script compila o aplicativo e o abre com `--screenshot`. A prévia usa dados de exemplo em `.preview-data`, sem tocar nos dados reais, e grava as imagens e `ui-checks.txt` em `Nexo.Support\bin\Release\net8.0-windows`. O comando `dotnet` precisa encontrar o SDK e, como o script abre `Nexo.exe` diretamente, também é preciso o runtime global ou `DOTNET_ROOT`.
+O script compila o aplicativo e o abre com `--screenshot`. Por padrão a prévia usa o tema Ônix; com `-Theme glacial` ela usa o tema claro e grava todas as imagens, inclusive as dos diálogos, com o prefixo `glacial-`, sem mudar a preferência salva. A troca de tema ao vivo gera `nexo-theme-switch-<origem>-to-<destino>.png` (Configurações, redesenhada no tema novo) e `nexo-theme-switch-<origem>-to-<destino>-chat.png` (a conversa já aberta, recolorida sem ser recriada). A prévia usa dados de exemplo em `.preview-data`, sem tocar nos dados reais, e grava as imagens e `ui-checks.txt` em `Nexo.Support\bin\Release\net8.0-windows`. O comando `dotnet` precisa encontrar o SDK e, como o script abre `Nexo.exe` diretamente, também é preciso o runtime global ou `DOTNET_ROOT`.
 
 Não execute `Nexo.Checks/DhcpLiveCheck.ps1` no computador de uso diário. Esse teste altera temporariamente a configuração IPv4, exige administrador e foi criado para uma máquina ou VM de laboratório com recuperação preparada.
 

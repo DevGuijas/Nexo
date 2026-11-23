@@ -1,4 +1,4 @@
-# Travas de publicação do Nexo (#21), usadas por Build-CloudRelease.ps1 antes de compilar ou empacotar.
+﻿# Travas de publicação do Nexo (#21), usadas por Build-CloudRelease.ps1 antes de compilar ou empacotar.
 # A origem é fixa: é a mesma do Nexo.Setup (DefaultManifestUrl) e não pode ser trocada por parâmetro, para que
 # nenhuma opção de linha de comando desligue a comparação com a versão publicada.
 # Requer PowerShell 7 (RSA.ImportFromPem).
