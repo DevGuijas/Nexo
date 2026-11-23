@@ -177,6 +177,15 @@ public static class SupportIntake
         var text = AgentProtocol.Normalize(request);
         return Regex.IsMatch(text, Heat) || Regex.IsMatch(text, Degrees);
     }
+    // Pedido só da temperatura (repetição no PC da 5b48461, 22/11): sem saúde dos discos, sem tópico de incidente (lentidão,
+    // falta de espaço, rede, impressora…), sem outro sintoma do PC ("desligando", "reiniciando", "tela azul", "erro") e sem
+    // pedir a saúde ou o estado geral ("como está a saúde do PC e a temperatura?"). Nesses casos, as ocorrências e o espaço
+    // livre do monitor podem explicar o problema e continuam no relatório.
+    private const string OtherSymptom = @"\b(deslig\w*|reinici\w*|tela azul|bsod|erros?|falh\w*|barulh\w*|apag\w*|caindo|cai|caiu|fecha\w* sozinh\w*|pisca\w*|crash\w*"
+        + @"|saude|estado|diagnostic\w*|geral|completo|tudo|resumo|relatorio)\b";
+    public static bool AsksOnlyTemperature(string request) =>
+        AsksTemperature(request) && !AsksDiskHealth(request) && IncidentTopics(request).Count == 0
+        && !Regex.IsMatch(AgentProtocol.Normalize(request), OtherSymptom);
     public static bool AsksDiskHealth(string request)
     {
         var text = AgentProtocol.Normalize(request);

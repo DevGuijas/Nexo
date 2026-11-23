@@ -220,6 +220,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         evidence.Focus = SupportIntake.SystemFocus(userRequest);
         evidence.AsksTemperature = SupportIntake.AsksTemperature(userRequest);
         evidence.AsksDiskHealth = SupportIntake.AsksDiskHealth(userRequest);
+        evidence.AsksOnlyTemperature = SupportIntake.AsksOnlyTemperature(userRequest);
         // Tópicos do incidente: os da última mensagem do usuário que tinha tópico. Uma continuação genérica do sistema
         // ("continua lento", "ainda tá demorando") soma o sistema aos tópicos anteriores, em vez de trocá-los.
         var incidentTopics = SupportIntake.ConversationTopics(conversation.Entries.Where(e => e.Role == "user").Reverse().Select(e => e.Text));
