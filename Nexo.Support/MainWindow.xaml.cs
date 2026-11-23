@@ -221,7 +221,8 @@ public partial class MainWindow : Window
             FontWeight = FontWeights.SemiBold, Margin = new Thickness(10, 0, 0, 0) });
         return row;
     }
-    private static Border MetricTile(string label, string value, string icon)
+    // #143: números em IBM Plex Mono; um estado em texto ("Interface ativa") usa a fonte do corpo numa linha só, sem quebrar em 1060x720.
+    private static Border MetricTile(string label, string value, string icon, bool numeric = true)
     {
         var panel = new StackPanel();
         var top = new StackPanel { Orientation = Orientation.Horizontal };
@@ -229,8 +230,11 @@ public partial class MainWindow : Window
         top.Children.Add(new TextBlock { Text = label, Foreground = Brush("Secondary"), FontSize = 12,
             Margin = new Thickness(8, 0, 0, 0) });
         panel.Children.Add(top);
-        panel.Children.Add(new TextBlock { Text = value, Foreground = Brush("Ink"), FontFamily = Font("MonoFont"),
-            FontSize = 23, FontWeight = FontWeights.Medium, Margin = new Thickness(0, 9, 0, 0) });
+        var valueText = new TextBlock { Text = value, Foreground = Brush("Ink"), FontWeight = FontWeights.Medium, Margin = new Thickness(0, 9, 0, 0),
+            TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = value };
+        if (numeric) { valueText.FontFamily = Font("MonoFont"); valueText.FontSize = 23; }
+        else valueText.FontSize = 19;
+        panel.Children.Add(valueText);
         return new Border { Background = Brush("SurfaceMuted"), CornerRadius = new CornerRadius(10),
             Padding = new Thickness(16), Margin = new Thickness(0, 0, 10, 0), Child = panel };
     }
@@ -402,7 +406,7 @@ public partial class MainWindow : Window
                 var metrics = new System.Windows.Controls.Primitives.UniformGrid { Columns = 3, Margin = new Thickness(0, 15, 0, 14) };
                 metrics.Children.Add(MetricTile("CPU", MetricPercent(latest.CpuPercent), "performance"));
                 metrics.Children.Add(MetricTile("Memória", MetricPercent(latest.MemoryUsedPercent), "health"));
-                metrics.Children.Add(MetricTile("Rede local", latest.Connectivity switch { "local" => "Interface ativa", "none" => "Sem interface", _ => "Indisponível" }, "network"));
+                metrics.Children.Add(MetricTile("Rede local", latest.Connectivity switch { "local" => "Interface ativa", "none" => "Sem interface", _ => "Indisponível" }, "network", numeric: false));
                 overview.Children.Add(metrics);
                 var collectionStatus = latest.CollectionStatus switch { "complete" => "completa", "partial" => "parcial", _ => latest.CollectionStatus };
                 overview.Children.Add(Text("Coleta: " + collectionStatus, 12, "Secondary"));
@@ -1114,14 +1118,15 @@ public partial class MainWindow : Window
                 foreach (var nested in Descendants<T>(child)) yield return nested;
             }
         }
-        async Task Capture(string name)
+        // #143: com "--theme glacial", toda captura da prévia (telas e diálogos) ganha o prefixo do tema e não sobrescreve as do Ônix.
+        static string PreviewFile(string name) => ThemeManager.Current == ThemeCatalog.Onyx ? name : ThemeManager.Current + "-" + name;
+        async Task Capture(string name, bool themed = true)
         {
             await Task.Delay(200); UpdateLayout();
             var visual = (FrameworkElement)Content;
             var bitmap = new RenderTargetBitmap((int)visual.ActualWidth, (int)visual.ActualHeight, 96, 96, PixelFormats.Pbgra32); bitmap.Render(visual);
             var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
-            // #143: com "--theme glacial", as capturas ganham o prefixo do tema e não sobrescrevem as do Ônix.
-            var file = ThemeManager.Current == ThemeCatalog.Onyx ? name : ThemeManager.Current + "-" + name;
+            var file = themed ? PreviewFile(name) : name;
             using var output = File.Create(Path.Combine(AppContext.BaseDirectory, file)); encoder.Save(output);
         }
         try
@@ -1205,7 +1210,12 @@ public partial class MainWindow : Window
         ApplyTheme(otherTheme, persist: false); UpdateLayout();
         if (((SolidColorBrush)((Grid)Content).Background).Color == shellBefore || ((SolidColorBrush)chatText.Foreground).Color == chatBefore || store.Data.Theme != storedTheme)
             throw new InvalidOperationException("A troca de tema não atualizou a janela e o texto já criado, ou gravou a preferência na prévia.");
-        await Capture("nexo-settings-theme-switch.png");
+        // O nome diz a troca (origem e destino), não o tema de destino. Configurações é redesenhada pelo ApplyTheme (para destacar o
+        // tema escolhido), então a 1ª captura é igual à da tela aberta no outro tema; a 2ª é a conversa, que não é recriada e prova a
+        // recoloração ao vivo do texto já criado.
+        var switchName = "nexo-theme-switch-" + originalTheme + "-to-" + otherTheme;
+        await Capture(switchName + ".png", themed: false);
+        ShowPage("chat"); await Capture(switchName + "-chat.png", themed: false); ShowPage("settings");
         ApplyTheme(originalTheme, persist: false); UpdateLayout();
         Width = 1060; Height = 720; UpdateLayout(); await Capture("nexo-health-settings-small.png");
         Width = 1380; Height = 900; UpdateLayout();
@@ -1359,7 +1369,7 @@ public partial class MainWindow : Window
                 var bitmap = new RenderTargetBitmap((int)visual.ActualWidth, (int)visual.ActualHeight, 96, 96, PixelFormats.Pbgra32);
                 bitmap.Render(visual);
                 var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
-                using var output = File.Create(Path.Combine(AppContext.BaseDirectory, file)); encoder.Save(output);
+                using var output = File.Create(Path.Combine(AppContext.BaseDirectory, PreviewFile(file))); encoder.Save(output);
             });
             if (accepted) throw new InvalidOperationException("A prévia não cancelou o diálogo de autorização.");
         }

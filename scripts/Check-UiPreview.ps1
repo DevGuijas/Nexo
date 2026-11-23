@@ -1,4 +1,4 @@
-param([ValidateSet('Debug', 'Release')][string]$Configuration = 'Release', [ValidateSet('onyx', 'glacial')][string]$Theme = 'onyx')
+﻿param([ValidateSet('Debug', 'Release')][string]$Configuration = 'Release', [ValidateSet('onyx', 'glacial')][string]$Theme = 'onyx')
 
 $ErrorActionPreference = 'Stop'
 $project = Join-Path $PSScriptRoot '..\Nexo.Support\Nexo.Support.csproj'

@@ -129,6 +129,44 @@ internal static class ThemeChecks
         assert(new[] { "LogoSoftLine", "LogoSoftNodes", "LogoStrongBar", "LogoStrongNodes" }.All(key => app.Contains("x:Key=\"" + key + "\"")
             && window.Contains("{StaticResource " + key + "}") && code.Contains("\"" + key + "\"")), "A logo nova usa as mesmas geometrias na lateral e nos ícones");
         assert(!app.Contains("M12,1 L14.7,9.3") && !window.Contains("M12,1 L14.7,9.3") && !code.Contains("M12,1 L14.7,9.3"), "A marca antiga em estrela foi substituída");
+
+        // Prints do PC (746d023, 23/11): os diálogos saíam sem o prefixo do tema e a rodada Glacial sobrescrevia os do Ônix; o print da
+        // troca levava o prefixo do tema de destino. Toda gravação da prévia passa pelo PreviewFile, e a troca tem nome próprio.
+        var saves = Regex.Matches(code, @"File\.Create\(Path\.Combine\(AppContext\.BaseDirectory, ([^)]*)\)\)").Select(m => m.Groups[1].Value).ToArray();
+        assert(saves.Length == 2 && saves.Contains("file") && saves.Count(s => s.StartsWith("PreviewFile(", StringComparison.Ordinal)) == 1
+            && code.Contains("var file = themed ? PreviewFile(name) : name;"), "Os prints dos diálogos levam o prefixo do tema, como os das telas");
+        assert(code.Contains("\"nexo-theme-switch-\" + originalTheme + \"-to-\" + otherTheme") && !code.Contains("\"nexo-settings-theme-switch.png\""),
+            "O print da troca de tema diz a origem e o destino");
+        // Números do cartão "Agora" (#141) em IBM Plex Mono; o estado em texto da "Última leitura" ("Interface ativa") usa o corpo, numa linha.
+        var panel = File.ReadAllText(Path.Combine(codeDir, "LiveMetricsPanel.cs"));
+        assert(panel.Contains("TryFindResource(\"MonoFont\") is FontFamily mono) value.FontFamily = mono"), "Os números do cartão Agora usam a fonte mono do tema");
+        assert(code.Contains("\"network\", numeric: false)") && code.Contains("if (numeric) { valueText.FontFamily = Font(\"MonoFont\");")
+            && code.Contains("TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis"), "O estado da rede local usa a fonte do corpo e não quebra em duas linhas");
+
+        // O PowerShell 5.1 lê um .ps1 sem BOM como ANSI e quebra os acentos no console (Check-UiPreview no PC, 23/11). Os scripts
+        // rodados por -File (scripts/ e Nexo.Checks/) com caractere fora do ASCII ficam em UTF-8 com BOM. Os .ps1 do Nexo.Support
+        // ficam de fora: são recursos embutidos que o app lê e passa por -EncodedCommand/-Command, nunca por -File.
+        var repository = RepositoryRoot();
+        assert(repository != null, "#143: repositório encontrado para conferir a codificação dos scripts PowerShell");
+        if (repository != null)
+        {
+            var scripts = Directory.GetFiles(Path.Combine(repository, "scripts"), "*.ps1").Concat(Directory.GetFiles(Path.Combine(repository, "Nexo.Checks"), "*.ps1")).ToArray();
+            var missing = scripts.Where(file => NeedsBom(File.ReadAllBytes(file))).Select(Path.GetFileName).ToArray();
+            assert(scripts.Length >= 5 && missing.Length == 0, "Os scripts PowerShell com acento estão em UTF-8 com BOM" + (missing.Length > 0 ? ": " + string.Join(", ", missing) : ""));
+        }
+        assert(NeedsBom(Encoding.UTF8.GetBytes("# Prévia")) && !NeedsBom([0xEF, 0xBB, 0xBF, .. Encoding.UTF8.GetBytes("# Prévia")]) && !NeedsBom(Encoding.UTF8.GetBytes("# Previa")),
+            "A regra do BOM pega o script com acento sem BOM e aceita o com BOM e o só ASCII");
+    }
+
+    private static bool NeedsBom(byte[] bytes) => !(bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) && bytes.Any(b => b > 0x7F);
+
+    private static string? RepositoryRoot()
+    {
+        foreach (var start in new[] { AppContext.BaseDirectory, Environment.CurrentDirectory })
+            for (var directory = new DirectoryInfo(start); directory != null; directory = directory.Parent)
+                if (File.Exists(Path.Combine(directory.FullName, "scripts", "Check-UiPreview.ps1")) && Directory.Exists(Path.Combine(directory.FullName, "Nexo.Checks")))
+                    return directory.FullName;
+        return null;
     }
 
     private const string StaleBrushRead = @"\(\s*(?:SolidColor)?Brush\s*\)\s*(?:\w+(?:\.\w+)*\??\.)?(?:Try)?FindResource\(|(?:Try)?FindResource\([^)]*\)\s*as\s+(?:SolidColor)?Brush\b";

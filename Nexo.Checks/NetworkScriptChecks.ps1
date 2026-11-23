@@ -1,4 +1,4 @@
-$ErrorActionPreference='Stop'
+﻿$ErrorActionPreference='Stop'
 # All networking cmdlets are replaced here. This suite never invokes real network mutations.
 function Get-NetAdapter { param($InterfaceIndex) [pscustomobject]@{Name=$script:adapterName;InterfaceDescription=$script:adapterDescription;InterfaceGuid='{00000000-0000-0000-0000-000000000001}';Virtual=$script:virtual;HardwareInterface=(-not $script:virtual)} }
 function Get-NetIPInterface { param($InterfaceIndex,$AddressFamily) [pscustomobject]@{Dhcp=$script:state.Dhcp} }
