@@ -483,7 +483,11 @@ internal static class AppRemovalChatChecks
         Item("posso tirar o Teams?", Windows11, "Microsoft Teams (pessoal)", false, "Conversas do Teams pessoal ficam só na web.");
         Item("posso remover o copilot?", Windows11, "Copilot (app)", false);
         Item("posso tirar os widgets?", Windows10, "Widgets (pacote)", false, "Windows Web Experience Pack");
-        Item("posso tirar o sysmain?", Windows10, "SysMain (Superfetch)", false, "SSD");
+        Item("posso tirar o sysmain?", Windows10, "SysMain (Superfetch)", false, "SSD", "O Nexo não aplica esse ajuste pelo chat.");
+        Item("o Xbox não abre, tento desinstalar?", Windows10, "Xbox (app)", false);
+        Item("posso tirar o Xbox do PC?", Windows10, "Xbox (app)", false);
+        Item("dá pra remover o app do clima?", Windows10, "Clima (Bing Weather)", true);
+        Item("a cortana, posso tirar ela?", Windows10, "Cortana", true);
         assert(wrong.Count == 0, "#127 (PC 3a88880): a pergunta sobre remover um item do catálogo recebe o nome do cartão, sugerido ou opcional, o aviso e o caminho, sem caminho do Windows"
             + (wrong.Count > 0 ? " · erradas: " + string.Join(" | ", wrong) : ""));
 
@@ -519,6 +523,13 @@ internal static class AppRemovalChatChecks
             "como apagar um email?", "posso remover tudo?", "remove os apps inúteis do windows pra mim", "o clima está quente, o pc esquenta",
             "posso tirar o bing do navegador?", "quero remover as notificações das dicas", "posso desinstalar a atualização do xbox?",
             "posso remover o driver do xbox?", "dá pra desinstalar o dispositivo do xbox?",
+            // Gate @qa da d8a2cce: remover algo DO app, ou o app DE um lugar, não é remover o app.
+            "o OneDrive está cheio, posso apagar arquivos?", "excluir e-mails do Outlook", "como tiro a conta do Outlook?",
+            "remover a senha do Xbox", "como remover o Teams da barra de tarefas?", "remover o ícone do Teams", "tirar o clima da barra de tarefas",
+            "posso tirar o som do Teams?", "excluir uma reunião do Teams", "a store não abre, removo o cache?", "como tirar a Cortana do Iniciar?",
+            "posso tirar o Copilot da barra?", "remover dicas da tela de bloqueio", "desinstalar as noticias e interesses",
+            "remover o family da minha conta", "remover o widget da área de trabalho", "o OneDrive não sincroniza, tiro e coloco de novo?",
+            "tirei o Xbox e agora o controle não conecta", "tirar notificações do Xbox", "como desinstalar a atualização do Clima?",
         ];
         var wrongNone = none.Where(request => AppRemovalQuestion.Answer(request, Windows10) != null || AppRemovalQuestion.Answer(request, Windows11) != null).ToArray();
         assert(wrongNone.Length == 0, "#127: print, pendrive, app que não abre, passado, inicialização, driver, e-mail e programa fora do catálogo não viram resposta do cartão"
@@ -547,6 +558,10 @@ internal static class AppRemovalChatChecks
             AgentProtocol.AppRemovalLine,
             "O Xbox (app) está no cartão “Apps pré-instalados e ajustes do Windows”, no menu Ferramentas: para remover, use o cartão.",
             "O app do Xbox não abre: vou verificar o serviço de jogos.",
+            // Gate @qa da d8a2cce: o item do catálogo não é o objeto da remoção, ou a remoção é negada.
+            "O Teams não abre. Para remover o cache do Teams, abra Configurações > Aplicativos e clique em Redefinir.",
+            "Para desinstalar a atualização problemática, abra Configurações > Windows Update > Histórico e clique em Desinstalar atualizações. O app Clima voltou a abrir?",
+            "Não remova o Xbox se você joga. Para ver o que ocupa espaço, abra Configurações > Sistema > Armazenamento.",
         ];
         var wrongRefused = refused.Where(text => Validate(text) != AgentProtocol.AppRemovalReason).ToArray();
         var wrongAccepted = accepted.Where(text => Validate(text) == AgentProtocol.AppRemovalReason).ToArray();

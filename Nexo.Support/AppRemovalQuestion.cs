@@ -51,8 +51,9 @@ public static class AppRemovalQuestion
     ];
 
     // Alvos fora do escopo de propósito (DebloatCatalog.Excluded), com o motivo da #127.
-    private const string BreaksData = "removê-lo pode quebrar ou sumir com dados do usuário";
-    private const string BreaksSupport = "removê-lo quebra o suporte ou a gestão do PC";
+    // Sem pronome: "a Microsoft Store", "a Câmera" e "as Notas Autoadesivas" não concordam com "removê-lo" (@qa).
+    private const string BreaksData = "a remoção pode quebrar ou sumir com dados do usuário";
+    private const string BreaksSupport = "a remoção quebra o suporte ou a gestão do PC";
     private const string RealUse = "é um app de uso real";
     private static readonly (string Name, string Pattern, string Why)[] ExcludedAliases =
     [
@@ -84,13 +85,24 @@ public static class AppRemovalQuestion
     // Não contam: reinstalar ou ter de volta, tirar da inicialização, tirar um print ou tirar foto, e o fluxo de driver
     // ("a câmera não funciona, posso remover o driver?").
     private const string NotRemoval = @"\b(?:reinstal\w*|de volta|inicializac\w*|startup|segundo plano|abre\w* junto|abrem junto|iniciam? junto|prints?|fotos?|screenshots?|capturas?|drivers?|dispositivos?|atualizac\w*|updates?|notificac\w*)\b";
-    // O verbo e o item ficam perto um do outro, numa ordem ou na outra: "posso tirar o Xbox?", "e o Xbox, posso tirar?",
-    // "dá pra desinstalar a Cortana?". Longe, a frase pode falar de outra coisa.
+    // O item é o objeto do verbo, numa ordem ou na outra: "posso tirar o Xbox?", "dá pra desinstalar a Cortana?", "e o Xbox,
+    // posso tirar?". Remover algo DO app ou o app DE um lugar não conta (@qa, gate da d8a2cce): "remover a senha do Xbox",
+    // "excluir e-mails do Outlook", "como tiro a conta do Outlook?", "remover o ícone do Teams", "tirar o clima da barra de
+    // tarefas", "como tirar a Cortana do Iniciar?", "remover o family da minha conta", "o OneDrive está cheio, posso apagar
+    // arquivos?", "a store não abre, removo o cache?". "Notícias e interesses" é o painel da barra do Windows 10, não o app.
+    private const string Determiner = @"(?:(?:o|a|os|as|esse|essa|esses|essas|este|esta|estes|estas|aquele|aquela|meu|minha|meus|minhas|seu|sua|seus|suas)\s+)?";
+    private const string AppWord = @"(?:(?:app|aplicativo|programa)s?\s+(?:(?:do|da|de)\s+)?)?";
+    private const string NotPlace = @"(?!\s+(?:e\s+interesses\b|(?:da|do|de|das|dos|na|no|nas|nos)\s+(?:(?:minha|meu|sua|seu)\s+)?(?:barra|iniciar|menu|tela|area|conta|inicializac|bandeja|desktop|lista|calendario|celular|telefone|navegador)))";
+    private const string ObjectEnd = @"(?:-(?:lo|la|los|las))?(?=\s*(?:[?.!,;:]|$)|\s+(?:ele|ela|eles|elas|isso|tambem|agora|mesmo|de vez|do (?:pc|computador|windows|sistema))\b)";
+    private static string Forward(string pattern) => Verb + @"(?:-(?:lo|la|los|las))?\s+" + Determiner + AppWord + @"(?:" + pattern + @")\b" + NotPlace;
     private static bool Mentions(string text, string pattern) => Regex.IsMatch(text,
-        Verb + @"(?:-(?:lo|la|los|las))?\s+(?:[\w-]+\s+){0,4}?(?:" + pattern + @")\b|\b(?:" + pattern + @")\b\W+(?:[\w-]+\W+){0,5}?" + VerbCore);
+        Forward(pattern) + @"|\b(?:" + pattern + @")\b" + NotPlace + @"\W+(?:[\w-]+\W+){0,5}?" + VerbCore + ObjectEnd);
+    private static readonly Regex AnyItemObject = new(Forward(string.Join("|", ItemAliases.Select(alias => alias.Pattern))));
+    /// <summary>A frase remove um item do catálogo, como objeto do verbo ("para remover o Xbox", "desinstale a Cortana"), sem
+    /// negação logo antes ("não remova o Xbox"). Usada pela trava do passo a passo de remoção inventado.</summary>
+    public static bool RemovesCatalogItem(string normalized) => AnyItemObject.Matches(normalized)
+        .Any(match => !Regex.IsMatch(normalized[..match.Index], @"\b(?:nao|nem|nunca|evite)\s+(?:\w+\s+){0,2}$"));
 
-    /// <summary>Apelido de qualquer item do catálogo (para a trava do passo a passo de remoção inventado).</summary>
-    public static readonly Regex CatalogAlias = new(@"\b(?:" + string.Join("|", ItemAliases.Select(alias => alias.Pattern)) + @")\b");
 
     /// <summary>O texto determinístico para a pergunta, ou null quando ela não é sobre remover um item conhecido.</summary>
     public static string? Answer(string request, int build)
@@ -116,7 +128,7 @@ public static class AppRemovalQuestion
     {
         var parts = new List<string>
         {
-            "O Nexo não remove apps pelo chat. “" + item.Title + "” é um item do cartão " + Card + ", e vem "
+            (item.Kind == DebloatKind.App ? "O Nexo não remove apps pelo chat. “" : "O Nexo não aplica esse ajuste pelo chat. “") + item.Title + "” é um item do cartão " + Card + ", e vem "
                 + (item.Default ? "sugerido, já marcado." : "como opcional, desmarcado."),
         };
         if (item.Warning.Length > 0) parts.Add("Aviso do cartão: " + item.Warning);

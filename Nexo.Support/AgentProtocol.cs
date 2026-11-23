@@ -143,13 +143,15 @@ public static class AgentProtocol
     // cita um item do catálogo, diz como remover ou desinstalar e leva a um caminho do Windows ou a um botão de remover. A frase
     // do Nexo "Outros programas são desinstalados em Configurações > Aplicativos do Windows" não cita item do catálogo e passa;
     // o caminho de outro programa ("para desinstalar o Chrome, abra Configurações > Aplicativos") também.
-    private static readonly Regex RemovalHowTo = new(@"\b(?:para|como|pra) (?:o )?(?:remov|desinstal|tir|exclu)\w*|\bclique\W+(?:em\W+)?\W*(?:remov|desinstal)\w*");
     private static readonly Regex WindowsPath = new(@"\b(?:configurac\w*|settings|painel de controle)\b\W*>|\bclique\W+(?:em\W+)?\W*(?:remov|desinstal)\w*");
+    // O item do catálogo precisa ser o objeto do verbo de remover (@qa, gate da d8a2cce): "O Teams não abre. Para remover o cache
+    // do Teams, abra Configurações > Aplicativos e clique em Redefinir" e "Para desinstalar a atualização…, abra Configurações >
+    // Windows Update… O app Clima voltou a abrir?" são orientação real e passam.
     public static bool WritesAppRemovalSteps(string normalized) =>
-        AppRemovalQuestion.CatalogAlias.IsMatch(normalized) && RemovalHowTo.IsMatch(normalized) && WindowsPath.IsMatch(normalized) && !RemovalPath.IsMatch(normalized);
+        AppRemovalQuestion.RemovesCatalogItem(normalized) && WindowsPath.IsMatch(normalized) && !RemovalPath.IsMatch(normalized);
     // Trecho citado na 2ª recusa: a oferta ou o passo do caminho inventado.
     public static bool AppRemovalPassage(string normalized) => OffersAppRemoval(normalized)
-        || AppRemovalQuestion.CatalogAlias.IsMatch(normalized) && RemovalHowTo.IsMatch(normalized) || Regex.IsMatch(normalized, @"\bclique\W+(?:em\W+)?\W*(?:remov|desinstal)\w*");
+        || AppRemovalQuestion.RemovesCatalogItem(normalized) || Regex.IsMatch(normalized, @"\bclique\W+(?:em\W+)?\W*(?:remov|desinstal)\w*");
     public static bool OffersAppRemoval(string normalized) => Regex.Split(normalized, @"[.!?;\n]+").Any(sentence =>
         AppRemoval.IsMatch(sentence) && !RemovalPath.IsMatch(sentence) && !RemovalExplanation.IsMatch(sentence)
         && RemovalOffer.Matches(sentence).Any(offer => !Regex.IsMatch(sentence[..offer.Index], @"\b(?:nao|nem|nunca)\s+(?:\w+\s+){0,2}$")));
