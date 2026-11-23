@@ -41,6 +41,10 @@ internal static class AppRemovalChatChecks
             RepeatedAnswerRule(assert);
             await PcCopyRefused(store, actor, assert);
             await PcCopyGivesUp(store, actor, assert);
+            ItemAnswers(assert);
+            StepsAndUnused(assert);
+            await PcXboxQuestion(store, actor, assert);
+            await ChromeGoesToModel(store, actor, assert);
         }
         finally { store.Data.AiEnabled = previousAi; System.Globalization.CultureInfo.CurrentCulture = previousCulture; }
     }
@@ -450,6 +454,139 @@ internal static class AppRemovalChatChecks
         assert(model.Consumed && answer.Contains(AgentProtocol.AppRemovalFollowUp, StringComparison.Ordinal) && !answer.Contains(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal)
             && !answer.Contains("A IA repetiu", StringComparison.Ordinal),
             "#127 (PC a6fcbea): três cópias da resposta anterior encerram o turno com a explicação curta do seguimento, diferente do texto pronto · " + answer.Replace("\n", " "));
+    }
+
+    private const int Windows10 = 19045;
+    private const int Windows11 = 22631;
+
+    // Pergunta sobre remover um item conhecido (PC 3a88880, 23/11): "e o Xbox, posso tirar?" recebeu um caminho inventado.
+    private static void ItemAnswers(Action<bool, string> assert)
+    {
+        var wrong = new List<string>();
+        void Item(string request, int build, string title, bool suggested, params string[] contains)
+        {
+            var answer = AppRemovalQuestion.Answer(request, build);
+            if (answer == null || !answer.Contains("“" + title + "”", StringComparison.Ordinal) || !answer.Contains("“Apps pré-instalados e ajustes do Windows”", StringComparison.Ordinal)
+                || !answer.Contains("Verificar este PC", StringComparison.Ordinal) || !answer.Contains(suggested ? "sugerido, já marcado" : "opcional, desmarcado", StringComparison.Ordinal)
+                || contains.Any(part => !answer.Contains(part, StringComparison.Ordinal)) || answer.Contains("indique", StringComparison.Ordinal)
+                || answer.Contains("existe neste PC e", StringComparison.Ordinal) || Regex.IsMatch(answer, @"Configurações >"))
+                wrong.Add(request + " [" + build + "] → " + answer);
+        }
+        // Frase exata do PC, no Windows 10 do PC: o aviso do app e o do login, com a trava de confirmação.
+        Item("e o Xbox, posso tirar?", Windows10, "Xbox (app)", false, "Quem joga pela conta Xbox ou pelo Game Pass deve manter.", "“Login do Xbox”", "login do Minecraft e do Game Pass para de funcionar", "confirmação explícita");
+        Item("posso remover o login do xbox?", Windows10, "Login do Xbox", false, "O login do Minecraft e do Game Pass para de funcionar.", "confirmação explícita");
+        Item("dá pra tirar a game bar?", Windows11, "Xbox Game Bar e sobreposições", false, "grava a tela");
+        Item("posso desinstalar a Cortana?", Windows10, "Cortana", true);
+        Item("e o clima, removo?", Windows11, "Clima (Bing Weather)", true);
+        Item("posso tirar as notícias?", Windows10, "Notícias (Bing News)", true);
+        Item("da pra desinstalar o solitaire", Windows11, "Solitaire Collection", true);
+        Item("posso tirar o Teams?", Windows11, "Microsoft Teams (pessoal)", false, "Conversas do Teams pessoal ficam só na web.");
+        Item("posso remover o copilot?", Windows11, "Copilot (app)", false);
+        Item("posso tirar os widgets?", Windows10, "Widgets (pacote)", false, "Windows Web Experience Pack");
+        Item("posso tirar o sysmain?", Windows10, "SysMain (Superfetch)", false, "SSD");
+        assert(wrong.Count == 0, "#127 (PC 3a88880): a pergunta sobre remover um item do catálogo recebe o nome do cartão, sugerido ou opcional, o aviso e o caminho, sem caminho do Windows"
+            + (wrong.Count > 0 ? " · erradas: " + string.Join(" | ", wrong) : ""));
+
+        // Item só do 11 perguntado no 10, e o Teams do 10, que é excluído.
+        var clipchamp = AppRemovalQuestion.Answer("posso tirar o clipchamp?", Windows10) ?? "";
+        var copilot10 = AppRemovalQuestion.Answer("posso remover o copilot?", Windows10) ?? "";
+        var teams10 = AppRemovalQuestion.Answer("posso tirar o Teams?", Windows10) ?? "";
+        assert(clipchamp.Contains("só no Windows 11", StringComparison.Ordinal) && clipchamp.Contains("não o oferece", StringComparison.Ordinal)
+            && copilot10.Contains("só no Windows 11", StringComparison.Ordinal)
+            && teams10.Contains("não remove o Teams do Windows 10 de propósito", StringComparison.Ordinal) && !teams10.Contains("Configurações", StringComparison.Ordinal),
+            "#127: item só do Windows 11 perguntado no 10 diz que o cartão não o oferece; o Teams do 10 é excluído · " + clipchamp + " | " + teams10);
+
+        // Excluídos de propósito: o motivo, sem outro caminho de remoção.
+        var excluded = new (string Request, string Name, string Why)[]
+        {
+            ("posso tirar o OneDrive?", "o OneDrive", "dados do usuário"),
+            ("dá pra remover a microsoft store?", "a Microsoft Store", "suporte ou a gestão"),
+            ("posso desinstalar o app da câmera?", "a Câmera", "uso real"),
+            ("e a assistência rápida, posso tirar?", "a Assistência Rápida", "suporte ou a gestão"),
+        };
+        var wrongExcluded = excluded.Select(e => (e, answer: AppRemovalQuestion.Answer(e.Request, Windows10)))
+            .Where(x => x.answer == null || !x.answer.Contains("não remove " + x.e.Name + " de propósito", StringComparison.Ordinal) || !x.answer.Contains(x.e.Why, StringComparison.Ordinal)
+                || x.answer.Contains("Configurações", StringComparison.Ordinal) || x.answer.Contains("Painel", StringComparison.Ordinal))
+            .Select(x => x.e.Request + " → " + x.answer).ToArray();
+        assert(wrongExcluded.Length == 0, "#127: alvo fora do escopo (OneDrive, Store, Câmera…) recebe o motivo e nenhum outro caminho de remoção"
+            + (wrongExcluded.Length > 0 ? " · erradas: " + string.Join(" | ", wrongExcluded) : ""));
+
+        // Não é pergunta de remover um item conhecido: segue o fluxo normal.
+        string[] none =
+        [
+            "posso tirar o Chrome?", "posso tirar um print?", "posso tirar o pendrive?", "o Xbox não abre", "o xbox travou, como reinstalar?",
+            "removi o xbox e agora o jogo não abre", "posso tirar o xbox da inicialização?", "a câmera não funciona, posso remover o driver?",
+            "como apagar um email?", "posso remover tudo?", "remove os apps inúteis do windows pra mim", "o clima está quente, o pc esquenta",
+            "posso tirar o bing do navegador?", "quero remover as notificações das dicas", "posso desinstalar a atualização do xbox?",
+            "posso remover o driver do xbox?", "dá pra desinstalar o dispositivo do xbox?",
+        ];
+        var wrongNone = none.Where(request => AppRemovalQuestion.Answer(request, Windows10) != null || AppRemovalQuestion.Answer(request, Windows11) != null).ToArray();
+        assert(wrongNone.Length == 0, "#127: print, pendrive, app que não abre, passado, inicialização, driver, e-mail e programa fora do catálogo não viram resposta do cartão"
+            + (wrongNone.Length > 0 ? " · erradas: " + string.Join(" | ", wrongNone.Select(r => r + " → " + (AppRemovalQuestion.Answer(r, Windows10) ?? AppRemovalQuestion.Answer(r, Windows11)))) : ""));
+    }
+
+    // Oferta de procurar apps não usados e passo a passo de remoção inventado (PC 3a88880).
+    private static void StepsAndUnused(Action<bool, string> assert)
+    {
+        const string pcAnswer = "O Xbox é um app que vem com o Windows e pode ser removido, mas é importante saber que ele está associado a recursos como jogos, streaming e controle remoto do Xbox. Se você não usa esses recursos, pode removê-lo.\n\nPara remover o Xbox:\n1. Vá em **Configurações > Sistema > Xbox**.\n2. Clique em **Remover**.\n3. Confirme a ação.\n\nSe quiser, posso ajudar a encontrar outros apps que talvez você também não use.";
+        string[] refused =
+        [
+            pcAnswer,
+            "Se quiser, posso ajudar a encontrar outros apps que talvez você também não use.",
+            "Posso identificar os aplicativos que você não usa.",
+            "Quer que eu liste os programas desnecessários deste PC?",
+            "Para remover o Xbox: 1. Vá em **Configurações > Sistema > Xbox**. 2. Clique em **Remover**.",
+            "Para desinstalar a Cortana, abra Configurações > Aplicativos > Cortana e clique em Desinstalar.",
+        ];
+        string[] accepted =
+        [
+            "Posso ajudar a identificar os apps que mais consomem memória.",
+            "Posso verificar quais programas estão usando mais CPU.",
+            "Para desinstalar o Chrome, abra Configurações > Aplicativos e clique em Desinstalar.",
+            AgentProtocol.AppRemovalGuidance,
+            AgentProtocol.AppRemovalLine,
+            "O Xbox (app) está no cartão “Apps pré-instalados e ajustes do Windows”, no menu Ferramentas: para remover, use o cartão.",
+            "O app do Xbox não abre: vou verificar o serviço de jogos.",
+        ];
+        var wrongRefused = refused.Where(text => Validate(text) != AgentProtocol.AppRemovalReason).ToArray();
+        var wrongAccepted = accepted.Where(text => Validate(text) == AgentProtocol.AppRemovalReason).ToArray();
+        assert(wrongRefused.Length == 0 && wrongAccepted.Length == 0,
+            "#127 (PC 3a88880): a oferta de procurar apps não usados e o passo a passo inventado para um item do catálogo são recusados; consumo de memória, outro programa e o cartão passam"
+            + (wrongRefused.Length > 0 ? " · passaram: " + string.Join(" | ", wrongRefused) : "") + (wrongAccepted.Length > 0 ? " · recusadas: " + string.Join(" | ", wrongAccepted) : ""));
+    }
+
+    // O fluxo do PC: a pergunta do Xbox, na conversa do cartão, recebe o texto do Nexo, sem o modelo e sem ferramentas.
+    private static async Task PcXboxQuestion(Store store, Account actor, Action<bool, string> assert)
+    {
+        var model = new CapturingModel([]);
+        using var http = new HttpClient(model);
+        var conversation = new Conversation
+        {
+            UserId = actor.Id,
+            Entries =
+            [
+                new Entry { Role = "user", Text = "remove os apps inúteis do windows pra mim" },
+                new Entry { Role = "assistant", Text = PriorGuidance },
+                new Entry { Role = "user", Text = "e o Xbox, posso tirar?" },
+            ],
+        };
+        var tools = new FlowTools();
+        var answer = (await new AgentService(store, tools, http) { WindowsBuild = () => Windows10 }.Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None)).ReplaceLineEndings("\n");
+        assert(model.Calls == 0 && tools.Calls.Count == 0 && answer.StartsWith(AppRemovalQuestion.Answer("e o Xbox, posso tirar?", Windows10)!, StringComparison.Ordinal)
+            && !answer.Contains("Configurações > Sistema", StringComparison.Ordinal) && !answer.Contains("posso ajudar a encontrar", StringComparison.Ordinal),
+            "#127 (PC 3a88880): \"e o Xbox, posso tirar?\" recebe o texto do Nexo com o aviso do Xbox e do login, sem o modelo · " + answer.Replace("\n", " "));
+    }
+
+    // Fora do catálogo e dos excluídos: segue com o modelo.
+    private static async Task ChromeGoesToModel(Store store, Account actor, Action<bool, string> assert)
+    {
+        const string reply = "O Chrome é um navegador instalado por você. Se quiser desinstalá-lo, abra Configurações > Aplicativos, procure o Google Chrome e escolha Desinstalar.";
+        var model = new CapturingModel([Text(reply)]);
+        using var http = new HttpClient(model);
+        var conversation = new Conversation { UserId = actor.Id, Entries = [new Entry { Role = "user", Text = "posso tirar o Chrome?" }] };
+        var answer = (await new AgentService(store, new FlowTools(), http) { WindowsBuild = () => Windows10 }.Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None)).ReplaceLineEndings("\n");
+        assert(model.Calls >= 1 && answer.Contains("Chrome", StringComparison.Ordinal) && !answer.Contains("de propósito", StringComparison.Ordinal),
+            "#127: \"posso tirar o Chrome?\" segue com o modelo · " + answer.Replace("\n", " "));
     }
 
     private static async Task<string> Ask(Store store, Account actor, string request, CapturingModel model)

@@ -129,11 +129,27 @@ public static class AgentProtocol
         + @"|\b" + AppObject + @"\s+(?:[\w-]+\s+){0,3}?" + RemovalVerb
         + @"|\blimp\w*\s+(?:(?:os|as|esses|estes|seus|alguns|todos os)\s+)?" + AppObject + @"\b|\bdebloat\w*"
         // Desinstalar um app pelo nome ("vou desinstalar o Clipchamp"); driver, dispositivo e atualização ficam de fora.
-        + @"|\bdesinstal" + PastForm + @"(?!\w*(?:id[oa]s?|ad[oa]s?)\b)\w*\b(?:-(?:lo|la|los|las))?(?!\s+(?:\w+\s+){0,4}?(?:drivers?|dispositivos?|atualizac\w*|updates?)\b)");
+        + @"|\bdesinstal" + PastForm + @"(?!\w*(?:id[oa]s?|ad[oa]s?)\b)\w*\b(?:-(?:lo|la|los|las))?(?!\s+(?:\w+\s+){0,4}?(?:drivers?|dispositivos?|atualizac\w*|updates?)\b)"
+        // Procurar os apps que o usuário não usa é o começo da mesma remoção (PC 3a88880: "Se quiser, posso ajudar a encontrar
+        // outros apps que talvez você também não use"). Procurar os apps que mais consomem memória ou CPU não conta.
+        + @"|\b(?:encontr|identific|ach|localiz|list|descobr|levant|mape)\w*\s+(?:[\w-]+\s+){0,3}?" + AppObject
+        + @"\b[^.;!?\n]*?\b(?:nao (?:\w+ )?(?:usa|use|usam|usem|utiliza|utilize|utilizam|precisa|precise)\b|inute\w*|inutil|desnecessari\w*|sem uso|pouco usad\w*|esquecid\w*)");
     private static readonly Regex RemovalOffer = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|vamos|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo"
         + @"|me (?:diga|informe|fale|avise|mande|liste|passe)(?: (?:quais|qual|os|o nome|os nomes))?)\b");
     private static readonly Regex RemovalPath = new(@"\bferramentas\b[^.;!?]*\bpre-?\s?instalad|\bpre-?\s?instalad\w* e ajustes\b");
     private static readonly Regex RemovalExplanation = new(@"\b(?:explic|orient|ensin)\w*|\b(?:mostrar|dizer|indicar)(?: a voce| para voce)? (?:como|onde)\b");
+    // Passo a passo de remoção inventado para um item do catálogo (PC 3a88880): "Para remover o Xbox: 1. Vá em **Configurações >
+    // Sistema > Xbox**. 2. Clique em **Remover**." O caminho não existe, e o item tem aviso e trava no cartão. Conta o texto que
+    // cita um item do catálogo, diz como remover ou desinstalar e leva a um caminho do Windows ou a um botão de remover. A frase
+    // do Nexo "Outros programas são desinstalados em Configurações > Aplicativos do Windows" não cita item do catálogo e passa;
+    // o caminho de outro programa ("para desinstalar o Chrome, abra Configurações > Aplicativos") também.
+    private static readonly Regex RemovalHowTo = new(@"\b(?:para|como|pra) (?:o )?(?:remov|desinstal|tir|exclu)\w*|\bclique\W+(?:em\W+)?\W*(?:remov|desinstal)\w*");
+    private static readonly Regex WindowsPath = new(@"\b(?:configurac\w*|settings|painel de controle)\b\W*>|\bclique\W+(?:em\W+)?\W*(?:remov|desinstal)\w*");
+    public static bool WritesAppRemovalSteps(string normalized) =>
+        AppRemovalQuestion.CatalogAlias.IsMatch(normalized) && RemovalHowTo.IsMatch(normalized) && WindowsPath.IsMatch(normalized) && !RemovalPath.IsMatch(normalized);
+    // Trecho citado na 2ª recusa: a oferta ou o passo do caminho inventado.
+    public static bool AppRemovalPassage(string normalized) => OffersAppRemoval(normalized)
+        || AppRemovalQuestion.CatalogAlias.IsMatch(normalized) && RemovalHowTo.IsMatch(normalized) || Regex.IsMatch(normalized, @"\bclique\W+(?:em\W+)?\W*(?:remov|desinstal)\w*");
     public static bool OffersAppRemoval(string normalized) => Regex.Split(normalized, @"[.!?;\n]+").Any(sentence =>
         AppRemoval.IsMatch(sentence) && !RemovalPath.IsMatch(sentence) && !RemovalExplanation.IsMatch(sentence)
         && RemovalOffer.Matches(sentence).Any(offer => !Regex.IsMatch(sentence[..offer.Index], @"\b(?:nao|nem|nunca)\s+(?:\w+\s+){0,2}$")));
@@ -149,7 +165,7 @@ public static class AgentProtocol
         if (string.IsNullOrWhiteSpace(message)) return "Informe uma conclusão ou pergunta não vazia.";
         var text = Normalize(message);
         // Antes das regras gerais: com elas, a oferta de remover apps recebia "Use a ferramenta…", e não existe ferramenta (#127).
-        if (OffersAppRemoval(text)) return AppRemovalReason;
+        if (OffersAppRemoval(text) || WritesAppRemovalSteps(text)) return AppRemovalReason;
         if (Regex.IsMatch(text, @"\b(posso|podemos|devo)\b[^?.]{0,80}\b(permissao|autorizacao)\b"))
             return "Não solicite permissão no chat para uma ferramenta. Consulte o estado e use a ferramenta adequada; ela apresenta a autorização concreta.";
         if (message.Contains('?') && Regex.IsMatch(text, @"\b(posso confirmar se|voce esta|esta|se sente)\b[^?]{0,90}\b(confortavel|de acordo)\b|\btudo bem se\b[^?]{0,70}\b(reinici|ativ|habilit|alter|limp|instal|configur)"))

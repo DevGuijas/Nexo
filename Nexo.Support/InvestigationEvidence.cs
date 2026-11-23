@@ -303,7 +303,7 @@ public sealed class InvestigationEvidence
             MalwareReason => SuggestsMalware,
             TemperatureSourceReason => SendsToTaskManagerForTemperature,
             AgentProtocol.PendingActionReason => part => AgentProtocol.PendingActionPhrase(part) != null,
-            AgentProtocol.AppRemovalReason => AgentProtocol.OffersAppRemoval,
+            AgentProtocol.AppRemovalReason => AgentProtocol.AppRemovalPassage,
             _ => null
         };
         var parts = Regex.Split(message, @"(?<=[!?;\n])|(?<=\.)(?=\s|$)").Select(part => part.Trim()).Where(part => part.Length > 0).ToArray();

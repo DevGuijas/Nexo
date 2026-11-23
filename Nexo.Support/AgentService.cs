@@ -14,6 +14,8 @@ public interface IAgentTools
 public sealed class AgentService(Store store, IAgentTools tools, HttpClient? client = null, Func<int, CancellationToken, Task>? workflowDelay = null, Func<DateTime>? utcNow = null)
 {
     private DateTime UtcNow() => (utcNow ?? (() => DateTime.UtcNow))();
+    // Build do Windows para a pergunta sobre um item do catálogo do debloat (#127): o catálogo muda entre o 10 e o 11.
+    public Func<int> WindowsBuild { get; init; } = () => Environment.OSVersion.Version.Build;
     private static readonly HttpClient shared = new() { Timeout = TimeSpan.FromMinutes(3) };
     internal const string NextStep = "Se o problema continuar, me diga o que ainda falha e desde quando, para direcionarmos a próxima verificação.";
     private const string ObservationPending = "O acompanhamento solicitado ainda não ocorreu. Consulte o alvo e chame wait_for_reconnect; se faltar informação para distinguir os alvos, use ask_user com missing_information ou ambiguous_target. Não afirme funcionamento baseado apenas no estado PnP.";
@@ -222,7 +224,9 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         evidence.AsksTemperature = SupportIntake.AsksTemperature(userRequest);
         evidence.AsksDiskHealth = SupportIntake.AsksDiskHealth(userRequest);
         evidence.AsksOnlyTemperature = SupportIntake.AsksOnlyTemperature(userRequest);
-        var appRemovalRequest = SupportIntake.AsksAppRemoval(userRequest);
+        // Pergunta sobre remover um item conhecido ("e o Xbox, posso tirar?", PC 3a88880): o texto do Nexo, com o aviso do item.
+        var itemAnswer = AppRemovalQuestion.Answer(userRequest, WindowsBuild());
+        var appRemovalRequest = SupportIntake.AsksAppRemoval(userRequest) || itemAnswer != null;
         // Seguimento sobre o que remover numa conversa em que o Nexo já indicou o cartão (#127, repetição no PC da a6fcbea).
         var appRemovalFollowUp = SupportIntake.AsksWhatToRemove(userRequest)
             && evidence.PriorAnswers.Any(prior => AgentProtocol.CitesAppRemovalPath(AgentProtocol.Normalize(prior)));
@@ -272,7 +276,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         // **Ferramentas > Apps pré-instalados** e ajustes do Windows", com o verbo da instrução e o nome do cartão cortado. Não há
         // o que investigar nem ferramenta que remova apps: a resposta é o texto do Nexo, sem chamar o modelo.
         if (appRemovalRequest && SupportIntake.InitialTopic(userRequest) == null && SupportIntake.IncidentTopics(userRequest).Count == 0)
-            return Finish(AgentProtocol.AppRemovalGuidance);
+            return Finish(itemAnswer ?? AgentProtocol.AppRemovalGuidance);
         var initialObserved = false;
         var initialTopic = SupportIntake.InitialTopic(userRequest);
         if (initialTopic != null)
