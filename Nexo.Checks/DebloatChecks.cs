@@ -28,7 +28,9 @@ internal static class DebloatChecks
                 CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo(culture);
                 Preview(check, culture);
                 await Apply(check, culture);
+                await ReusedPoint(check, culture);
                 await Undo(check, culture);
+                await RestoreApps(check, culture);
             }
         }
         finally { CultureInfo.CurrentCulture = previous; }
@@ -350,6 +352,140 @@ internal static class DebloatChecks
         check(mid.Status == "Canceled" && m["sysmain"].Status == DebloatStatus.Ok && m["bing-news"].Status == DebloatStatus.NotApplied && m["file-extensions"].Status == DebloatStatus.NotApplied
             && !midway.User.Any(s => s.Contains("Remove-AppxPackage")),
             "Debloat: cancelar depois da etapa elevada mantém o resultado dela e não inicia as próximas (" + culture + ")");
+    }
+
+    // PC com UAC (Windows 10 22H2): com um ponto de menos de 24 h, o Windows não cria outro e o Checkpoint-Computer volta sem
+    // erro. O ponto recente vale como proteção; o texto diz isso, e a auditoria e o índice guardam o número como antes.
+    private static async Task ReusedPoint(Action<bool, string> check, string culture)
+    {
+        using var dir = new TempDir();
+        var created = new DateTime(2026, 11, 23, 9, 5, 0);
+        var system = new FakeSystem(Inventory()) { ReusedPointAt = created };
+        var audit = new List<DebloatAudit>();
+        var store = new DebloatUndoStore(Path.Combine(dir.Path, "undo.json"));
+        var service = new DebloatService(system, store, audit.Add);
+        var result = await service.ApplyAsync(await service.PreviewAsync(CancellationToken.None), ["ceip-tasks", "xbox-services", "file-extensions"], false, null, CancellationToken.None);
+        var shown = DebloatPresentation.Result(result, undo: false);
+        check(result.Status == "Completed" && result.RestorePoint is { Ready: true, SequenceNumber: 41 } && result.RestorePointReusedAt == created
+            && result.Items.All(i => i.Status == DebloatStatus.Ok) && store.Latest()!.RestorePoint == 41
+            && store.Latest()!.ProtectedItems.OrderBy(i => i).SequenceEqual(["ceip-tasks", "xbox-services"]),
+            "Debloat: com o ponto recente reaproveitado, os itens elevados rodam e o índice do Desfazer guarda o número dele (" + culture + ")");
+        check(shown.Contains(" Ponto de restauração 41, de 23/11 09:05, usado como proteção: o Windows cria no máximo um ponto por dia.\n")
+            && !shown.Contains("41 confirmado") && !shown.Contains("não confirmado"),
+            "Debloat: o resultado diz o número, a data e a hora do ponto usado como proteção e por quê (" + culture + "): " + shown.Split('\n')[0]);
+        check(audit.Any(a => a is { Action: "RestorePoint", Target: "41", Outcome: "Reused" } && a.Detail.Contains("23/11/2026 09:05") && a.Detail.Contains("no máximo um ponto por dia"))
+            && !audit.Any(a => a.Action == "RestorePoint" && a.Outcome == "NotConfirmed"),
+            "Debloat: a auditoria registra o número do ponto reaproveitado, com a data dele (" + culture + ")");
+        var normal = await new DebloatService(new FakeSystem(Inventory()), new DebloatUndoStore(Path.Combine(dir.Path, "normal.json")), _ => { })
+            .ApplyAsync(Preview(Inventory()), ["ceip-tasks"], false, null, CancellationToken.None);
+        var normalShown = DebloatPresentation.Result(normal, undo: false);
+        check(normal.RestorePointReusedAt == null && normalShown.Contains(" Ponto de restauração 41 confirmado.\n") && !normalShown.Contains("usado como proteção"),
+            "Debloat: com ponto novo, o texto continua \"Ponto de restauração N confirmado.\" (" + culture + ")");
+        // Reaproveitado sem a data do ponto não conta: não há como dizer que ele é das últimas 24 h.
+        var undated = new FakeSystem(Inventory()) { ElevatedOutput = _ => "{\"success\":true,\"data\":{\"RestorePoint\":40,\"Reused\":true,\"Created\":\"\",\"Items\":[]}}" };
+        var undatedResult = await new DebloatService(undated, new DebloatUndoStore(Path.Combine(dir.Path, "undated.json")), _ => { })
+            .ApplyAsync(Preview(Inventory()), ["ceip-tasks"], false, null, CancellationToken.None);
+        check(undatedResult.RestorePoint is { Ready: false } && undatedResult.RestorePointReusedAt == null && undatedResult.Items.Single().Status == DebloatStatus.NotApplied,
+            "Debloat: ponto reaproveitado sem data não vale como proteção (" + culture + ")");
+
+        static DebloatPreview Preview(DebloatInventory inventory) => new(Win11, inventory, DebloatService.Preview(Win11, inventory, new FakeRegistry()));
+    }
+
+    // PC com UAC (Windows 10 22H2): a Store não oferece mais o Dicas, o Print 3D e o Office Lens. O app volta, sem UAC e sem
+    // download, registrando de novo o manifesto do pacote que o Windows mantém (Staged).
+    private static async Task RestoreApps(Action<bool, string> check, string culture)
+    {
+        using var dir = new TempDir();
+        const string News = "Microsoft.BingNews_4.55.1.0_x64__8wekyb3d8bbwe";
+        var root = DebloatScripts.WindowsAppsRoot;
+        DebloatInventory WithLocation(string location) => Inventory() with
+        {
+            Apps = Inventory().Apps.Select(a => a.Name == "Microsoft.BingNews" ? a with { InstallLocation = location } : a).ToArray(),
+        };
+        var system = new FakeSystem(WithLocation(root + News));
+        var store = new DebloatUndoStore(Path.Combine(dir.Path, "undo.json"));
+        var service = new DebloatService(system, store, _ => { });
+        await service.ApplyAsync(await service.PreviewAsync(CancellationToken.None), ["bing-news"], false, null, CancellationToken.None);
+        var run = store.Latest()!;
+        check(run.Entries.Single() is { Kind: DebloatKind.App, Target: "Microsoft.BingNews", PackageFullName: News } entry && entry.InstallLocation == root + News
+            && File.ReadAllText(store.Path).Contains("InstallLocation"),
+            "Debloat: a remoção grava no Desfazer o nome completo e a pasta do pacote (" + culture + ")");
+        check(DebloatService.DescribeUndo(run, null).Any(l => l.StartsWith("Notícias") && l.Contains("pacote que o Windows mantém neste PC") && l.Contains("Microsoft Store, quando ela ainda oferece")),
+            "Debloat: o plano do Desfazer diz que o app é restaurado pelo pacote do Windows e, se não der, pela Store (" + culture + ")");
+        var elevatedBefore = system.Elevated.Count;
+        var undone = await service.UndoAsync(run, null, CancellationToken.None);
+        var script = system.Registered.SingleOrDefault() ?? "";
+        check(undone.Status == "Completed" && undone.Items.Single() is { Id: "bing-news", Status: DebloatStatus.Ok } ok && ok.Detail.Contains(DebloatService.RestoredFromPackage)
+            && !ok.Detail.Contains("Microsoft Store") && system.Elevated.Count == elevatedBefore && store.Latest()!.UndoneAt != null
+            && script.Contains("Add-AppxPackage -Register $a.M -DisableDevelopmentMode") && script.Contains("'" + root + News + "\\AppxManifest.xml'")
+            && script.Contains("Get-AppxPackage -Name $a.N") && !script.Contains("AllUsers", StringComparison.OrdinalIgnoreCase),
+            "Debloat: o Desfazer registra de novo o manifesto do pacote, sem UAC, e diz que o app foi restaurado por ele (" + culture + ")");
+        check(DebloatPresentation.Result(undone, undo: true).Contains("Notícias (Bing News): ok. Microsoft.BingNews: restaurado a partir do pacote que o Windows mantém neste PC."),
+            "Debloat: na tela, o app restaurado aparece como ok, com o detalhe do pacote do Windows (" + culture + ")");
+
+        // Registro que falha: não aplicado, com a orientação da Store e o erro curto (só a 1ª linha do Add-AppxPackage).
+        var failing = new FakeSystem(WithLocation(root + News)) { FailRegister = "Falha na implantação com HRESULT: 0x80073CF6, O pacote não pôde ser registrado.\nerro 0x80070002: segunda linha longa do Windows" };
+        var failingStore = new DebloatUndoStore(Path.Combine(dir.Path, "failing.json"));
+        var failingService = new DebloatService(failing, failingStore, _ => { });
+        await failingService.ApplyAsync(await failingService.PreviewAsync(CancellationToken.None), ["bing-news"], false, null, CancellationToken.None);
+        var failed = await failingService.UndoAsync(failingStore.Latest()!, null, CancellationToken.None);
+        check(failing.Registered.Count == 1 && failed.Items.Single() is { Status: DebloatStatus.NotApplied } f && f.Detail.Contains(DebloatService.StoreGuidance)
+            && f.Detail.Contains("0x80073CF6") && !f.Detail.Contains("segunda linha") && f.Detail.Contains("Removido: Microsoft.BingNews.") && !f.Detail.Contains(DebloatService.RestoredFromPackage),
+            "Debloat: registro do pacote que falha deixa o app como não aplicado, com a Store e o erro curto (" + culture + ")");
+
+        // Pasta adulterada no arquivo do Desfazer (que o usuário grava): fora do WindowsApps, com "..", de outro pacote, etc.
+        var refusals = new[]
+        {
+            @"C:\Users\victor\AppData\Local\WindowsApps\" + News,
+            root + News + @"\..\Microsoft.WindowsStore_1.0_x64__8wekyb3d8bbwe",
+            root + @"..\Nexo\" + News,
+            root + "Microsoft.WindowsStore_1.0_x64__8wekyb3d8bbwe",
+            root.TrimEnd('\\') + @"X\" + News,
+            root + News + @"\sub",
+            root.Replace('\\', '/') + News,
+            root + News + "..",
+            root + "Microsoft.BingNews_4.55..1.0_x64__8wekyb3d8bbwe",
+            "D" + root[1..] + News,
+            "",
+        };
+        var accepted = new List<string>();
+        foreach (var location in refusals)
+        {
+            var forged = new DebloatRun { At = DateTimeOffset.UtcNow, Entries = [new("bing-news", DebloatKind.App, "Microsoft.BingNews", "installed", News, location)] };
+            var forgedSystem = new FakeSystem(WithLocation(root + News));
+            var r = await new DebloatService(forgedSystem, new DebloatUndoStore(Path.Combine(dir.Path, "forged.json")), _ => { }).UndoAsync(forged, null, CancellationToken.None);
+            bool Throws() { try { DebloatScripts.RegisterApps(forged.Entries); return false; } catch (ArgumentException) { return true; } }
+            if (forgedSystem.Registered.Count > 0 || r.Items.Single() is not { Status: DebloatStatus.NotApplied } x || !x.Detail.Contains(DebloatService.StoreGuidance)
+                || DebloatScripts.AppManifest(forged.Entries[0], out _) != null || !Throws()) accepted.Add(location);
+        }
+        var otherName = new DebloatUndoEntry("bing-news", DebloatKind.App, "Microsoft.BingNews", "installed", "Microsoft.WindowsStore_1.0_x64__8wekyb3d8bbwe", root + "Microsoft.WindowsStore_1.0_x64__8wekyb3d8bbwe");
+        check(accepted.Count == 0 && DebloatScripts.AppManifest(otherName, out _) == null
+            && DebloatScripts.AppManifest(new("bing-news", DebloatKind.App, "Microsoft.BingNews", "installed", News, root + News + "\\"), out _) == root + News + "\\AppxManifest.xml",
+            "Debloat: o Desfazer só registra um manifesto numa pasta direta do WindowsApps com o nome do pacote; outra cai na Store (" + culture + ")"
+            + (accepted.Count == 0 ? "" : ": aceitou " + string.Join(" | ", accepted)));
+        DebloatScripts.AppManifest(new("bing-news", DebloatKind.App, "Microsoft.BingNews", "installed", News, root + "Microsoft.WindowsStore_1.0_x64__8wekyb3d8bbwe"), out var otherReason);
+        DebloatScripts.AppManifest(new("bing-news", DebloatKind.App, "Microsoft.BingNews", "installed", News, @"C:\Users\victor\" + News), out var outsideReason);
+        check(otherReason.Contains("outro pacote") && outsideReason.Contains("WindowsApps"), "Debloat: a recusa diz o motivo: outro pacote ou fora do WindowsApps (" + culture + ")");
+
+        // Registro antigo, sem a pasta do pacote: continua a orientação da Store, sem script.
+        var legacy = new FakeSystem(Inventory());
+        var legacyResult = await new DebloatService(legacy, new DebloatUndoStore(Path.Combine(dir.Path, "legacy.json")), _ => { })
+            .UndoAsync(new DebloatRun { At = DateTimeOffset.UtcNow, Entries = [new("bing-news", DebloatKind.App, "Microsoft.BingNews", "installed")] }, null, CancellationToken.None);
+        check(legacy.Registered.Count == 0 && legacyResult.Items.Single() is { Status: DebloatStatus.NotApplied } l && l.Detail.Contains(DebloatService.StoreGuidance) && legacyResult.Status == "Completed",
+            "Debloat: Desfazer de remoção sem a pasta do pacote orienta a Store, sem tentar registrar (" + culture + ")");
+
+        // Item com dois pacotes, um volta e outro não: parcial.
+        var xbox = new DebloatRun
+        {
+            At = DateTimeOffset.UtcNow,
+            Entries = [new("xbox-login", DebloatKind.App, "Microsoft.XboxIdentityProvider", "installed", "Microsoft.XboxIdentityProvider_12.1.0_x64__8wekyb3d8bbwe", root + "Microsoft.XboxIdentityProvider_12.1.0_x64__8wekyb3d8bbwe"),
+                new("xbox-login", DebloatKind.App, "Microsoft.Xbox.TCUI", "installed", "Microsoft.Xbox.TCUI_1.24.1.0_x64__8wekyb3d8bbwe", @"C:\Temp\Microsoft.Xbox.TCUI_1.24.1.0_x64__8wekyb3d8bbwe")],
+        };
+        var xboxSystem = new FakeSystem(Inventory());
+        var xboxResult = await new DebloatService(xboxSystem, new DebloatUndoStore(Path.Combine(dir.Path, "xbox.json")), _ => { }).UndoAsync(xbox, null, CancellationToken.None);
+        check(xboxResult.Items.Single() is { Status: DebloatStatus.Partial } xb && xb.Detail.StartsWith("Microsoft.XboxIdentityProvider: " + DebloatService.RestoredFromPackage) && xb.Detail.Contains("Removido: Microsoft.Xbox.TCUI.")
+            && xboxSystem.Registered.Single().Contains("XboxIdentityProvider") && !xboxSystem.Registered.Single().Contains("TCUI") && xboxResult.Status == "Partial",
+            "Debloat: com dois pacotes, só o aceito é registrado e o item fica parcial (" + culture + ")");
     }
 
     private static async Task Undo(Action<bool, string> check, string culture)
@@ -708,6 +844,17 @@ internal static class DebloatChecks
             && !DebloatPresentation.Result(new("Completed", null, [new("file-extensions", "Mostrar extensões de arquivo", DebloatStatus.Ok, "1 valor(es) gravado(s) no seu perfil.")], null), undo: false).Contains("próximo logon"),
             "Debloat: o aviso do próximo logon sai só quando os efeitos visuais são aplicados com Ok, nunca no Desfazer");
 
+        // Textos do Desfazer de apps (#127, PC com UAC): o pacote do Windows primeiro, a Store quando ela ainda oferece o app.
+        var question = DebloatPresentation.ApplyQuestion(["Notícias (Bing News)", "Dicas"]);
+        check(question.Contains("\n\n• Notícias (Bing News)\n• Dicas\n\n") && question.Contains("Apps são removidos só do seu usuário. O Desfazer tenta restaurá-los pelo pacote que o Windows mantém neste PC; se não der, eles voltam pela Microsoft Store, quando ela ainda oferece o app.")
+            && !question.Contains("e voltam pela Microsoft Store") && question.EndsWith("Continuar?", StringComparison.Ordinal),
+            "Debloat: a confirmação antes de aplicar diz que o Desfazer tenta o pacote do Windows e, se não der, a Store");
+        var widgets = DebloatCatalog.Find("widgets-package")!.Warning;
+        var texts = new[] { DebloatPresentation.CardNotice, widgets };
+        check(texts.All(x => x.Contains("pacote que o Windows mantém neste PC") && x.Contains("quando ela ainda o")) && widgets.Contains("Windows Web Experience Pack")
+            && DebloatPresentation.CardNotice.Contains("Não há garantia de ganho de desempenho.") && !DebloatPresentation.CardNotice.Contains("apps removidos voltam pela Microsoft Store")
+            && DebloatPresentation.CardNotice.Contains("no máximo um por dia"),
+            "Debloat: o cartão e o aviso dos Widgets não prometem a volta só pela Store nem ganho de desempenho");
         ScreenWiring(check);
     }
 
@@ -743,6 +890,10 @@ internal static class DebloatChecks
         check(Wired(apply, "await DebloatServiceFor().ApplyAsync(", undo: false) && Wired(undoBody, "await DebloatServiceFor().UndoAsync(", undo: true)
             && !window.Contains("ShowDebloatResult", StringComparison.Ordinal),
             "Debloat: o Aplicar e o Desfazer do MainWindow passam o progresso pela trava, fecham-na antes do resultado e no finally");
+        var question = apply.IndexOf("DebloatPresentation.ApplyQuestion(", StringComparison.Ordinal);
+        check(question >= 0 && question < apply.IndexOf("MessageBox.Show(this, question", StringComparison.Ordinal) && window.Contains("Text(DebloatPresentation.CardNotice, ", StringComparison.Ordinal)
+            && !window.Contains("voltam pela Microsoft Store", StringComparison.Ordinal),
+            "Debloat: o MainWindow mostra a confirmação e o aviso do cartão testados, sem o texto antigo da Store");
     }
 
     private static int CountOf(string text, string part) => (text.Length - text.Replace(part, "").Length) / part.Length;
@@ -829,6 +980,11 @@ internal static class DebloatChecks
         public Dictionary<string, List<string>> Done { get; } = [];
         public string? FailUndoTarget { get; set; }
         public bool MarkFails { get; set; }
+        // Ponto de restauração reaproveitado pelo executor falso: o mais recente, criado nessa data local (#127, PC com UAC).
+        public DateTime? ReusedPointAt { get; init; }
+        // Desfazer de apps: os scripts de registro do manifesto que rodaram, e a falha do Add-AppxPackage simulada.
+        public List<string> Registered { get; } = [];
+        public string? FailRegister { get; init; }
 
         public DebloatProtectedUndo ReadProtectedUndo(string runId) => ProtectedProblem != null ? DebloatProtectedUndo.Refused(ProtectedProblem)
             : Protected.TryGetValue(runId, out var entries) ? DebloatProtectedUndo.Filter(entries.ToArray(), Done.TryGetValue(runId, out var done) ? done : [])
@@ -838,9 +994,19 @@ internal static class DebloatChecks
         {
             token.ThrowIfCancellationRequested();
             User.Add(script);
+            if (script.Contains("Add-AppxPackage -Register"))
+            {
+                Registered.Add(script);
+                return Task.FromResult(JsonSerializer.Serialize(inventory.Apps.Where(a => script.Contains("'" + a.FullName + "'")).Select(a => new
+                {
+                    Package = a.FullName,
+                    Status = FailRegister != null ? "Failed" : "Ok",
+                    Detail = FailRegister ?? "",
+                })));
+            }
             if (!script.Contains("Remove-AppxPackage")) return Task.FromResult(JsonSerializer.Serialize(new
             {
-                Apps = inventory.Apps.Select(a => new { a.Name, a.FullName, a.NonRemovable }),
+                Apps = inventory.Apps.Select(a => new { a.Name, a.FullName, a.NonRemovable, a.InstallLocation }),
                 Services = inventory.Services.Select(s => new { s.Name, s.StartType, s.Running }),
                 Tasks = inventory.Tasks.Select(t => new { t.Path, t.Name, t.State }),
                 inventory.SystemDisk, inventory.Recall,
@@ -918,7 +1084,9 @@ internal static class DebloatChecks
                     if (status == "Ok" && previous.Length > 0) saved.Add(new(item.Id, item.Kind, target, previous));
                 }
             if (runId.Length > 0) Protected[runId] = saved;
-            return JsonSerializer.Serialize(new { success = true, data = new { RestorePoint = 41, Items = items } });
+            return ReusedPointAt is { } at
+                ? JsonSerializer.Serialize(new { success = true, data = new { RestorePoint = 41, Reused = true, Created = at.ToString("yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture), Items = items } })
+                : JsonSerializer.Serialize(new { success = true, data = new { RestorePoint = 41, Reused = false, Created = "", Items = items } });
         }
     }
 }
@@ -942,7 +1110,7 @@ internal static class DebloatScriptChecks
 
         const string inventoryFakes = """
             function Get-AppxPackage { @(
-              [pscustomobject]@{Name='Microsoft.BingNews';PackageFullName='Microsoft.BingNews_4.55_x64__8wekyb3d8bbwe';NonRemovable=$false},
+              [pscustomobject]@{Name='Microsoft.BingNews';PackageFullName='Microsoft.BingNews_4.55_x64__8wekyb3d8bbwe';NonRemovable=$false;InstallLocation='C:\Program Files\WindowsApps\Microsoft.BingNews_4.55_x64__8wekyb3d8bbwe'},
               [pscustomobject]@{Name='Microsoft.WindowsStore';PackageFullName='Microsoft.WindowsStore_1_x64__8wekyb3d8bbwe';NonRemovable=$false},
               [pscustomobject]@{Name='Microsoft.MinecraftUWP';PackageFullName='Microsoft.MinecraftUWP_1_x64__8wekyb3d8bbwe';NonRemovable=$false}) }
             function Get-Service { param($Name,$ErrorAction) if($Name -eq 'SysMain'){ [pscustomobject]@{Name='SysMain';StartType='Automatic';Status='Running'} } elseif($Name -eq 'XblGameSave'){ [pscustomobject]@{Name='XblGameSave';StartType='Manual';Status='Stopped'} } }
@@ -959,6 +1127,8 @@ internal static class DebloatScriptChecks
         var inventoryJson = await Run(shell, inventoryFakes + "\n" + DebloatScripts.Inventory(DebloatCatalog.ForBuild(22631)).Replace(DebloatScripts.SystemDriveLetter, "'C'"));
         DebloatInventory? inventory = null;
         try { inventory = DebloatScripts.ParseInventory(inventoryJson); } catch (JsonException) { }
+        check(inventory != null && inventory.Apps[0].InstallLocation == @"C:\Program Files\WindowsApps\Microsoft.BingNews_4.55_x64__8wekyb3d8bbwe" && inventory.Apps[1].InstallLocation == "",
+            "Debloat: o inventário real traz a pasta de cada pacote, para o Desfazer: " + Short(inventoryJson));
         check(inventory != null && inventory.Apps.Select(a => a.Name).SequenceEqual(["Microsoft.BingNews", "Microsoft.MinecraftUWP"])
             && inventory.Services.Any(s => s.Name == "SysMain" && s.StartType == "AutomaticDelayed" && s.Running)
             && inventory.Services.Any(s => s.Name == "XblGameSave" && s.StartType == "Manual" && !s.Running)
@@ -1098,6 +1268,32 @@ internal static class DebloatScriptChecks
         var sysmainOnly = DebloatScripts.Apply([DebloatCatalog.Find("sysmain")!], RunId);
         var noPointJson = await Run(shell, applyFakes.Replace("$script:seq=11", "") + "\n" + Elevated(sysmainOnly, storeFakes));
         check(noPointJson.Contains("\"success\":false") && !noPointJson.Contains("Set:SysMain"), "Debloat: sem ponto novo confirmado, o script elevado real para antes dos serviços: " + Short(noPointJson));
+        check(parsed.ReusedAt == null && resultJson.Contains("\"Reused\":false"), "Debloat: com ponto novo, o script elevado real não o marca como reaproveitado: " + Short(resultJson));
+
+        // PC com UAC (#127): o Windows cria no máximo um ponto por dia. Sem ponto novo, o mais recente de menos de 24 h, pela
+        // CreationTime do WMI (yyyyMMddHHmmss.ffffff±mmm), vale como proteção; com 24 h ou mais, ou sem data, nada muda.
+        static string Dmtf(DateTimeOffset at, int offset) => at.ToOffset(TimeSpan.FromMinutes(offset)).ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)
+            + ".000000" + (offset < 0 ? "-" : "+") + Math.Abs(offset).ToString("000", CultureInfo.InvariantCulture);
+        string WithPoint(string creation) => applyFakes.Replace("$script:seq=11", "")
+            .Replace("[pscustomobject]@{SequenceNumber=$script:seq}", "[pscustomobject]@{SequenceNumber=$script:seq;CreationTime='" + creation + "'}");
+        var recentAt = DateTimeOffset.Now.AddHours(-2).AddMinutes(-7);
+        foreach (var offset in new[] { -180, 0, 330 })
+        {
+            var recentJson = await Run(shell, WithPoint(Dmtf(recentAt, offset)) + "\n" + Elevated(sysmainOnly, storeFakes));
+            var recent = DebloatScripts.ParseElevated(ResultOf(recentJson), true);
+            check(WithPoint("x") != applyFakes.Replace("$script:seq=11", "") && recentJson.Contains("Set:SysMain:Disabled") && recentJson.Contains("Checkpoint:")
+                && recent.Point is { Ready: true, SequenceNumber: 10 } && recent.ReusedAt is { } at && Math.Abs((at - recentAt.LocalDateTime).TotalSeconds) < 2,
+                "Debloat: sem ponto novo, o script elevado real usa o ponto de menos de 24 h como proteção, com a data local certa (fuso " + offset + "): " + Short(recentJson));
+        }
+        foreach (var (label, creation) in new[] { ("30 h", Dmtf(DateTimeOffset.Now.AddHours(-30), -180)), ("24 h e 1 min", Dmtf(DateTimeOffset.Now.AddHours(-24).AddMinutes(-1), 0)),
+            ("no futuro", Dmtf(DateTimeOffset.Now.AddHours(2), -180)), ("sem data", "ontem") })
+        {
+            var oldJson = await Run(shell, WithPoint(creation) + "\n" + Elevated(sysmainOnly, storeFakes));
+            var old = DebloatScripts.ParseElevated(ResultOf(oldJson), true);
+            check(oldJson.Contains("\"success\":false") && oldJson.Contains("O novo ponto de restauração não foi confirmado.") && !oldJson.Contains("Set:SysMain") && !oldJson.Contains("Stop:SysMain")
+                && old.Point is { Ready: false } && old.ReusedAt == null,
+                "Debloat: sem ponto novo e com o mais recente " + label + ", o script elevado real falha como antes e não muda nada: " + Short(oldJson));
+        }
         var hostileStore = storeFakes.Replace("{ $script:calls+='Open' }", "{ throw 'Pasta protegida do Desfazer recusada: dono não confiável. Nenhum serviço, tarefa ou recurso foi alterado.' }");
         var hostileJson = await Run(shell, applyFakes + "\n" + Elevated(sysmainOnly, hostileStore));
         check(hostileStore != storeFakes && hostileJson.Contains("\"success\":false") && hostileJson.Contains("Pasta protegida do Desfazer recusada: dono") && !hostileJson.Contains("Checkpoint:") && !hostileJson.Contains("Set:SysMain"),
@@ -1118,6 +1314,37 @@ internal static class DebloatScriptChecks
         check(removed.TryGetValue("Microsoft.BingNews_1_x64__8wekyb3d8bbwe", out var news) && news.Status == "Ok"
             && removed.TryGetValue("Microsoft.BingWeather_1_x64__8wekyb3d8bbwe", out var weather) && weather.Status == "Failed" && weather.Detail.Contains("continua instalado"),
             "Debloat: o script real de remoção só diz Ok quando o pacote saiu: " + Short(removal));
+
+        // Desfazer de apps (#127, PC com UAC): o script real registra de novo o manifesto e confere que o app voltou ao usuário.
+        const string registerFakes = """
+            $script:calls=@(); $script:back=@()
+            function Test-Path { param($LiteralPath,$PathType) $script:present -contains $LiteralPath }
+            function Add-AppxPackage { param($Register,[switch]$DisableDevelopmentMode,$ErrorAction) $script:calls+=('Add:'+$Register+':'+[bool]$DisableDevelopmentMode)
+              if($script:addFails){ throw 'Falha na implantação com HRESULT: 0x80073CF6' }
+              $f=$Register.Substring(0,$Register.LastIndexOf([char]92)); $f=$f.Substring($f.LastIndexOf([char]92)+1); if(-not $script:noConfirm){ $script:back+=$f.Split('_')[0] } }
+            function Get-AppxPackage { param($Name,$ErrorAction) $script:back | Where-Object { $_ -eq $Name } | ForEach-Object { [pscustomobject]@{Name=$_} } }
+            """;
+        var appsRoot = DebloatScripts.WindowsAppsRoot;
+        const string NewsFull = "Microsoft.BingNews_4.55_x64__8wekyb3d8bbwe", WeatherFull = "Microsoft.BingWeather_4.53_x64__8wekyb3d8bbwe";
+        var registerScript = DebloatScripts.RegisterApps([new("bing-news", DebloatKind.App, "Microsoft.BingNews", "installed", NewsFull, appsRoot + NewsFull),
+            new("bing-weather", DebloatKind.App, "Microsoft.BingWeather", "installed", WeatherFull, appsRoot + WeatherFull)]);
+        async Task<(Dictionary<string, (string Status, string Detail)> Result, string Raw)> Register(string setup)
+        {
+            var raw = await Run(shell, registerFakes + setup + "\n$out=& { " + registerScript + " }\nConvertTo-Json -InputObject ([pscustomobject]@{result=[string]$out;calls=@($script:calls)}) -Compress");
+            try { using var doc = JsonDocument.Parse(raw); return (DebloatScripts.ParseRemoval(doc.RootElement.GetProperty("result").GetString()!), raw); }
+            catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException) { return ([], raw); }
+        }
+        var present = "$script:present=@(" + WindowsTools.Quote(appsRoot + NewsFull + @"\AppxManifest.xml") + ")";
+        var (registered, registeredRaw) = await Register(present);
+        check(registered.TryGetValue(NewsFull, out var newsBack) && newsBack.Status == "Ok" && registered.TryGetValue(WeatherFull, out var weatherGone) && weatherGone.Status == "Failed"
+            && weatherGone.Detail.Contains("não está mais neste PC") && registeredRaw.Contains("Add:" + (appsRoot + NewsFull + @"\AppxManifest.xml").Replace(@"\", @"\\") + ":True")
+            && !registeredRaw.Contains("Add:" + appsRoot.Replace(@"\", @"\\") + WeatherFull),
+            "Debloat: o script real registra de novo o manifesto que existe, com -DisableDevelopmentMode, e não tenta o que não existe: " + Short(registeredRaw));
+        var (addFailed, addFailedRaw) = await Register(present + "; $script:addFails=$true");
+        var (unconfirmed, unconfirmedRaw) = await Register(present + "; $script:noConfirm=$true");
+        check(addFailed.TryGetValue(NewsFull, out var af) && af.Status == "Failed" && af.Detail.Contains("0x80073CF6")
+            && unconfirmed.TryGetValue(NewsFull, out var uc) && uc.Status == "Failed" && uc.Detail.Contains("não confirmou o app de volta"),
+            "Debloat: o script real só diz Ok quando o Add-AppxPackage funciona e o Get-AppxPackage -Name mostra o app de volta: " + Short(addFailedRaw + " | " + unconfirmedRaw));
 
         var undoFakes = """
             $script:calls=@()

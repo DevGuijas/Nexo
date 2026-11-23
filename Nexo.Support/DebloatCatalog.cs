@@ -72,7 +72,7 @@ public static class DebloatCatalog
         App("copilot-app", "Copilot (app)", DebloatWindows.Windows11, false, "", "Microsoft.Copilot"),
         App("xbox-app", "Xbox (app)", DebloatWindows.Both, false, "Quem joga pela conta Xbox ou pelo Game Pass deve manter.", "Microsoft.XboxApp", "Microsoft.GamingApp"),
         App("xbox-game-bar", "Xbox Game Bar e sobreposições", DebloatWindows.Both, false, "A Game Bar (Win+G) também grava a tela; quem joga deve manter.", "Microsoft.XboxGameOverlay", "Microsoft.XboxGamingOverlay", "Microsoft.XboxSpeechToTextOverlay"),
-        App("widgets-package", "Widgets (pacote)", DebloatWindows.Both, false, "O painel de Widgets some por completo; volta reinstalando o Windows Web Experience Pack pela Microsoft Store.", "MicrosoftWindows.Client.WebExperience"),
+        App("widgets-package", "Widgets (pacote)", DebloatWindows.Both, false, "O painel de Widgets some por completo. O Desfazer tenta restaurá-lo pelo pacote que o Windows mantém neste PC; se não der, ele volta reinstalando o Windows Web Experience Pack pela Microsoft Store, quando ela ainda o oferece.", "MicrosoftWindows.Client.WebExperience"),
         new("xbox-login", AppsCategory, "Login do Xbox", DebloatWindows.Both, DebloatKind.App, false, ["Microsoft.XboxIdentityProvider", "Microsoft.Xbox.TCUI"], [],
             "O login do Minecraft e do Game Pass para de funcionar.", DebloatGate.XboxGames),
 

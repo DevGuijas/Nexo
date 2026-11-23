@@ -8,7 +8,8 @@ namespace Nexo.Support;
 public enum DebloatStatus { Ok, Partial, NotFound, Failed, NotApplied }
 public enum DebloatAvailability { Available, AlreadyApplied, NeedsConfirmation }
 
-public sealed record DebloatInstalledApp(string Name, string FullName, bool NonRemovable);
+/// <summary>InstallLocation: a pasta do pacote, que o Windows mantém depois da remoção do usuário; o Desfazer registra de novo o manifesto dela.</summary>
+public sealed record DebloatInstalledApp(string Name, string FullName, bool NonRemovable, string InstallLocation = "");
 public sealed record DebloatServiceState(string Name, string StartType, bool Running);
 public sealed record DebloatTaskState(string Path, string Name, string State);
 public sealed record DebloatInventory(IReadOnlyList<DebloatInstalledApp> Apps, IReadOnlyList<DebloatServiceState> Services,
@@ -21,12 +22,20 @@ public sealed record DebloatRegistryState(bool Exists, DebloatValueKind Kind, st
 public sealed record DebloatPreviewItem(DebloatItem Item, DebloatAvailability Availability, IReadOnlyList<string> PresentTargets, string Detail);
 public sealed record DebloatPreview(int Build, DebloatInventory Inventory, IReadOnlyList<DebloatPreviewItem> Items);
 public sealed record DebloatOutcome(string Id, string Title, DebloatStatus Status, string Detail);
-/// <summary>Resultado de uma aplicação ou do Desfazer. Warning: as mudanças foram feitas, mas o registro do Desfazer não foi salvo.</summary>
-public sealed record DebloatResult(string Status, RecoveryPointResult? RestorePoint, IReadOnlyList<DebloatOutcome> Items, string? RunId, string? Warning = null);
+/// <summary>
+/// Resultado de uma aplicação ou do Desfazer. Warning: as mudanças foram feitas, mas o registro do Desfazer não foi salvo.
+/// RestorePointReusedAt: o Windows não criou um ponto novo (no máximo um a cada 24 h), e o ponto RestorePoint, criado nesta
+/// data e hora locais, há menos de 24 h, foi usado como proteção.
+/// </summary>
+public sealed record DebloatResult(string Status, RecoveryPointResult? RestorePoint, IReadOnlyList<DebloatOutcome> Items, string? RunId, string? Warning = null,
+    DateTime? RestorePointReusedAt = null);
 public sealed record DebloatAudit(DateTimeOffset At, string Action, string Target, string Outcome, string Detail = "");
 
-/// <summary>Estado anterior de um alvo, para o Desfazer. Para apps, só registra o que foi removido (volta pela Microsoft Store).</summary>
-public sealed record DebloatUndoEntry(string ItemId, DebloatKind Kind, string Target, string Previous);
+/// <summary>
+/// Estado anterior de um alvo, para o Desfazer. Para apps, registra o que foi removido, com o nome completo e a pasta do
+/// pacote: o Desfazer tenta registrá-lo de novo a partir dela e, se não der, orienta a reinstalar pela Microsoft Store.
+/// </summary>
+public sealed record DebloatUndoEntry(string ItemId, DebloatKind Kind, string Target, string Previous, string? PackageFullName = null, string? InstallLocation = null);
 /// <summary>
 /// Uma aplicação, no arquivo local do Desfazer. Entries guarda só o que não passa por elevação (valores do HKCU e apps
 /// removidos). O estado anterior de serviços, tarefas e recursos fica na pasta protegida, gravado pelo executor elevado;
@@ -185,6 +194,9 @@ public sealed class DebloatService
 
     public const string RestorePointDescription = "Nexo antes de remover apps e ajustes";
     public const string StoreGuidance = "Para reinstalar, abra a Microsoft Store e procure o app pelo nome.";
+    public const string RestoredFromPackage = "restaurado a partir do pacote que o Windows mantém neste PC";
+    /// <summary>Motivo do ponto reaproveitado, na auditoria; a tela monta a frase com o número, a data e a hora.</summary>
+    public const string ReusedPointReason = "Nenhum ponto novo foi criado: o Windows cria no máximo um ponto por dia. O mais recente, de menos de 24 horas, foi usado como proteção.";
     internal const string NoEvidence = "O Windows não devolveu resultado para este item; o estado atual é desconhecido.";
 
     internal const string LocalElevatedIgnored = "ignorado: o estado anterior de serviços, tarefas e recursos só vale da pasta protegida, e o arquivo local não é usado; nada foi alterado.";
@@ -248,7 +260,9 @@ public sealed class DebloatService
                     lines.Add($"{title}: os valores do seu perfil voltam ao que eram.");
                     break;
                 case DebloatKind.App:
-                    lines.Add($"{title}: não é reinstalado pelo Nexo (Microsoft Store).");
+                    lines.Add(valid.Any(e => DebloatScripts.AppManifest(e, out _) != null)
+                        ? $"{title}: o Nexo tenta restaurá-lo pelo pacote que o Windows mantém neste PC; se não der, ele volta pela Microsoft Store, quando ela ainda oferece o app."
+                        : $"{title}: não é restaurado pelo Nexo, porque o registro desta remoção não traz um pacote do Windows aceito; volta pela Microsoft Store, quando ela ainda oferece o app.");
                     break;
             }
         }
@@ -340,6 +354,7 @@ public sealed class DebloatService
         var outcomes = new List<DebloatOutcome>();
         var run = new DebloatRun { At = time.GetUtcNow(), Build = preview.Build };
         RecoveryPointResult? restore = null;
+        DateTime? reused = null;
         var status = "Completed";
         string? undoProblem = null;
         // Uma falha ao gravar o arquivo local do Desfazer não derruba a aplicação nem apaga o resultado do que já mudou.
@@ -372,9 +387,11 @@ public sealed class DebloatService
             var elevated = chosen.Where(c => c.Item.Elevated).ToList();
             progress?.Report("Criando o ponto de restauração. O Windows pode pedir autorização de administrador.");
             Log("RestorePoint", "", "Requested");
-            var (point, results, error, _) = await RunElevated(DebloatScripts.Apply(elevated.Select(e => e.Item), run.Id), token);
+            var (point, results, error, _, reusedAt) = await RunElevated(DebloatScripts.Apply(elevated.Select(e => e.Item), run.Id), token);
             restore = point;
-            Log("RestorePoint", point.SequenceNumber?.ToString(CultureInfo.InvariantCulture) ?? "", point.Ready ? "Confirmed" : "NotConfirmed", point.Reason);
+            reused = point.Ready ? reusedAt : null;
+            Log("RestorePoint", point.SequenceNumber?.ToString(CultureInfo.InvariantCulture) ?? "", !point.Ready ? "NotConfirmed" : reused != null ? "Reused" : "Confirmed",
+                reused is { } at ? point.Reason + " Criado em " + at.ToString("dd/MM/yyyy HH:mm", CultureInfo.InvariantCulture) + "." : point.Reason);
             foreach (var item in elevated)
             {
                 if (!point.Ready || results == null)
@@ -437,7 +454,7 @@ public sealed class DebloatService
                 {
                     var mine = packages.Where(p => p.Item.Id == app.Item.Id).Select(p => (p.installed, removed.TryGetValue(p.installed.FullName, out var r) ? r : ("Failed", "Sem resultado da remoção."))).ToArray();
                     foreach (var (installed, r) in mine.Where(m => m.Item2.Item1 == "Ok"))
-                        run.Entries.Add(new(app.Item.Id, DebloatKind.App, installed.Name, "installed"));
+                        run.Entries.Add(new(app.Item.Id, DebloatKind.App, installed.Name, "installed", installed.FullName, installed.InstallLocation.Length > 0 ? installed.InstallLocation : null));
                     var details = string.Join("; ", mine.Select(m => m.installed.Name + ": " + (m.Item2.Item1 == "Ok" ? "removido do seu usuário" : m.Item2.Item2)));
                     Add(app.Item, Aggregate(mine.Select(m => m.Item2.Item1)), details);
                 }
@@ -462,7 +479,7 @@ public sealed class DebloatService
         if (warning != null) Log("UndoRecord", undo.Path, "NotSaved", warning);
         Log("Debloat", "", status);
         progress?.Report(Summary(status, outcomes) + (warning == null ? "" : " " + warning));
-        return new(status, restore, outcomes, run.CanUndo ? run.Id : null, warning);
+        return new(status, restore, outcomes, run.CanUndo ? run.Id : null, warning, reused);
 
         void Add(DebloatItem item, DebloatStatus state, string detail) => outcomes.Add(new(item.Id, item.Title, state, detail));
     }
@@ -540,7 +557,7 @@ public sealed class DebloatService
                     if (restorable.Count > 0)
                     {
                         progress?.Report("Restaurando serviços e tarefas. O Windows pode pedir autorização de administrador.");
-                        var (_, results, error, output) = await RunElevated(DebloatScripts.Undo(run.Id), token, restorePoint: false);
+                        var (_, results, error, output, _) = await RunElevated(DebloatScripts.Undo(run.Id), token, restorePoint: false);
                         if (results != null && DebloatScripts.ParseMarker(output) is { } markError)
                         {
                             warning = "O Desfazer restaurou os itens elevados, mas o marcador na pasta protegida não foi gravado (" + markError + "); esta aplicação ainda pode ser oferecida para desfazer de novo.";
@@ -583,10 +600,40 @@ public sealed class DebloatService
             }
             if (settings) { try { system.Registry.NotifySettingsChanged(); } catch (Exception ex) when (ex is not OperationCanceledException) { Log("NotifySettings", "", "Failed", ex.Message); } }
 
-            foreach (var group in valid.Where(e => e.Kind == DebloatKind.App).GroupBy(e => e.ItemId))
+            // Apps: no processo do Nexo, sem elevação, registrando de novo o manifesto do pacote que o Windows mantém (Staged).
+            // Só vale uma pasta dentro de %ProgramFiles%\WindowsApps com o nome do pacote; outra cai na orientação da Store.
+            var apps = valid.Where(e => e.Kind == DebloatKind.App).ToList();
+            var register = new List<DebloatUndoEntry>();
+            var refused = new Dictionary<DebloatUndoEntry, string>();
+            foreach (var entry in apps)
+            {
+                if (DebloatScripts.AppManifest(entry, out var why) != null) register.Add(entry);
+                else refused[entry] = why;
+            }
+            Dictionary<string, (string Status, string Detail)> registered = new(StringComparer.OrdinalIgnoreCase);
+            if (register.Count > 0)
+            {
+                progress?.Report("Restaurando os apps a partir do pacote que o Windows mantém neste PC.");
+                Log("RegisterApps", string.Join(",", register.Select(r => r.Target)), "Requested");
+                try { registered = DebloatScripts.ParseRemoval(await system.RunUserScriptAsync(DebloatScripts.RegisterApps(register), 600, CancellationToken.None)); }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                { registered = register.GroupBy(r => r.PackageFullName!, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, _ => ("Failed", ex.Message), StringComparer.OrdinalIgnoreCase); }
+            }
+            foreach (var group in apps.GroupBy(e => e.ItemId))
             {
                 var item = DebloatCatalog.Find(group.Key)!;
-                outcomes.Add(new(item.Id, item.Title, DebloatStatus.NotApplied, "O Nexo não reinstala apps. " + StoreGuidance + " Removido: " + string.Join(", ", group.Select(e => e.Target)) + "."));
+                var back = new List<string>(); var missing = new List<(string Name, string Reason)>();
+                foreach (var entry in group)
+                {
+                    if (refused.TryGetValue(entry, out var why)) { missing.Add((entry.Target, why)); continue; }
+                    var r = registered.TryGetValue(entry.PackageFullName!, out var found) ? found : ("Failed", "sem resultado do registro do pacote");
+                    if (r.Item1 == "Ok") back.Add(entry.Target); else missing.Add((entry.Target, ShortError(r.Item2)));
+                }
+                if (missing.Count == 0) { outcomes.Add(new(item.Id, item.Title, DebloatStatus.Ok, string.Join(", ", back) + ": " + RestoredFromPackage + ".")); continue; }
+                var detail = "Não restaurado pelo pacote que o Windows mantém neste PC (" + string.Join("; ", missing.Select(m => m.Name + ": " + m.Reason)) + "). " + StoreGuidance
+                    + " Removido: " + string.Join(", ", missing.Select(m => m.Name)) + ".";
+                outcomes.Add(back.Count == 0 ? new(item.Id, item.Title, DebloatStatus.NotApplied, detail)
+                    : new(item.Id, item.Title, DebloatStatus.Partial, string.Join(", ", back) + ": " + RestoredFromPackage + ". " + detail));
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { status = "Canceled"; }
@@ -612,16 +659,24 @@ public sealed class DebloatService
         return new(status, null, outcomes, run.Id, warning);
     }
 
-    private async Task<(RecoveryPointResult Point, IReadOnlyList<DebloatScripts.TargetResult>? Results, string? Error, string Output)> RunElevated(string script, CancellationToken token, bool restorePoint = true)
+    private async Task<(RecoveryPointResult Point, IReadOnlyList<DebloatScripts.TargetResult>? Results, string? Error, string Output, DateTime? ReusedAt)> RunElevated(string script, CancellationToken token, bool restorePoint = true)
     {
         string output;
         try { output = await system.RunElevatedAsync(script, token); }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
-        { const string denied = "a autorização de administrador foi recusada"; return (new(false, null, denied), null, denied, ""); }
-        catch (Exception ex) { return (new(false, null, ex.Message), null, ex.Message, ""); }
-        var (point, results, error) = DebloatScripts.ParseElevated(output, restorePoint);
-        return (point, results, error, output);
+        { const string denied = "a autorização de administrador foi recusada"; return (new(false, null, denied), null, denied, "", null); }
+        catch (Exception ex) { return (new(false, null, ex.Message), null, ex.Message, "", null); }
+        var (point, results, error, reusedAt) = DebloatScripts.ParseElevated(output, restorePoint);
+        return (point, results, error, output, reusedAt);
+    }
+
+    /// <summary>Primeira linha do erro do Windows, com no máximo 200 caracteres: o Add-AppxPackage devolve parágrafos inteiros.</summary>
+    internal static string ShortError(string text)
+    {
+        var line = (text ?? "").Replace("\r", "").Split('\n').Select(l => l.Trim()).FirstOrDefault(l => l.Length > 0) ?? "erro não detalhado";
+        line = line.TrimEnd('.', ' ');
+        return line.Length <= 200 ? line : line[..199] + "…";
     }
 
     private void Log(string action, string target, string outcome, string detail = "") => audit(new(time.GetUtcNow(), action, target, outcome, detail));
@@ -681,7 +736,7 @@ public static class DebloatScripts
             $names={{Array(packages)}}
             $services={{Array(services)}}
             $tasks={{Array(tasks)}}
-            $apps=@(Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object { $names -contains $_.Name } | ForEach-Object { [pscustomobject]@{Name=[string]$_.Name;FullName=[string]$_.PackageFullName;NonRemovable=[bool]$_.NonRemovable} })
+            $apps=@(Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object { $names -contains $_.Name } | ForEach-Object { [pscustomobject]@{Name=[string]$_.Name;FullName=[string]$_.PackageFullName;NonRemovable=[bool]$_.NonRemovable;InstallLocation=[string]$_.InstallLocation} })
             $svc=@(foreach($n in $services){ $s=Get-Service -Name $n -ErrorAction SilentlyContinue; if($s){ $d=$false; try { $d=[int](Get-ItemProperty -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\'+$n) -Name DelayedAutostart -ErrorAction Stop).DelayedAutostart -eq 1 } catch {}; $t=[string]$s.StartType; if($t -eq 'Automatic' -and $d){$t='AutomaticDelayed'}; [pscustomobject]@{Name=[string]$s.Name;StartType=$t;Running=([string]$s.Status -eq 'Running')} } })
             $tk=@(foreach($t in $tasks){ $p=$t.Split('|'); $x=Get-ScheduledTask -TaskPath $p[0] -TaskName $p[1] -ErrorAction SilentlyContinue; if($x){ [pscustomobject]@{Path=$p[0];Name=$p[1];State=[string]$x.State} } })
             $media=''
@@ -700,7 +755,7 @@ public static class DebloatScripts
             !root.TryGetProperty(name, out var value) ? [] : value.ValueKind == JsonValueKind.Array ? value.EnumerateArray().ToArray() : value.ValueKind == JsonValueKind.Object ? [value] : [];
         static string Text(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
         static bool Flag(JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
-        var apps = Many(root, "Apps").Select(a => new DebloatInstalledApp(Text(a, "Name"), Text(a, "FullName"), Flag(a, "NonRemovable"))).Where(a => a.Name.Length > 0).ToArray();
+        var apps = Many(root, "Apps").Select(a => new DebloatInstalledApp(Text(a, "Name"), Text(a, "FullName"), Flag(a, "NonRemovable"), Text(a, "InstallLocation"))).Where(a => a.Name.Length > 0).ToArray();
         var services = Many(root, "Services").Select(s => new DebloatServiceState(Text(s, "Name"), Text(s, "StartType"), Flag(s, "Running"))).Where(s => s.Name.Length > 0).ToArray();
         var tasks = Many(root, "Tasks").Select(t => new DebloatTaskState(Text(t, "Path"), Text(t, "Name"), Text(t, "State"))).Where(t => t.Name.Length > 0).ToArray();
         var recall = root.TryGetProperty("Recall", out var r) && r.ValueKind == JsonValueKind.String ? r.GetString() : null;
@@ -738,6 +793,53 @@ public static class DebloatScripts
             if (package.Length > 0) result[package] = (status == "Ok" ? "Ok" : "Failed", detail);
         }
         return result;
+    }
+
+    /// <summary>
+    /// Pasta dos pacotes do Windows, pela pasta conhecida Program Files (não pela variável de ambiente, que o usuário define).
+    /// Fora do Windows (nos testes), o caminho padrão.
+    /// </summary>
+    public static readonly string WindowsAppsRoot = (OperatingSystem.IsWindows() && Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles) is { Length: > 3 } programFiles ? programFiles : @"C:\Program Files").TrimEnd('\\') + @"\WindowsApps\";
+    public const string ManifestName = "AppxManifest.xml";
+
+    /// <summary>
+    /// O manifesto a registrar de novo no Desfazer de um app, ou null com o motivo. O arquivo do Desfazer fica em %LOCALAPPDATA%,
+    /// que o usuário grava: só vale uma pasta direta de %ProgramFiles%\WindowsApps, sem "..", sem barra normal, sem outro
+    /// segmento, cujo nome comece com o nome do pacote seguido de "_" e tenha o formato de um nome completo de pacote.
+    /// </summary>
+    public static string? AppManifest(DebloatUndoEntry entry, out string reason)
+    {
+        reason = "";
+        var name = entry.Target; var full = entry.PackageFullName; var location = entry.InstallLocation;
+        if (string.IsNullOrEmpty(location) || string.IsNullOrEmpty(full)) { reason = "o registro desta remoção não traz a pasta do pacote"; return null; }
+        if (!PackageName.IsMatch(name) || !PackageFullName.IsMatch(full) || !full.StartsWith(name + "_", StringComparison.OrdinalIgnoreCase))
+        { reason = "o nome do pacote guardado no Desfazer está fora do formato"; return null; }
+        var folder = location.EndsWith('\\') ? location[..^1] : location;
+        var outside = "a pasta do pacote guardada no Desfazer não fica em " + WindowsAppsRoot.TrimEnd('\\') + "; não foi usada";
+        if (folder.Contains("..", StringComparison.Ordinal) || folder.Contains('/') || folder.Contains("\\\\", StringComparison.Ordinal)
+            || !folder.StartsWith(WindowsAppsRoot, StringComparison.OrdinalIgnoreCase)) { reason = outside; return null; }
+        var leaf = folder[WindowsAppsRoot.Length..];
+        if (leaf.Length == 0 || leaf.Contains('\\') || !PackageFullName.IsMatch(leaf) || leaf.EndsWith('.')) { reason = outside; return null; }
+        if (!leaf.StartsWith(name + "_", StringComparison.OrdinalIgnoreCase)) { reason = "a pasta do pacote guardada no Desfazer é de outro pacote; não foi usada"; return null; }
+        return WindowsAppsRoot + leaf + "\\" + ManifestName;
+    }
+
+    /// <summary>
+    /// Desfazer de apps, sem elevação: registra de novo o manifesto do pacote que o Windows manteve e confere com
+    /// Get-AppxPackage -Name que o app voltou para o usuário. Os caminhos já passaram por <see cref="AppManifest"/>.
+    /// </summary>
+    public static string RegisterApps(IEnumerable<DebloatUndoEntry> entries)
+    {
+        var list = entries.Select(e => (Name: e.Target, FullName: e.PackageFullName ?? "", Manifest: AppManifest(e, out var why) ?? throw new ArgumentException("Pacote recusado para o Desfazer (" + why + "): " + e.InstallLocation))).ToArray();
+        return "$r=@()\n" +
+            "foreach($a in @(" + string.Join(",", list.Select(p => "[pscustomobject]@{N=" + Q(p.Name) + ";F=" + Q(p.FullName) + ";M=" + Q(p.Manifest) + "}")) + ")){\n" +
+            "  try { if(-not (Test-Path -LiteralPath $a.M -PathType Leaf)){ throw ('o pacote não está mais neste PC (' + $a.M + ' não existe)') }\n" +
+            "    Add-AppxPackage -Register $a.M -DisableDevelopmentMode -ErrorAction Stop\n" +
+            "    if(@(Get-AppxPackage -Name $a.N -ErrorAction SilentlyContinue).Count -eq 0){ throw 'o Windows não confirmou o app de volta para o seu usuário' }\n" +
+            "    $r+=[pscustomobject]@{Package=$a.F;Status='Ok';Detail=''} }\n" +
+            "  catch { $r+=[pscustomobject]@{Package=$a.F;Status='Failed';Detail=$_.Exception.Message} }\n" +
+            "}\n" +
+            "ConvertTo-Json -InputObject @($r) -Compress";
     }
 
     /// <summary>Início da mensagem de recusa da pasta protegida do Desfazer, para o resultado não falar em ponto de restauração.</summary>
@@ -811,11 +913,7 @@ public static class DebloatScripts
     {
         var list = items.ToArray();
         foreach (var item in list) if (!item.Elevated) throw new ArgumentException("Item sem etapa elevada: " + item.Id);
-        var restorePoint = RestorePointProtection.Script;
-        const string driverDescription = "'Nexo before driver installation'", driverType = "-RestorePointType APPLICATION_INSTALL";
-        if (!restorePoint.Contains(driverDescription, StringComparison.Ordinal) || !restorePoint.Contains(driverType, StringComparison.Ordinal))
-            throw new InvalidOperationException("O script do ponto de restauração mudou; o debloat não adapta a descrição e o tipo sem ele.");
-        restorePoint = restorePoint.Replace(driverDescription, Q(DebloatService.RestorePointDescription)).Replace(driverType, "-RestorePointType MODIFY_SETTINGS");
+        var restorePoint = RestorePoint;
 
         var body = new StringBuilder(RunIdLine(runId));
         if (list.Length > 0)
@@ -859,8 +957,8 @@ public static class DebloatScripts
         }
         // 3) Ponto de restauração confirmado antes de qualquer mudança.
         body.AppendLine("$rp=& { " + restorePoint + " }");
-        body.AppendLine("$seq=[int]$rp.SequenceNumber");
-        if (list.Length == 0) { body.Append("[pscustomobject]@{RestorePoint=$seq;Items=@()}"); return body.ToString(); }
+        body.AppendLine("$seq=[int]$rp.SequenceNumber; $reused=[bool]$rp.Reused; $created=[string]$rp.Created");
+        if (list.Length == 0) { body.Append("[pscustomobject]@{RestorePoint=$seq;Reused=$reused;Created=$created;Items=@()}"); return body.ToString(); }
 
         // 4) As mudanças, cada alvo no seu try: um erro num alvo não derruba os demais.
         foreach (var (item, target) in Targets(list))
@@ -904,11 +1002,39 @@ public static class DebloatScripts
         // 5) O registro protegido fica só com o que mudou. Se esta regravação falhar, vale a de antes (que tem todos os alvos lidos).
         body.AppendLine("$changed=@($before | Where-Object { $b=$_; @($items | Where-Object { $_.Id -ceq $b.Id -and $_.Target -ceq $b.Target -and $_.Status -in 'Ok','Partial' }).Count -gt 0 })");
         body.AppendLine("try { Save-DebloatUndo $changed } catch {}");
-        body.Append("[pscustomobject]@{RestorePoint=$seq;Items=$items}");
+        body.Append("[pscustomobject]@{RestorePoint=$seq;Reused=$reused;Created=$created;Items=$items}");
         return body.ToString();
 
         static string Row(DebloatItem item, string target) => $"[pscustomobject]@{{Id={Q(item.Id)};Kind='{item.Kind}';Target={Q(target)};Previous=";
     }
+
+    /// <summary>
+    /// Ponto de restauração do Aplicar. O Windows cria no máximo um a cada 24 h (SystemRestorePointCreationFrequency): com
+    /// um recente, o Checkpoint-Computer volta sem erro e sem ponto novo. Então vale, nesta ordem: um ponto novo (número maior
+    /// que o anterior); ou o mais recente, se foi criado há menos de 24 h, devolvido com Reused e a data local; senão, erro e
+    /// nada elevado muda. A CreationTime é um datetime do WMI (yyyyMMddHHmmss.ffffff±mmm), convertido aqui como faz o
+    /// ManagementDateTimeConverter, sem depender do System.Management. Nenhuma política nem frequência é alterada.
+    /// </summary>
+    internal static string RestorePoint => """
+        $rpBefore=@(Get-ComputerRestorePoint -ErrorAction SilentlyContinue | Sort-Object SequenceNumber -Descending | Select-Object -First 1)
+        $rpPrevious=if($rpBefore.Count -gt 0){[int]$rpBefore[0].SequenceNumber}else{0}
+        Checkpoint-Computer -Description __DESCRIPTION__ -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+        $rpAfter=@(Get-ComputerRestorePoint -ErrorAction Stop | Sort-Object SequenceNumber -Descending | Select-Object -First 1)
+        if($rpAfter.Count -eq 0){throw 'O novo ponto de restauração não foi confirmado.'}
+        $rpLast=$rpAfter[0]
+        if([int]$rpLast.SequenceNumber -gt $rpPrevious){ [pscustomobject]@{SequenceNumber=[int]$rpLast.SequenceNumber;Reused=$false;Created=''} }
+        else {
+          $rpAt=$null
+          if([string]$rpLast.CreationTime -match '^(\d{14})\.\d{6}([+-])(\d{3})$'){
+            $rpWhen=[datetime]::ParseExact($Matches[1],'yyyyMMddHHmmss',[Globalization.CultureInfo]::InvariantCulture)
+            $rpOffset=[int]$Matches[3]; if($Matches[2] -eq '-'){ $rpOffset=-$rpOffset }
+            $rpAt=[DateTimeOffset]::new($rpWhen,[TimeSpan]::FromMinutes($rpOffset)) }
+          if($null -eq $rpAt){throw 'O novo ponto de restauração não foi confirmado.'}
+          $rpAge=[DateTimeOffset]::Now - $rpAt
+          if($rpAge.TotalHours -ge 24 -or $rpAge.TotalMinutes -lt -5){throw 'O novo ponto de restauração não foi confirmado.'}
+          [pscustomobject]@{SequenceNumber=[int]$rpLast.SequenceNumber;Reused=$true;Created=$rpAt.LocalDateTime.ToString('yyyy-MM-ddTHH:mm:ss',[Globalization.CultureInfo]::InvariantCulture)}
+        }
+        """.Replace("__DESCRIPTION__", Q(DebloatService.RestorePointDescription));
 
     private static IEnumerable<(DebloatItem Item, string Target)> Targets(IEnumerable<DebloatItem> items) => items.SelectMany(item => item.Targets.Select(target => (item, target)));
 
@@ -998,7 +1124,8 @@ public static class DebloatScripts
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException) { return "o executor elevado não confirmou o marcador"; }
     }
 
-    internal static (RecoveryPointResult Point, IReadOnlyList<TargetResult>? Results, string? Error) ParseElevated(string output, bool restorePoint)
+    /// <summary>ReusedAt: o ponto confirmado não é novo; é o mais recente, de menos de 24 h, criado nessa data e hora locais.</summary>
+    internal static (RecoveryPointResult Point, IReadOnlyList<TargetResult>? Results, string? Error, DateTime? ReusedAt) ParseElevated(string output, bool restorePoint)
     {
         try
         {
@@ -1007,23 +1134,34 @@ public static class DebloatScripts
             if (!root.TryGetProperty("success", out var success) || success.ValueKind != JsonValueKind.True)
             {
                 var reason = root.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.String ? error.GetString() ?? "erro não detalhado" : "o Windows não confirmou a execução";
-                return (new(false, null, reason), null, reason);
+                return (new(false, null, reason), null, reason, null);
             }
             var data = root.GetProperty("data");
             if (data.ValueKind == JsonValueKind.String) { using var nested = JsonDocument.Parse(data.GetString()!); return Read(nested.RootElement); }
             return Read(data);
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException or FormatException)
-        { const string unknown = "saída do Windows sem evidência válida"; return (new(false, null, unknown), null, unknown); }
+        { const string unknown = "saída do Windows sem evidência válida"; return (new(false, null, unknown), null, unknown, null); }
 
-        (RecoveryPointResult, IReadOnlyList<TargetResult>?, string?) Read(JsonElement data)
+        (RecoveryPointResult, IReadOnlyList<TargetResult>?, string?, DateTime?) Read(JsonElement data)
         {
             RecoveryPointResult point = new(true, null, "Sem ponto de restauração nesta etapa.");
+            DateTime? reusedAt = null;
             if (restorePoint)
             {
+                const string notConfirmed = "o novo ponto de restauração não foi confirmado";
                 if (!data.TryGetProperty("RestorePoint", out var number) || !number.TryGetInt32(out var sequence) || sequence <= 0)
-                    return (new(false, null, "o novo ponto de restauração não foi confirmado"), null, "o novo ponto de restauração não foi confirmado");
-                point = new(true, sequence, "Ponto de restauração confirmado.");
+                    return (new(false, null, notConfirmed), null, notConfirmed, null);
+                // Reaproveitado só com a data do ponto: sem ela, não há como dizer que ele é das últimas 24 h.
+                if (data.TryGetProperty("Reused", out var reused) && reused.ValueKind == JsonValueKind.True)
+                {
+                    if (!data.TryGetProperty("Created", out var created) || created.ValueKind != JsonValueKind.String
+                        || !DateTime.TryParseExact(created.GetString(), "yyyy-MM-ddTHH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out var at))
+                        return (new(false, null, notConfirmed), null, notConfirmed, null);
+                    reusedAt = at;
+                    point = new(true, sequence, DebloatService.ReusedPointReason);
+                }
+                else point = new(true, sequence, "Ponto de restauração confirmado.");
             }
             var list = new List<TargetResult>();
             if (data.TryGetProperty("Items", out var items))
@@ -1036,7 +1174,7 @@ public static class DebloatScripts
                     list.Add(new(T("Id"), T("Target"), status is "Ok" or "Partial" or "NotFound" ? status : "Failed", T("Previous"), T("Detail")));
                 }
             }
-            return (point, list, null);
+            return (point, list, null, reusedAt);
         }
     }
 

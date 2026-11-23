@@ -1010,7 +1010,7 @@ public partial class MainWindow : Window
         var panel = new StackPanel();
         panel.Children.Add(SectionHeading("shield", "Apps pré-instalados e ajustes do Windows"));
         panel.Children.Add(Text("Remove do seu usuário apps que vêm com o Windows e aplica ajustes de privacidade e de aparência. Primeiro o Nexo verifica o que existe neste PC e mostra cada item; nada muda antes de você clicar em Aplicar e confirmar.", 13, "Secondary"));
-        panel.Children.Add(Text("Antes de aplicar, o Nexo cria um ponto de restauração do Windows, e o Windows pede autorização de administrador. Sem o ponto confirmado, só os apps e os ajustes do seu perfil são aplicados. Serviços, tarefas e ajustes do perfil podem ser desfeitos aqui; apps removidos voltam pela Microsoft Store. Não há garantia de ganho de desempenho.", 12, "Secondary"));
+        panel.Children.Add(Text(DebloatPresentation.CardNotice, 12, "Secondary"));
         panel.Children.Add(Text(DebloatCatalog.Credit, 11, "Subtle"));
         debloatProgressView = Text(debloatStatus, 12, "Secondary"); debloatProgressView.Margin = new Thickness(0, 12, 0, 10);
         panel.Children.Add(debloatProgressView);
@@ -1074,9 +1074,7 @@ public partial class MainWindow : Window
         if (debloatRunning || debloatPreview == null) return;
         var selected = debloatChecks.Where(c => c.Value.IsChecked == true).Select(c => c.Key).ToArray();
         if (selected.Length == 0) { debloatStatus = "Nenhum item selecionado."; UpdateToolsView(); return; }
-        var titles = debloatPreview.Items.Where(i => selected.Contains(i.Item.Id)).Select(i => "• " + i.Item.Title);
-        var question = "O Nexo vai criar um ponto de restauração e depois aplicar:\n\n" + string.Join("\n", titles)
-            + "\n\nApps são removidos só do seu usuário e voltam pela Microsoft Store. Continuar?";
+        var question = DebloatPresentation.ApplyQuestion(debloatPreview.Items.Where(i => selected.Contains(i.Item.Id)).Select(i => i.Item.Title));
         if (MessageBox.Show(this, question, "Confirmar remoção de apps e ajustes", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
         debloatCancellation = new CancellationTokenSource(); debloatRunning = true;
         debloatStatus = "Iniciando..."; UpdateToolsView();
