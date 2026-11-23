@@ -1117,7 +1117,7 @@ public partial class MainWindow : Window
         }
         try
         {
-        if (((Grid)Content).Background is not SolidColorBrush shellBrush || shellBrush.Color != ((SolidColorBrush)Application.Current.FindResource("CanvasBg")).Color)
+        if (((Grid)Content).Background is not SolidColorBrush shellBrush || shellBrush.Color != ((SolidColorBrush)ThemeManager.Live("CanvasBg")).Color)
             throw new InvalidOperationException("O tema " + ThemeCatalog.DisplayName(ThemeManager.Current) + " não foi aplicado à janela principal.");
         if (!HasVectorIcon(ChatNav)) throw new InvalidOperationException("A navegação não usa ícones vetoriais.");
         if (Shell.Visibility != Visibility.Visible || !Messages.Children.OfType<StackPanel>().Any()) throw new InvalidOperationException("Falha na abertura direta do aplicativo.");

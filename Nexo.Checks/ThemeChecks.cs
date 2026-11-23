@@ -55,6 +55,19 @@ internal static class ThemeChecks
             "As chaves de cor usadas no código existem nos dois temas" + (unknown.Length > 0 ? ": " + string.Join(", ", unknown) : ""));
         var unused = keys.Where(key => !dynamicKeys.Contains(key) && !Regex.IsMatch(code, "\"" + key + "\"")).ToArray();
         assert(unused.Length == 0, "Toda chave dos temas é usada pela interface" + (unused.Length > 0 ? ": " + string.Join(", ", unused) : ""));
+        // Um pincel lido do dicionário (FindResource/TryFindResource convertido em Brush) é o objeto do tema carregado naquele
+        // momento: depois da troca ele fica com a cor antiga até a tela ser recriada. Fora do ThemeManager, as cores do código
+        // vêm do ThemeManager.Live (gate do @qa da #143; o painel ao vivo da #141 lia assim e ficaria escuro no Glacial).
+        var codeDir = Path.Combine(sources, "Code");
+        var staleReads = Directory.GetFiles(codeDir, "*.cs").Where(file => Path.GetFileName(file) != "ThemeManager.cs")
+            .Where(file => Regex.IsMatch(File.ReadAllText(file), StaleBrushRead)).Select(Path.GetFileName).ToArray();
+        assert(Directory.GetFiles(codeDir, "*.cs").Length > 20 && staleReads.Length == 0,
+            "As cores do código vêm do ThemeManager.Live, não de FindResource" + (staleReads.Length > 0 ? ": " + string.Join(", ", staleReads) : ""));
+        assert(Regex.IsMatch("var b = (Brush)Application.Current.FindResource(\"Accent\");", StaleBrushRead)
+            && Regex.IsMatch("Application.Current?.TryFindResource(key) as Brush ?? Brushes.Gray", StaleBrushRead)
+            && Regex.IsMatch("((SolidColorBrush)FindResource(\"Ink\")).Color", StaleBrushRead)
+            && !Regex.IsMatch("(Geometry)Application.Current.FindResource(geometry)", StaleBrushRead) && !Regex.IsMatch("(Style)FindResource(\"Primary\")", StaleBrushRead),
+            "A regra do pincel congelado reconhece leituras de Brush e ignora estilos e geometrias");
         assert(app.Contains("<ResourceDictionary Source=\"Themes/Onyx.xaml\"/>") && !app.Contains("WhiteBrush") && !window.Contains("WhiteBrush"),
             "O App.xaml carrega o Ônix como padrão e a chave antiga WhiteBrush saiu");
 
@@ -117,6 +130,8 @@ internal static class ThemeChecks
             && window.Contains("{StaticResource " + key + "}") && code.Contains("\"" + key + "\"")), "A logo nova usa as mesmas geometrias na lateral e nos ícones");
         assert(!app.Contains("M12,1 L14.7,9.3") && !window.Contains("M12,1 L14.7,9.3") && !code.Contains("M12,1 L14.7,9.3"), "A marca antiga em estrela foi substituída");
     }
+
+    private const string StaleBrushRead = @"\(\s*(?:SolidColor)?Brush\s*\)\s*(?:\w+(?:\.\w+)*\??\.)?(?:Try)?FindResource\(|(?:Try)?FindResource\([^)]*\)\s*as\s+(?:SolidColor)?Brush\b";
 
     private static Dictionary<string, string> Palette(string path)
         => XDocument.Load(path).Root!.Elements().Where(e => e.Name.LocalName == "SolidColorBrush")
