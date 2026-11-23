@@ -84,6 +84,10 @@ internal static class ShellChecks
         assert(fill.Contains("Composer.Text = prompt;") && fill.Contains("ShowPage(\"chat\")") && !fill.Contains("Send(") && !fill.Contains("Execute(")
             && home.Contains("button.Click += (_, _) => Guard(() => FillAssistant(fix.Prompt));") && !home.Contains("Send(")
             && shell.Contains("FillAssistant(fix.Prompt);"), "#143: atalhos e teclas 1 a 6 escrevem o pedido no Assistente sem enviar");
+        var keys = Regex.Match(shell, @"private bool HandleWindowKey\(.*?\n    \}", RegexOptions.Singleline).Value;
+        assert(Regex.IsMatch(keys, @"if \(PaletteOpen \|\| modifiers != ModifierKeys\.None \|\| page != ""home"" \|\| focused is TextBox or PasswordBox\) return false;")
+            && keys.IndexOf("return false;", StringComparison.Ordinal) < keys.IndexOf("FillAssistant(", StringComparison.Ordinal),
+            "#143: as teclas 1 a 6 só valem na Início, sem modificador, sem a paleta aberta e fora de campo de texto");
 
         var data = new Database();
         var start = new DateTime(2026, 11, 1, 9, 0, 0);
@@ -143,6 +147,24 @@ internal static class ShellChecks
                 "#143: ocorrência crítica que persiste vira o estado crítico (" + critical.State + ", " + string.Join(", ", critical.Today.Select(item => item.Finding.Problem + ": " + item.Status.Label)) + ")");
             var midnight = HomeData.StartOfToday(now);
             assert(midnight <= now && now - midnight < TimeSpan.FromDays(1) && midnight.ToLocalTime().TimeOfDay == TimeSpan.Zero, "#143: o dia da Início começa à meia-noite local");
+
+            // O monitor grava a ocorrência uma vez, quando ela começa: a de antes da meia-noite que ainda persiste não some do estado.
+            var carriedStore = new OperationalStore(Path.Combine(root, "ontem"));
+            for (var i = 3; i >= 1; i--)
+                carriedStore.SaveSnapshot(new HealthSnapshot { Time = now.AddSeconds(-10 * i), CpuPercent = 20, MemoryUsedPercent = 54, Connectivity = "local", CollectionStatus = "complete",
+                    Disks = [new DiskHealth("C:\\", 5, 200)] });
+            carriedStore.SaveFindings([new HealthFinding { Id = "disk-low:C:\\:ontem", Time = midnight.AddMinutes(-30), Severity = "critical", Problem = "Pouco espaço no volume C:\\" }]);
+            var carried = HomeData.Health(carriedStore, null, limits, now);
+            assert(carried.State == HomeHealthState.Critical && carried.Headline == "1 ocorrência crítica" && carried.Today.Count == 0
+                && HomeData.Current(carriedStore, carried.Latest, limits, now).Single().Status.State == OccurrenceState.Persistent,
+                "#143: ocorrência de antes da meia-noite que persiste continua no estado do computador, como na Saúde do PC (" + carried.State + ", " + carried.Headline + ")");
+            // Leitura antiga (monitor parado ou falhando): estado desconhecido, como na Saúde do PC, e nunca "Estável".
+            var staleStore = new OperationalStore(Path.Combine(root, "antiga"));
+            staleStore.SaveSnapshot(new HealthSnapshot { Time = now.AddMinutes(-30), CpuPercent = 20, MemoryUsedPercent = 54, Connectivity = "local", CollectionStatus = "complete",
+                Disks = [new DiskHealth("C:\\", 80, 200)] });
+            var stale = HomeData.Health(staleStore, null, limits, now);
+            assert(stale.State == HomeHealthState.Attention && stale.Headline == "Sem leitura recente" && stale.Detail.Contains("estado atual das ocorrências é desconhecido"),
+                "#143: sem leitura recente, a Início diz que o estado é desconhecido em vez de Estável (" + stale.State + ", " + stale.Headline + ")");
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { } }
     }
@@ -207,8 +229,17 @@ internal static class ShellChecks
             File.WriteAllText(Path.Combine(legacy, "data.json"), JsonSerializer.Serialize(new { Model = "m", AiEnabled = true, AgentVersion = 2, Theme = "glacial" }));
             var old = new Store(legacy, directAccess: true);
             assert(!old.Data.SidebarCollapsed && old.Data.Theme == ThemeCatalog.Glacial, "#143: um data.json sem a preferência abre com a lateral expandida e mantém o tema");
+            old.Data.SidebarCollapsed = true; old.Save();
+            var saved = new Store(legacy, directAccess: true).Data;
+            assert(saved.SidebarCollapsed && saved.Model == "m" && saved.AiEnabled && saved.AgentVersion == 2 && saved.Theme == ThemeCatalog.Glacial,
+                "#143: gravar a lateral num data.json antigo mantém o modelo, o agente e o tema");
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { } }
+        // A restauração de rede da abertura (#128) escreve o resultado na conversa: com a Início de abertura, o Assistente é aberto.
+        var recovery = Regex.Match(Source("MainWindow.xaml.cs"), @"private async Task OfferNetworkRecovery\(\)\s*\{(?<body>.*?)\n    \}", RegexOptions.Singleline).Groups["body"].Value;
+        assert(Regex.IsMatch(recovery, @"AddEntry\(""assistant"", ""Encontrei uma alteração de rede.*?posted = true;", RegexOptions.Singleline)
+            && Regex.IsMatch(recovery, @"busy = false;\s*//[^\n]*\n\s*if \(posted && page != ""chat""\) ShowPage\(""chat""\);"),
+            "#143: o resultado da restauração de rede da abertura aparece no Assistente, não fica escondido atrás da Início");
         assert(shell.Contains("store.Data.SidebarCollapsed = collapsed;") && shell.Contains("catch { store.Data.SidebarCollapsed = stored;"),
             "#143: a lateral grava a preferência e desfaz a troca se a gravação falhar");
     }

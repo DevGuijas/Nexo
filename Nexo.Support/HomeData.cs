@@ -61,7 +61,12 @@ public static class HomeData
             if (latest == null)
                 return new(HomeHealthState.Loading, "Aguardando a primeira leitura",
                     "A coleta começa quando o Nexo abre. O estado aparece assim que o monitor gravar a primeira leitura.", null, today);
-            var persistent = today.Where(item => item.Status.State == OccurrenceState.Persistent).ToArray();
+            // Leitura antiga (monitor parado ou falhando): como na Saúde do PC, o estado atual é desconhecido, e a Início não diz "Estável".
+            if ((now - latest.Time).Duration() > limits.MaxSampleGap)
+                return new(HomeHealthState.Attention, "Sem leitura recente", HealthOccurrences.CollectionNotice(latest, limits, now), latest, today);
+            // O estado vem das mesmas ocorrências da Saúde do PC, não só das de hoje: a que foi gravada antes da meia-noite e ainda
+            // persiste continua contando (o monitor grava a ocorrência uma vez, quando ela começa).
+            var persistent = Current(store, latest, limits, now).Where(item => item.Status.State == OccurrenceState.Persistent).ToArray();
             var critical = persistent.Count(item => item.Finding.Severity == "critical");
             var attention = persistent.Length - critical;
             var detail = "Última leitura às " + latest.Time.ToLocalTime().ToString("HH:mm", Portuguese) + " · coleta "
@@ -83,6 +88,14 @@ public static class HomeData
     {
         // Parada normal sem prova de execução fica fora das ocorrências, como na tela Saúde do PC (#57).
         var findings = store.FindingsSince(StartOfToday(now)).Where(finding => !HealthOccurrences.SupersededServiceStop(finding, latest)).Take(20).ToList();
+        if (findings.Count == 0) return [];
+        return HealthOccurrences.Classify(findings, store.RecentSnapshots(now.AddHours(-6), 20), limits, now);
+    }
+
+    /// <summary>As mesmas ocorrências da tela Saúde do PC (as 20 mais recentes, classificadas pelas leituras das últimas 6 horas).</summary>
+    public static IReadOnlyList<(HealthFinding Finding, OccurrenceStatus Status)> Current(OperationalStore store, HealthSnapshot? latest, HealthThresholds limits, DateTimeOffset now)
+    {
+        var findings = store.RecentFindings(20).Where(finding => !HealthOccurrences.SupersededServiceStop(finding, latest)).ToList();
         if (findings.Count == 0) return [];
         return HealthOccurrences.Classify(findings, store.RecentSnapshots(now.AddHours(-6), 20), limits, now);
     }

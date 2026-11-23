@@ -860,6 +860,7 @@ public partial class MainWindow : Window
         catch (Exception ex) { store.Log(user, "Verificação de transações de rede interrompidas indisponível: " + ex.Message); return; }
         if (interrupted.Count == 0 || busy) return;
         busy = true;
+        var posted = false;
         try
         {
             foreach (var item in interrupted)
@@ -879,9 +880,16 @@ public partial class MainWindow : Window
                 if (origin != null && ReferenceEquals(origin, conversation)) { RenderEntry(origin.Entries[^1]); continue; }
                 AddEntry("assistant", "Encontrei uma alteração de rede que não terminou.\n\n" + message
                     + (origin != null ? "\n\nO resultado também foi registrado no atendimento “" + origin.Title + "”." : ""), NetworkRecovery.Restored(outcome) ? "result" : "error");
+                posted = true;
             }
         }
-        finally { busy = false; ResumePendingClose(); }
+        finally
+        {
+            busy = false;
+            // #143: o Nexo abre na Início; o resultado da restauração vai para a conversa, então o Assistente é aberto para ele ser visto.
+            if (posted && page != "chat") ShowPage("chat");
+            ResumePendingClose();
+        }
     }
     private void ResumePendingClose()
     {
