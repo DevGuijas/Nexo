@@ -14,7 +14,8 @@ public enum LiveStatus { Waiting, Ok, Unavailable }
 /// <summary>Tempos acumulados do GetSystemTimes, em unidades de 100 ns. O tempo de kernel já inclui o ocioso.</summary>
 public readonly record struct CpuTimes(ulong Idle, ulong Kernel, ulong User);
 public readonly record struct MemoryStatus(ulong TotalBytes, ulong AvailableBytes);
-/// <summary>Contadores do disco físico (_Total) já em taxa: o PDH calcula a taxa entre duas coletas, então a primeira é Waiting.</summary>
+/// <summary>Contadores do disco físico já em taxa: % ocioso do disco mais ativo e bytes de todos os discos (_Total). O PDH calcula a
+/// taxa entre duas coletas, então a primeira é Waiting.</summary>
 public sealed record DiskCounters(LiveStatus Status, double IdlePercent = 0, double ReadBytesPerSecond = 0, double WriteBytesPerSecond = 0, string? Error = null);
 /// <summary>Bytes acumulados de um adaptador desde que ele subiu.</summary>
 public sealed record AdapterBytes(string Id, string Name, long Received, long Sent);
@@ -68,7 +69,7 @@ public sealed class LiveMetricsSampler
     public IReadOnlyList<double?> CpuHistory => History(0);
     public IReadOnlyList<double?> MemoryHistory => History(1);
     public IReadOnlyList<double?> DiskHistory => History(2);
-    /// <summary>Recebido + enviado, em bits por segundo.</summary>
+    /// <summary>Recebido + enviado do adaptador mais ativo, em bits por segundo.</summary>
     public IReadOnlyList<double?> NetworkHistory => History(3);
     private double?[] History(int index) { lock (sync) return history[index].ToArray(); }
 
@@ -165,6 +166,8 @@ public sealed class LiveMetricsSampler
         var previous = lastAdapters; lastAdapters = current;
         if (current.Count == 0) return (LiveMetric.Unavailable("nenhum adaptador de rede ativo"), null, null, null);
         if (previous == null || elapsed <= 0) return (LiveMetric.Waiting, null, null, null);
+        // Mostra o adaptador mais ativo, como o Gerenciador de Tarefas mostra cada adaptador, e não a soma: com um switch externo
+        // do Hyper-V, o mesmo tráfego passa pela vEthernet e pela placa física; com uma VPN, pelo túnel e pela placa. Somar dobraria.
         double received = 0, sent = 0, busiest = -1; string? name = null; var compared = 0;
         foreach (var (id, now) in current)
         {
@@ -172,8 +175,7 @@ public sealed class LiveMetricsSampler
             if (!previous.TryGetValue(id, out var before) || now.Received < before.Received || now.Sent < before.Sent) continue;
             compared++;
             double down = now.Received - before.Received, up = now.Sent - before.Sent;
-            received += down; sent += up;
-            if (down + up > busiest) { busiest = down + up; name = now.Name; }
+            if (down + up > busiest) { busiest = down + up; name = now.Name; received = down; sent = up; }
         }
         if (compared == 0) return (LiveMetric.Waiting, null, null, null);
         var receiveBits = received * 8 / elapsed; var sendBits = sent * 8 / elapsed;
@@ -229,12 +231,34 @@ public sealed class LiveMetricsSampler
 /// </summary>
 public sealed class WindowsLiveMetricsSource : ILiveMetricsSource
 {
-    private const uint PdhFmtDouble = 0x00000200, PdhFmtNoCap100 = 0x00008000;
+    private const uint PdhFmtDouble = 0x00000200, PdhFmtNoCap100 = 0x00008000, PdhMoreData = 0x800007D2;
     private IntPtr query, idleCounter, readCounter, writeCounter;
     private string? diskError;
-    private bool diskOpened, disposed;
+    private bool diskOpened, disposed, idlePerDisk;
+    // A amostra roda numa thread do pool e o Dispose vem da interface ao fechar a janela: sem a trava, o PdhCloseQuery podia
+    // liberar a consulta no meio de um PdhCollectQueryData.
+    private readonly object pdhSync = new();
 
     public int ProcessorCount => Environment.ProcessorCount;
+
+    /// <summary>"por disco" (instâncias do PhysicalDisk, o mais ativo), "_Total" (reserva) ou null antes de abrir/indisponível.</summary>
+    public string? DiskMode { get { lock (pdhSync) return diskError != null || !diskOpened ? null : idlePerDisk ? "por disco" : "_Total"; } }
+
+    /// <summary>
+    /// % ocioso do disco mais ativo entre as instâncias do PhysicalDisk, sem a _Total. A _Total do % Idle Time não é a média dos
+    /// discos (com dois discos parados ela pode passar de 100%), então um disco a 100% ao lado de um parado sumiria nela.
+    /// Instância com status inválido fica fora; sem nenhuma válida, null.
+    /// </summary>
+    public static double? BusiestDiskIdle(IEnumerable<(string Name, double Idle, bool Valid)> instances)
+    {
+        double? lowest = null;
+        foreach (var (name, idle, valid) in instances)
+        {
+            if (!valid || !double.IsFinite(idle) || string.Equals(name, "_Total", StringComparison.OrdinalIgnoreCase)) continue;
+            if (lowest == null || idle < lowest) lowest = idle;
+        }
+        return lowest;
+    }
 
     public CpuTimes ReadCpuTimes()
     {
@@ -251,15 +275,19 @@ public sealed class WindowsLiveMetricsSource : ILiveMetricsSource
 
     public DiskCounters ReadDisk()
     {
-        ObjectDisposedException.ThrowIf(disposed, this);
-        if (!diskOpened) OpenDisk();
-        if (diskError != null) return new DiskCounters(LiveStatus.Unavailable, Error: diskError);
-        var collected = PdhCollectQueryData(query);
-        if (collected != 0) return new DiskCounters(LiveStatus.Unavailable, Error: "PdhCollectQueryData 0x" + collected.ToString("X8"));
-        var idle = Value(idleCounter); var read = Value(readCounter); var write = Value(writeCounter);
-        // Depois de uma só coleta, contadores de taxa ainda não têm valor válido.
-        if (idle == null || read == null || write == null) return new DiskCounters(LiveStatus.Waiting);
-        return new DiskCounters(LiveStatus.Ok, idle.Value, read.Value, write.Value);
+        lock (pdhSync)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (!diskOpened) OpenDisk();
+            if (diskError != null) return new DiskCounters(LiveStatus.Unavailable, Error: diskError);
+            var collected = PdhCollectQueryData(query);
+            if (collected != 0) return new DiskCounters(LiveStatus.Unavailable, Error: "PdhCollectQueryData 0x" + collected.ToString("X8"));
+            var idle = idlePerDisk ? BusiestDiskIdle(Instances(idleCounter)) : Value(idleCounter);
+            var read = Value(readCounter); var write = Value(writeCounter);
+            // Depois de uma só coleta, contadores de taxa ainda não têm valor válido.
+            if (idle == null || read == null || write == null) return new DiskCounters(LiveStatus.Waiting);
+            return new DiskCounters(LiveStatus.Ok, idle.Value, read.Value, write.Value);
+        }
     }
 
     private void OpenDisk()
@@ -267,6 +295,9 @@ public sealed class WindowsLiveMetricsSource : ILiveMetricsSource
         diskOpened = true;
         var status = PdhOpenQueryW(null, IntPtr.Zero, out query);
         if (status != 0) { diskError = "PdhOpenQuery 0x" + status.ToString("X8"); return; }
+        // O tempo ativo vem de cada disco (curinga de instância); se o curinga não for aceito, fica a _Total como reserva.
+        // Leitura e gravação por segundo ficam na _Total, que soma os bytes de todos os discos.
+        idlePerDisk = PdhAddEnglishCounterW(query, @"\PhysicalDisk(*)\% Idle Time", IntPtr.Zero, out idleCounter) == 0;
         foreach (var (path, assign) in new (string, Action<IntPtr>)[]
         {
             (@"\PhysicalDisk(_Total)\% Idle Time", handle => idleCounter = handle),
@@ -274,6 +305,7 @@ public sealed class WindowsLiveMetricsSource : ILiveMetricsSource
             (@"\PhysicalDisk(_Total)\Disk Write Bytes/sec", handle => writeCounter = handle),
         })
         {
+            if (idlePerDisk && path.EndsWith("% Idle Time", StringComparison.Ordinal)) continue;
             status = PdhAddEnglishCounterW(query, path, IntPtr.Zero, out var counter);
             if (status != 0) { diskError = "contador de disco ausente (" + path + ", 0x" + status.ToString("X8") + ")"; return; }
             assign(counter);
@@ -285,6 +317,30 @@ public sealed class WindowsLiveMetricsSource : ILiveMetricsSource
     {
         var status = PdhGetFormattedCounterValue(counter, PdhFmtDouble | PdhFmtNoCap100, out _, out var value);
         return status == 0 && value.CStatus <= 1 ? value.DoubleValue : null;
+    }
+
+    // Valores de cada instância do contador com curinga. A 1ª chamada só informa o tamanho (PDH_MORE_DATA); os nomes ficam no
+    // mesmo buffer, depois dos itens.
+    private static List<(string Name, double Idle, bool Valid)> Instances(IntPtr counter)
+    {
+        var list = new List<(string, double, bool)>();
+        uint size = 0, count = 0;
+        var status = PdhGetFormattedCounterArrayW(counter, PdhFmtDouble | PdhFmtNoCap100, ref size, ref count, IntPtr.Zero);
+        if (status != PdhMoreData || size == 0) return list;
+        var buffer = Marshal.AllocHGlobal((int)size);
+        try
+        {
+            status = PdhGetFormattedCounterArrayW(counter, PdhFmtDouble | PdhFmtNoCap100, ref size, ref count, buffer);
+            if (status != 0) return list;
+            var stride = Marshal.SizeOf<PdhFmtCounterValueItem>();
+            for (var index = 0; index < count; index++)
+            {
+                var item = Marshal.PtrToStructure<PdhFmtCounterValueItem>(buffer + index * stride);
+                list.Add((Marshal.PtrToStringUni(item.Name) ?? "", item.Value.DoubleValue, item.Value.CStatus <= 1));
+            }
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+        return list;
     }
 
     public IReadOnlyList<AdapterBytes> ReadAdapters()
@@ -311,9 +367,12 @@ public sealed class WindowsLiveMetricsSource : ILiveMetricsSource
 
     public void Dispose()
     {
-        if (disposed) return;
-        disposed = true;
-        if (query != IntPtr.Zero) { PdhCloseQuery(query); query = IntPtr.Zero; }
+        lock (pdhSync)
+        {
+            if (disposed) return;
+            disposed = true;
+            if (query != IntPtr.Zero) { PdhCloseQuery(query); query = IntPtr.Zero; }
+        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -330,11 +389,20 @@ public sealed class WindowsLiveMetricsSource : ILiveMetricsSource
         [FieldOffset(8)] public double DoubleValue;
     }
 
+    // PDH_FMT_COUNTERVALUE_ITEM_W: ponteiro do nome + PDH_FMT_COUNTERVALUE (alinhado em 8), 24 bytes em x64 e em x86.
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PdhFmtCounterValueItem
+    {
+        public IntPtr Name;
+        public PdhFmtCounterValue Value;
+    }
+
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetSystemTimes(out ulong idle, out ulong kernel, out ulong user);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx buffer);
     [DllImport("pdh.dll", CharSet = CharSet.Unicode)] private static extern uint PdhOpenQueryW(string? dataSource, IntPtr userData, out IntPtr query);
     [DllImport("pdh.dll", CharSet = CharSet.Unicode)] private static extern uint PdhAddEnglishCounterW(IntPtr query, string path, IntPtr userData, out IntPtr counter);
     [DllImport("pdh.dll")] private static extern uint PdhCollectQueryData(IntPtr query);
     [DllImport("pdh.dll")] private static extern uint PdhGetFormattedCounterValue(IntPtr counter, uint format, out uint type, out PdhFmtCounterValue value);
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)] private static extern uint PdhGetFormattedCounterArrayW(IntPtr counter, uint format, ref uint bufferSize, ref uint itemCount, IntPtr itemBuffer);
     [DllImport("pdh.dll")] private static extern uint PdhCloseQuery(IntPtr query);
 }

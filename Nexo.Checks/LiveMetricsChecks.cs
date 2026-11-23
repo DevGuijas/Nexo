@@ -40,6 +40,8 @@ internal static class LiveMetricsChecks
             HistoryLimit(assert);
             Units(assert);
             Separation(assert);
+            DiskAggregation(assert);
+            if (OperatingSystem.IsWindows()) RealSource(assert);
         }
         finally { CultureInfo.CurrentCulture = previous; }
     }
@@ -134,6 +136,16 @@ internal static class LiveMetricsChecks
         assert(withReset.ReceiveBitsPerSecond == 8000 && withReset.Adapter == "Wi-Fi", "#141: adaptador com contador zerado fica fora; o outro segue");
         network.Adapters = [new("eth", "Ethernet", 5, 5)];
         assert(net.Sample(Start.AddSeconds(3)).Network.Status == LiveStatus.Waiting, "#141: sem nenhum adaptador comparável, a rede espera a próxima amostra");
+
+        // Hyper-V com switch externo: o mesmo download passa pela placa física e pela vEthernet. Somar mostraria o dobro.
+        var hyperV = new FakeSource { Adapters = [new("nic", "Ethernet", 0, 0), new("veth", "vEthernet (Externo)", 0, 0), new("wifi", "Wi-Fi", 0, 0)] };
+        var host = new LiveMetricsSampler(hyperV);
+        host.Sample(Start);
+        hyperV.Adapters = [new("nic", "Ethernet", 1_000_000, 10_000), new("veth", "vEthernet (Externo)", 990_000, 9_000), new("wifi", "Wi-Fi", 5_000, 1_000)];
+        var mirrored = host.Sample(Start.AddSeconds(1));
+        assert(mirrored.ReceiveBitsPerSecond == 8_000_000 && mirrored.SendBitsPerSecond == 80_000 && mirrored.Adapter == "Ethernet"
+            && host.NetworkHistory[^1] == 8_080_000,
+            "#141: a rede mostra o adaptador mais ativo, não a soma (vEthernet do Hyper-V e placa física repetem o mesmo tráfego)");
         network.Adapters = [];
         assert(net.Sample(Start.AddSeconds(4)).Network.Status == LiveStatus.Unavailable, "#141: sem adaptador ativo, a rede fica indisponível com o motivo");
     }
@@ -200,6 +212,49 @@ internal static class LiveMetricsChecks
         var health = window.IndexOf("private void Health()", StringComparison.Ordinal);
         assert(health >= 0 && window.IndexOf("LiveMetricsSection();", health, StringComparison.Ordinal) is var call && call > health && call < window.IndexOf("if (healthStore == null)", health, StringComparison.Ordinal),
             "#141: a tela Saúde mostra o painel ao vivo mesmo sem o histórico operacional");
+    }
+
+    private static void DiskAggregation(Action<bool, string> assert)
+    {
+        // Um disco a 100% (0% ocioso) ao lado de um parado: na _Total do % Idle Time ele sumiria (100 + 0 ≥ 100 → 0% ativo).
+        assert(WindowsLiveMetricsSource.BusiestDiskIdle([("0 C:", 0, true), ("1 D:", 100, true), ("_Total", 100, true)]) == 0,
+            "#141: o tempo ativo do disco é o do disco mais ocupado, e a _Total fica fora");
+        assert(WindowsLiveMetricsSource.BusiestDiskIdle([("0 C:", 35, false), ("1 D:", 80, true)]) == 80,
+            "#141: instância com status inválido no PDH fica fora do tempo ativo");
+        assert(WindowsLiveMetricsSource.BusiestDiskIdle([("0 C:", double.NaN, true), ("1 D:", 60, true)]) == 60,
+            "#141: valor não numérico de uma instância fica fora");
+        assert(WindowsLiveMetricsSource.BusiestDiskIdle([("_TOTAL", 40, true)]) == null && WindowsLiveMetricsSource.BusiestDiskIdle([]) == null,
+            "#141: sem instância de disco válida (só a _Total, ou nenhuma), o tempo ativo espera a próxima coleta");
+
+        // Fechar a janela libera a consulta do PDH; uma amostra que chegue depois não pode usar a consulta liberada.
+        var closed = new WindowsLiveMetricsSource();
+        closed.Dispose();
+        var refused = false;
+        try { closed.ReadDisk(); } catch (ObjectDisposedException) { refused = true; }
+        assert(refused && closed.DiskMode == null, "#141: depois do Dispose, a leitura de disco é recusada em vez de usar a consulta do PDH liberada");
+    }
+
+    // Só no Windows (CI e PC): a fonte real responde, com valores no intervalo e sem travar a 2ª leitura.
+    private static void RealSource(Action<bool, string> assert)
+    {
+        using var source = new WindowsLiveMetricsSource();
+        var sampler = new LiveMetricsSampler(source);
+        var start = DateTimeOffset.UtcNow;
+        LiveReading reading = sampler.Sample(start);
+        for (var round = 1; round <= 3; round++)
+        {
+            Thread.Sleep(1100);
+            reading = sampler.Sample(DateTimeOffset.UtcNow);
+        }
+        static bool InRange(LiveMetric metric) => metric.Status == LiveStatus.Ok && metric.Value is >= 0 and <= 100;
+        assert(InRange(reading.Cpu), "#141: no Windows, a CPU pelo GetSystemTimes sai entre 0 e 100% (" + reading.Cpu + ")");
+        assert(InRange(reading.Memory) && reading.MemoryTotalBytes > 0, "#141: no Windows, a memória pelo GlobalMemoryStatusEx sai entre 0 e 100% (" + reading.Memory + ")");
+        assert(reading.DiskActive.Status == LiveStatus.Unavailable || InRange(reading.DiskActive) && reading.DiskReadBytesPerSecond >= 0 && reading.DiskWriteBytesPerSecond >= 0,
+            "#141: no Windows, o disco pelo PDH sai entre 0 e 100% de tempo ativo, ou indisponível com o motivo (" + reading.DiskActive + ")");
+        assert(reading.Network.Status != LiveStatus.Ok || reading.ReceiveBitsPerSecond >= 0 && reading.SendBitsPerSecond >= 0,
+            "#141: no Windows, a rede sai com taxas não negativas (" + reading.Network + ")");
+        Console.WriteLine("#141 fonte real: CPU " + reading.Cpu.Value + "%, memória " + reading.Memory.Value + "%, disco " + reading.DiskActive.Status
+            + " (" + (source.DiskMode ?? "sem contador") + ", " + reading.DiskActive.Value + "%), rede " + reading.Network.Status + " (" + reading.Adapter + ").");
     }
 
     private static string Code(string path) => string.Join("\n", File.ReadAllLines(path).Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal)));

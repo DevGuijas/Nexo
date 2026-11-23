@@ -123,7 +123,7 @@ public sealed class LiveMetricsPanel : Border
             Detail(reading.Network, "↑ " + LiveMetricsSampler.FormatBitsPerSecond(reading.SendBitsPerSecond) + (reading.Adapter is { Length: > 0 } name ? " · " + name : "")),
             sampler.NetworkHistory, null);
         var nexo = reading.NexoCpu.Status == LiveStatus.Ok ? reading.NexoCpu.Value!.Value.ToString("F1", CultureInfo.CurrentCulture) + "%" : "medindo";
-        footer.Text = "Atualiza a cada segundo enquanto esta tela está aberta. Não é gravado no histórico. Disco: média dos discos físicos. "
+        footer.Text = "Atualiza a cada segundo enquanto esta tela está aberta. Não é gravado no histórico. Disco: tempo ativo do disco mais ocupado; leitura e gravação somam todos. Rede: o adaptador mais ativo. "
             + "Uso de CPU do próprio Nexo: " + nexo + " · amostra em " + sampleMilliseconds.ToString("F0", CultureInfo.CurrentCulture) + " ms.";
     }
 
