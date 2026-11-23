@@ -82,16 +82,20 @@ internal static class PageLayoutChecks
         assert(health.Contains("\"Histórico operacional indisponível\"") && health.Contains("\"Danger\"") && health.Contains("loading: healthMonitor?.LastError == null")
             && health.Contains("\"Nenhuma ocorrência registrada.\"") && health.Contains("\"Não foi possível ler o histórico operacional\""),
             "#143: a Saúde do PC tem os estados de erro, carregando e vazio");
-        assert(health.Contains("Temperatura indisponível neste computador") && health.Contains("\"Neutral\"") && health.Contains("State is \"error\" or \"invalid\""),
-            "#143: temperatura sem driver ou sensor (#142) aparece como indisponível, sem tom de erro; erro ou valor descartado como atenção");
+        assert(health.Contains("Temperatura indisponível neste computador") && health.Contains("temperatureText, failed ? \"Warning\" : \"Neutral\")")
+            && health.Contains("State is \"error\" or \"invalid\"") && health.Contains("State == \"invalid\" ? \"Leitura de temperatura descartada\" : failed ? \"Falha na leitura de temperatura\""),
+            "#143: temperatura sem driver ou sensor (#142) aparece como indisponível, sem tom de erro; falha de leitura e valor descartado como atenção, cada um com o seu título");
+        assert(health.Contains("healthStore == null ? \"Monitoramento local · histórico indisponível\" : \"Monitoramento local · leitura a cada \" + healthSettings.IntervalSeconds"),
+            "#143: sem o histórico operacional (monitor parado), a Saúde do PC não promete leitura periódica");
         assert(health.IndexOf("LiveMetricsSection();", StringComparison.Ordinal) is var liveAt && liveAt > 0 && liveAt < health.IndexOf("if (healthStore == null)", StringComparison.Ordinal),
             "#143: o cartão Agora (#141) continua antes do histórico, mesmo com o histórico indisponível");
         assert(health.Contains("healthSettings.DiskLowFreePercent") && health.Contains("\"Temperatura da CPU: \" + HealthReportPresentation.DescribeTemperature(latest)"),
             "#143: a barra do volume usa o limite real de espaço livre e a temperatura mantém o texto do monitor");
-        assert(kit.Contains("SystemParameters.ClientAreaAnimation") && kit.Contains("if (loading && MotionAllowed)") && window.Contains("BusyBar.Visibility = PageKit.MotionAllowed ? Visibility.Visible : Visibility.Collapsed"),
+        assert(kit.Contains("internal static bool MotionAllowed => SystemParameters.ClientAreaAnimation;") && kit.Contains("if (loading && MotionAllowed)") && window.Contains("BusyBar.Visibility = PageKit.MotionAllowed ? Visibility.Visible : Visibility.Collapsed"),
             "#143: com as animações do Windows desligadas, nenhuma barra indeterminada se move");
         var render = Method(window, "private void RenderEntry(Entry entry)");
-        assert(render.Contains("TurnFacts.Body(entry.Text)") && render.Contains("FactsLine(facts)") && render.Contains("QuickReplies.For(entry.Text)"),
+        assert(render.Contains("TurnFacts.Body(entry.Text)") && render.Contains("if (facts.Length > 0) body.Children.Add(FactsLine(facts));")
+            && render.Contains("if (facts.Length > 0 && shownText.Length == 0) { shownText = facts; facts = \"\"; }") && render.Contains("QuickReplies.For(entry.Text)"),
             "#143: a linha de fatos (#73) ganha faixa própria e os atalhos continuam lendo o texto inteiro");
         var confirm = Method(window, "private Task<bool> ConfirmChange(ChangeRequest request, Action<Window>? onRendered)");
         assert(confirm.Contains("\"Estado atual:\"") && confirm.Contains("aviso do UAC") && confirm.Contains("detailLines.Where(line => !stateLines.Contains(line))"),
