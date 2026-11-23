@@ -39,6 +39,12 @@ if (args.Contains("--raid-temperature"))
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
+if (args.Contains("--theme"))
+{
+    ThemeChecks.Run(Assert);
+    Console.WriteLine($"{count} verificações aprovadas.");
+    return;
+}
 if (args.Contains("--closed-occurrence"))
 {
     var closedStore = new Store(Path.Combine(root, "closed"));
@@ -293,6 +299,7 @@ try
     await NetworkFollowUpChecks.Run(store, admin, Assert);
     await RaidTemperatureChecks.Run(store, admin, Assert);
     await ClosedOccurrenceChecks.Run(store, admin, Assert);
+    ThemeChecks.Run(Assert);
     await NetworkRecoveryChecks.Run(Assert);
     await SecurityChecks.Run(store, admin, Assert);
     await ContinuousChecks.Run(store, admin, Assert);

@@ -26,6 +26,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - [x] Repetir no PC os passos que falharam na validação de 22/11/2026 (e7a69a2) depois dos ajustes do PR #125 (#88, #93). Na revalidação da 84d764d, no mesmo dia, passaram: o disco T: com o Armazenamento nos 3 turnos e sem "A IA não conseguiu"; o D: como USB, sem falar do conteúdo; a linha dos MB e a resposta de lentidão com contexto; a função inventada do NexoMemTeste recusada; e o "é vírus?" terminando com a orientação da Segurança do Windows. O modelo não chegou a oferecer aumentar o VHDX, ver o que há dentro do D: nem fechar o processo, e essas travas ficam cobertas pelos testes do PR #125. Na rodada da e7a69a2 já tinham passado o volume removido como "Resolvida", o patamar estável e o Spooler com "Estado atual: parado". A #88 e a #93 foram fechadas.
 - [ ] Conferir a mensagem do chat após escolher restaurar o DNS (#98). No PC, em 16/11/2026 (e7a69a2), o cartão mostrou "Restaurado a seu pedido" sem "Etapa não concluída"; falta fechar a issue.
 - [x] Validar no PC o patamar estável na resposta, sem culpar o processo pela lentidão quando a memória está abaixo de 80% (#71).
+- [ ] Validar no PC os temas da #143: `scripts/Check-UiPreview.ps1` com `-Theme onyx` e `-Theme glacial` sem falha, as capturas dos dois temas conferidas a olho e a troca em Configurações > Aparência mantida depois de fechar e abrir o Nexo.
 - [ ] Trocar "não publicada" pela data de publicação, gerar os pacotes e registrar abaixo o commit e os hashes impressos pelo script.
 
 ### Saúde do computador
@@ -94,6 +95,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 ### Interface e repositório
 
 - Navegação, formulários e confirmações redesenhados, com tema claro e ícones vetoriais.
+- Novo layout, etapa 1 (#143): temas **Ônix** (escuro, padrão) e **Glacial** (claro), escolhidos em **Configurações > Aparência** e aplicados na hora, inclusive ao texto já aberto; a escolha fica no `data.json` do perfil. Cores com contraste AA (4,5:1) conferido nos testes; no Glacial, o acento é o azul da logo escurecido para passar no AA. Fontes IBM Plex Sans, Barlow Condensed e IBM Plex Mono embutidas (OFL 1.1, avisos em `ThirdParty/Fonts`), sem texto abaixo de 11 px, e logo nova em vetor na lateral e nas mensagens. O ícone do executável e da bandeja ainda é o anterior.
 - A opção de monitoramento em segundo plano mantém o Nexo na bandeja quando escolhida; fechar a janela sem essa opção encerra o aplicativo (#111).
 - Em **Ferramentas**, a instalação do Office LTSC Professional Plus 2024 (64 bits, pt-BR) pede confirmação e UAC, valida o instalador oficial da Microsoft e confere a instalação no Windows. Não inclui licença nem ativação (#117).
 - Em **Ferramentas**, **Otimizar PC** remove arquivos antigos apenas das pastas temporárias permitidas e solicita ao Windows a manutenção de discos elegíveis, sem prometer ganho de desempenho. Registra cada etapa e trata acesso negado ou resultado não confirmado como parcial ou desconhecido (#118).

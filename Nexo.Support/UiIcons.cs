@@ -10,7 +10,6 @@ public static class UiIcons
 {
     private static readonly IReadOnlyDictionary<string, Geometry> Shapes = new Dictionary<string, Geometry>(StringComparer.Ordinal)
     {
-        ["brand"] = Geometry.Parse("M12,1 L14.7,9.3 23,12 14.7,14.7 12,23 9.3,14.7 1,12 9.3,9.3 Z"),
         ["chat"] = Geometry.Parse("M20,11.5 C20,16.2 16.4,20 11.5,20 C9.9,20 8.3,19.6 7,18.8 L3,20 4.2,16 C3.4,14.7 3,13.2 3,11.5 C3,6.8 6.7,3 11.5,3 C16.3,3 20,6.8 20,11.5 Z M7.5,11.5 L15.5,11.5"),
         ["health"] = Geometry.Parse("M20.5,8.7 C20.5,13.5 15.9,17.5 12,20.7 C8.1,17.5 3.5,13.5 3.5,8.7 C3.5,5.9 5.5,4 8,4 C9.8,4 11.2,4.9 12,6.3 C12.8,4.9 14.2,4 16,4 C18.5,4 20.5,5.9 20.5,8.7 Z M5,12 L9,12 10.5,9.5 13,14.5 14.5,12 19,12"),
         ["history"] = Geometry.Parse("M20.5,12 A8.5,8.5 0 1 1 18,6 M20.5,4 L20.5,9 15.5,9 M12,7 L12,12 15.5,14"),
@@ -32,20 +31,21 @@ public static class UiIcons
         ["shield"] = Geometry.Parse("M12,2 L20,5 20,11 C20,16 16.5,19.4 12,22 C7.5,19.4 4,16 4,11 L4,5 Z M9,12 L11,14 15,10")
     };
 
-    public static Viewbox Create(string name, double size) => Create(name, size, (Brush)Application.Current.FindResource("Accent"));
+    public static Viewbox Create(string name, double size) => Create(name, size, ThemeManager.Live("Accent"));
 
     public static Viewbox Create(string name, double size, Brush stroke)
     {
+        if (name == "brand") return Logo(size);
         if (!Shapes.TryGetValue(name, out var shape)) throw new ArgumentOutOfRangeException(nameof(name), name, "Ícone desconhecido.");
         var path = new Path
         {
             Data = shape,
             Stroke = stroke,
-            StrokeThickness = name == "brand" ? 0 : 1.8,
+            StrokeThickness = 1.8,
             StrokeStartLineCap = PenLineCap.Round,
             StrokeEndLineCap = PenLineCap.Round,
             StrokeLineJoin = PenLineJoin.Round,
-            Fill = name == "brand" ? stroke : Brushes.Transparent,
+            Fill = Brushes.Transparent,
             SnapsToDevicePixels = true
         };
         return new Viewbox
@@ -55,6 +55,24 @@ public static class UiIcons
             Stretch = Stretch.Uniform,
             IsHitTestVisible = false,
             Child = new Grid { Width = 24, Height = 24, Children = { path } }
+        };
+    }
+
+    /// <summary>Logo do Nexo (#143) com as geometrias do App.xaml e as cores do tema atual (LogoStrong e LogoSoft).</summary>
+    public static Viewbox Logo(double size)
+    {
+        Path Shape(string geometry, string brush, bool stroke) => stroke
+            ? new Path { Data = (Geometry)Application.Current.FindResource(geometry), Stroke = ThemeManager.Live(brush), StrokeThickness = 1.5,
+                StrokeStartLineCap = PenLineCap.Round, StrokeEndLineCap = PenLineCap.Round }
+            : new Path { Data = (Geometry)Application.Current.FindResource(geometry), Fill = ThemeManager.Live(brush) };
+        return new Viewbox
+        {
+            Width = size,
+            Height = size,
+            Stretch = Stretch.Uniform,
+            IsHitTestVisible = false,
+            Child = new Canvas { Width = 24, Height = 24, Children = { Shape("LogoSoftLine", "LogoSoft", true), Shape("LogoSoftNodes", "LogoSoft", false),
+                Shape("LogoStrongBar", "LogoStrong", false), Shape("LogoStrongNodes", "LogoStrong", false) } }
         };
     }
 }

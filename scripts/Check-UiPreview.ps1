@@ -1,4 +1,4 @@
-param([ValidateSet('Debug', 'Release')][string]$Configuration = 'Release')
+param([ValidateSet('Debug', 'Release')][string]$Configuration = 'Release', [ValidateSet('onyx', 'glacial')][string]$Theme = 'onyx')
 
 $ErrorActionPreference = 'Stop'
 $project = Join-Path $PSScriptRoot '..\Nexo.Support\Nexo.Support.csproj'
@@ -20,7 +20,8 @@ if (Test-Path -LiteralPath $preview) {
     Remove-Item -LiteralPath $preview -Recurse -Force
 }
 if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report }
-$process = Start-Process -FilePath $exe -ArgumentList '--screenshot' -WindowStyle Hidden -Wait -PassThru
+# #143: com -Theme glacial, as capturas saem com o prefixo glacial- e a preferência salva não muda.
+$process = Start-Process -FilePath $exe -ArgumentList @('--screenshot', '--theme', $Theme) -WindowStyle Hidden -Wait -PassThru
 if (-not (Test-Path -LiteralPath $report)) { throw 'A prévia não gerou ui-checks.txt.' }
 $result = Get-Content -LiteralPath $report -Raw
 if ($process.ExitCode -ne 0 -or $result.StartsWith('Falha na prévia:')) { throw $result }
