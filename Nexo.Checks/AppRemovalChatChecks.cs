@@ -400,6 +400,9 @@ internal static class AppRemovalChatChecks
             ("Depende do que aparecer no seu PC: clique em “Verificar este PC” e veja os itens sugeridos, que já vêm marcados. Se tiver dúvida sobre algum, deixe desmarcado.", PriorGuidance, "ok, e o que eu removo?"),
             ("A CPU está em 12% e a memória em 54%. Como a lentidão aparece ao abrir o navegador, vale conferir as extensões instaladas nele e testar com elas desativadas.", health, "aparece quando abro o navegador"),
             (AgentProtocol.AppRemovalGuidance, PriorGuidance, "pode repetir?"),
+            (AgentProtocol.AppRemovalGuidance, PriorGuidance, "repita, por favor"),
+            // @qa: resposta longa com conteúdo novo que só reaproveita a anterior curta (o estado medido) não é cópia.
+            (health + " Como a lentidão começou depois da atualização de ontem, vale abrir o Windows Update, ver o histórico de atualizações instaladas e conferir se alguma delas aparece com falha; se aparecer, me diga o código do erro e o nome da atualização para eu seguir com a investigação a partir dela.", health, "começou depois da atualização de ontem"),
             (AgentProtocol.AppRemovalGuidance, "", "ok, e o que eu removo?"),
         ];
         var wrong = repeated.Where(c => !AgentProtocol.RepeatsPriorAnswer(c.Message, c.Prior, c.Request)).Select(c => "passou: " + c.Message[..Math.Min(60, c.Message.Length)])

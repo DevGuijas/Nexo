@@ -84,19 +84,23 @@ public static class AgentProtocol
     // modelo que cobre quase toda a última resposta do assistente (80% dos trechos de 4 palavras dela) não responde à mensagem nova.
     // Só contam respostas longas (60 caracteres e 10 palavras, depois de normalizar): "Certo.", "Tudo bem, até mais!" e
     // confirmações curtas se repetem por natureza. O relatório determinístico do Nexo não passa por esta trava (não é resposta do
-    // modelo); se o modelo o copiar inteiro, a cópia também não responde à mensagem nova. O pedido explícito de repetir passa.
+    // modelo); se o modelo o copiar inteiro, a cópia também não responde à mensagem nova. O pedido explícito de repetir passa
+    // ("repete", "repetir", "repita"). A conta vale nos dois sentidos (@qa): a maior parte (60%) da resposta nova também precisa vir
+    // da anterior, para que uma resposta longa com conteúdo novo, que só reaproveita uma resposta anterior curta (o estado medido,
+    // uma frase de teste), não seja recusada como cópia.
     internal const string RepeatedAnswerReason = "A resposta repete a sua resposta anterior nesta conversa e não responde à nova mensagem do usuário. Responda à pergunta nova com as suas palavras, sem copiar a resposta anterior; se ela já respondia, diga isso em uma frase e acrescente só o que for novo para esta pergunta.";
     private static string[] Words(string text) => Regex.Replace(Normalize(text), @"[^\p{L}\p{N}]+", " ").Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
     private static HashSet<string> Shingles(string[] words) => words.Length < 4 ? [string.Join(' ', words)]
         : [.. Enumerable.Range(0, words.Length - 3).Select(i => string.Join(' ', words, i, 4))];
     public static bool RepeatsPriorAnswer(string message, string? prior, string userRequest)
     {
-        if (string.IsNullOrWhiteSpace(prior) || Regex.IsMatch(Normalize(userRequest), @"\brepet(?:e|ir|ia|ita|indo)\b")) return false;
+        if (string.IsNullOrWhiteSpace(prior) || Regex.IsMatch(Normalize(userRequest), @"\b(?:repet|repit)\w*")) return false;
         var previous = Words(TurnFacts.Body(prior));
         var answer = Words(message);
         if (previous.Length < 10 || answer.Length < 10 || string.Join(' ', previous).Length < 60 || string.Join(' ', answer).Length < 60) return false;
         var covered = Shingles(previous);
-        return covered.Count(Shingles(answer).Contains) >= 0.8 * covered.Count;
+        var written = Shingles(answer);
+        return covered.Count(written.Contains) >= 0.8 * covered.Count && written.Count(covered.Contains) >= 0.6 * written.Count;
     }
     // Frases que só repetem o caminho do cartão (o modelo copiou o texto do Nexo): saem antes de medir se a resposta tem conteúdo.
     private static readonly string[] NexoRemovalSentences = [.. Regex.Split(AppRemovalGuidance + " " + AppRemovalLine, @"(?<=[.!?:])\s+")
