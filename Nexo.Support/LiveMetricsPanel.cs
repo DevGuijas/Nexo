@@ -10,8 +10,8 @@ using System.Windows.Threading;
 namespace Nexo.Support;
 
 /// <summary>
-/// Cartão "Agora" da tela Saúde do PC (#141). Lê a cada segundo enquanto está na tela e a janela está visível e não minimizada;
-/// fora disso o temporizador para. A MainWindow mantém uma única instância: a tela é recriada a cada leitura do monitor (30 s), e
+/// Cartão "Agora" da tela Saúde do PC (#141). Lê a cada segundo enquanto o próprio cartão está visível e a janela está visível e
+/// não minimizada; fora disso (outra página, inclusive o Assistente, janela minimizada ou na bandeja) o temporizador para. A MainWindow mantém uma única instância: a tela é recriada a cada leitura do monitor (30 s), e
 /// remover e devolver o cartão é uma pausa curta, que mantém o gráfico. A amostra roda fora da thread da interface e nunca há
 /// duas ao mesmo tempo. Os valores não são anunciados a cada segundo pelo leitor de tela; cada bloco tem um nome acessível com o
 /// valor atual.
@@ -50,6 +50,8 @@ public sealed class LiveMetricsPanel : Border
         timer.Tick += async (_, _) => await Tick();
         Loaded += (_, _) => { loaded = true; Attach(); UpdateRunning(); };
         Unloaded += (_, _) => { loaded = false; UpdateRunning(); };
+        // A página Assistente só recolhe a área das páginas: o painel continua carregado, mas deixa de estar visível.
+        IsVisibleChanged += (_, _) => UpdateRunning();
     }
 
     private void Attach()
@@ -65,7 +67,7 @@ public sealed class LiveMetricsPanel : Border
     private void OnWindowVisibility(object sender, DependencyPropertyChangedEventArgs e) => UpdateRunning();
     private void OnWindowClosed(object? sender, EventArgs e) { timer.Stop(); source.Dispose(); }
 
-    private bool Visible => loaded && window is { IsVisible: true } && window.WindowState != WindowState.Minimized;
+    private bool Visible => LiveMetricsSampler.ShouldRun(loaded, IsVisible, window is { IsVisible: true }, window?.WindowState == WindowState.Minimized);
 
     private void UpdateRunning()
     {
@@ -75,7 +77,7 @@ public sealed class LiveMetricsPanel : Border
             if (timer.IsEnabled) return;
             sampler.Resume(now);
             timer.Start();
-            _ = Tick();
+            if (sampler.NeedsBaseline) _ = Tick();
         }
         else if (timer.IsEnabled)
         {
