@@ -13,6 +13,7 @@ public sealed class SetupWindow : Window
     private readonly TextBlock status = new() { FontSize = 12, Foreground = new SolidColorBrush(Color.FromRgb(65, 72, 82)), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(28, 12, 28, 0) };
     private readonly Button next = new() { Content = "Próximo >", Width = 112, Height = 32, Margin = new Thickness(8, 0, 0, 0) };
     private readonly Button cancel = new() { Content = "Cancelar", Width = 90, Height = 32, Margin = new Thickness(8, 0, 0, 0) };
+    private readonly CheckBox geoIpChoice = new() { Content = "Consultar localização aproximada por GeoIP", IsChecked = true, FontSize = 13 };
     private int page;
     private bool installing;
     public int ExitCode { get; private set; } = 1;
@@ -22,7 +23,7 @@ public sealed class SetupWindow : Window
         this.args = args;
         Title = Installer.IsPreview ? "Instalação do Nexo 1.7.0 (prévia)" : "Instalação do Nexo";
         Width = 590;
-        Height = 425;
+        Height = 490;
         MinWidth = MaxWidth = Width;
         MinHeight = MaxHeight = Height;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
@@ -79,14 +80,21 @@ public sealed class SetupWindow : Window
             subheading.Text = Installer.IsPreview ? "O instalador vai baixar a prévia 1.7.0 e o modelo de IA." : "O instalador vai baixar a versão publicada e o modelo de IA.";
             content.Children.Add(heading); content.Children.Add(subheading);
             content.Children.Add(new TextBlock { Text = "Destino: " + System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Nexo")
-                + "\n\nInclui o Nexo, o Ollama e o modelo qwen3:8b. Os pacotes são conferidos por assinatura e SHA-256 antes do uso. É necessária conexão com a internet e espaço livre para o modelo.",
-                FontSize = 13, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 30, 6, 0) });
+                + "\nAtalhos: menu Iniciar e Área de Trabalho."
+                + "\n\nInclui Nexo, Ollama e qwen3:8b. Os pacotes são conferidos por assinatura e SHA-256. É necessária conexão com a internet e espaço livre para o modelo.",
+                FontSize = 13, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 20, 6, 0) });
+            geoIpChoice.Margin = new Thickness(0, 18, 0, 0);
+            content.Children.Add(geoIpChoice);
+            content.Children.Add(new TextBlock { Text = "Se marcada, uma consulta HTTPS a ipwho.is revela seu IP público ao serviço. O log salva apenas país, região e cidade aproximados; nenhum log é enviado automaticamente.",
+                FontSize = 11, Foreground = Brushes.DimGray, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(20, 5, 8, 0) });
+            content.Children.Add(new TextBlock { Text = "Logs locais: " + InstallAudit.DefaultDirectory,
+                FontSize = 11, Foreground = Brushes.DimGray, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 6, 0) });
             next.Content = "Instalar";
         }
         else
         {
             heading.Text = installing ? "Instalando o Nexo" : ExitCode == 0 ? "Instalação concluída" : "Instalação interrompida";
-            subheading.Text = installing ? "Aguarde enquanto os pacotes são baixados e preparados." : ExitCode == 0 ? "O Nexo está disponível no menu Iniciar." : "Leia o detalhe abaixo e tente novamente.";
+            subheading.Text = installing ? "Aguarde enquanto os pacotes são baixados e preparados." : ExitCode == 0 ? "O Nexo está na Área de Trabalho e no menu Iniciar." : "Leia o detalhe abaixo e tente novamente.";
             content.Children.Add(heading); content.Children.Add(subheading);
             var bar = new ProgressBar { IsIndeterminate = installing, Height = 12, Margin = new Thickness(0, 45, 0, 0), Value = ExitCode == 0 ? 100 : 0, Maximum = 100 };
             content.Children.Add(bar);
@@ -101,7 +109,9 @@ public sealed class SetupWindow : Window
         if (page == 0) { page = 1; RenderPage(); return; }
         if (page == 2 && ExitCode == 0) { Close(); return; }
         page = 2; installing = true; status.Text = "Consultando a versão publicada…"; RenderPage();
-        ExitCode = await Task.Run(() => Installer.RunAsync(args, message => Dispatcher.BeginInvoke(() => status.Text = message), false));
+        var allowGeoIp = geoIpChoice.IsChecked == true;
+        ExitCode = await Task.Run(() => Installer.RunAsync(args, message => Dispatcher.BeginInvoke(() => status.Text = message), false,
+            allowGeoIp: allowGeoIp));
         installing = false; RenderPage();
     }
 }

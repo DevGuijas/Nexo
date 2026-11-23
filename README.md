@@ -20,9 +20,9 @@ Para executar a compilação local, rode `dotnet run --project Nexo.Support -c R
 
 ### Prévia 1.7.0
 
-O [NexoSetup-Preview-1.1.1.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup-Preview-1.1.1.exe) instala a prévia 1.7.0 no perfil atual do Windows. O assistente pede confirmação e baixa o Nexo, o Ollama oficial e o modelo local `qwen3:8b` da Oracle. O manifesto separado da prévia é assinado; cada pacote é conferido por tamanho e SHA-256 antes do uso. O canal estável acima continua na 1.6.3.
+O [NexoSetup-Preview-1.2.0.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup-Preview-1.2.0.exe) instala a prévia 1.7.0 no perfil atual do Windows. O assistente pede confirmação e baixa o Nexo, o Ollama oficial e o modelo local `qwen3:8b` da Oracle. O manifesto separado da prévia é assinado; cada pacote é conferido por tamanho e SHA-256 antes do uso. O instalador cria atalhos na área de trabalho e no menu Iniciar, inclui `NexoUninstall.exe` na pasta do aplicativo e registra as etapas em logs locais. Veja [logs e desinstalação](docs/LOGS-E-DESINSTALACAO.md). O canal estável acima continua na 1.6.3.
 
-SHA-256 do instalador da prévia: `2A1027D775103E7A064CEE42F483BD1698CF534F81D6A9B15A84D6516F03EF39`. A 1.7.0 ainda tem [validações pendentes](CHANGELOG.md). Os executáveis do Nexo estão sem assinatura de código da equipe; o Windows pode mostrar um aviso do SmartScreen ou bloquear a execução conforme a política do PC. Veja o [registro da recuperação](docs/RECUPERACAO-2026-11-22.md).
+SHA-256 do instalador da prévia: `7CD852AF8E16934AF38DDEA7BAA5A9FB70599C4F7456C44C6AB59C663FF90191`. A 1.7.0 ainda tem [validações pendentes](CHANGELOG.md). Os executáveis do Nexo estão sem assinatura de código da equipe; o Windows pode mostrar um aviso do SmartScreen ou bloquear a execução conforme a política do PC. Veja o [registro da recuperação](docs/RECUPERACAO-2026-11-22.md).
 
 ### Novidade 1.6.3 — driver NVIDIA e instalador gráfico
 

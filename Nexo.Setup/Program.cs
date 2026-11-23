@@ -30,27 +30,60 @@ public static class Installer
     [STAThread]
     public static int Main(string[] args)
     {
+        if (args.Length >= 1 && args[0] == "--uninstall-worker")
+            return Uninstaller.RunWorkerAsync(args).GetAwaiter().GetResult();
+        if (Path.GetFileNameWithoutExtension(Environment.ProcessPath ?? "").Equals("NexoUninstall", StringComparison.OrdinalIgnoreCase))
+        {
+            var uninstallWindow = new UninstallWindow();
+            new Application().Run(uninstallWindow);
+            return uninstallWindow.ExitCode;
+        }
         if (args.Contains("--check")) return RunAsync(args, Console.WriteLine, false).GetAwaiter().GetResult();
         var window = new SetupWindow(args);
         new Application().Run(window);
         return window.ExitCode;
     }
 
-    public static async Task<int> RunAsync(string[] args, Action<string> report, bool showMessage)
+    public static async Task<int> RunAsync(string[] args, Action<string> report, bool showMessage,
+        bool allowGeoIp = false, string? logDirectory = null, string? uninstallerSourcePath = null)
     {
         var checkOnly = args.Length == 1 && args[0] == "--check" || args.Length == 3 && args[0] == "--check" && args[1] == "--manifest";
         var manifestText = args.Length == 0 || args.Length == 1 && checkOnly ? DefaultManifestUrl
             : args.Length == 2 && args[0] == "--manifest" ? args[1]
             : args.Length == 3 && checkOnly ? args[2] : "";
+        InstallAudit audit;
+        try { audit = new InstallAudit(logDirectory, checkOnly ? "check" : "install"); }
+        catch (Exception ex)
+        {
+            report("Não foi possível criar o log da instalação: " + ex.Message);
+            return 1;
+        }
+        using (audit)
+        {
+        void Report(string message)
+        {
+            report(message);
+            audit.Record("message", "info", new { text = message });
+        }
+        if (checkOnly || !allowGeoIp)
+            audit.Record("geoip", "skipped", new { reason = checkOnly ? "check_mode" : "not_selected" });
         if (!Uri.TryCreate(manifestText, UriKind.Absolute, out var manifestUrl))
         {
-            report("Uso: NexoSetup.exe [--manifest https://servidor-oracle/.../latest.json]");
+            Report("Uso: NexoSetup.exe [--manifest https://servidor-oracle/.../latest.json]");
+            audit.Complete("failure", new { reason = "invalid_arguments" });
             return 2;
         }
         try
         {
             ValidateManifestUri(manifestUrl);
-            report("Consultando a versão publicada do Nexo…");
+            if (allowGeoIp && !checkOnly)
+            {
+                Report("Consultando localização aproximada por GeoIP…");
+                try { audit.Record("geoip", "success", await GeoIpLookup.LookupAsync()); }
+                catch (Exception ex) { audit.Record("geoip", "unavailable", new { reason = ex.GetType().Name }); }
+            }
+            Report("Consultando a versão publicada do Nexo…");
+            audit.Record("manifest", "fetch_started", new { source = manifestUrl.AbsoluteUri });
             using var response = await Client.GetAsync(manifestUrl, HttpCompletionOption.ResponseHeadersRead);
             response.EnsureSuccessStatusCode();
             if (response.Content.Headers.ContentLength is > 64_000) throw new InvalidDataException("Manifesto muito grande.");
@@ -65,6 +98,7 @@ public static class Installer
             var manifest = JsonSerializer.Deserialize<ReleaseManifest>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                 ?? throw new InvalidDataException("Manifesto vazio.");
             ValidateManifest(manifest);
+            audit.Record("manifest", "verified", new { version = manifest.Version, model = manifest.Model, bytes = manifestBytes.Length });
             var baseUrl = PackageBaseUrl(manifestUrl);
             if (checkOnly)
             {
@@ -74,61 +108,95 @@ public static class Installer
                     using var head = await Client.SendAsync(new HttpRequestMessage(HttpMethod.Head, uri));
                     head.EnsureSuccessStatusCode();
                     if (head.Content.Headers.ContentLength != package.Bytes) throw new InvalidDataException("Tamanho remoto inesperado: " + package.Path);
-                    report("Disponível: " + package.Path);
+                    audit.Record("package", "available", new { package = package.Path, bytes = package.Bytes, sha256 = package.Sha256 });
+                    Report("Disponível: " + package.Path);
                 }
-                report("Manifesto assinado e arquivos publicados para a versão " + manifest.Version + ".");
+                Report("Manifesto assinado e arquivos publicados para a versão " + manifest.Version + ".");
+                audit.Complete("success", new { version = manifest.Version, mode = "check" });
                 return 0;
             }
             var cache = Path.Combine(LocalAppData, "Nexo", "InstallerCache", manifest.Version);
             Directory.CreateDirectory(cache);
-            var appZip = await Download(baseUrl, manifest.App, Path.Combine(cache, "nexo-app.zip"), report);
-            var modelZip = await Download(baseUrl, manifest.ModelArchive, Path.Combine(cache, "qwen3-model.zip"), report);
-            var ollamaSetup = manifest.Ollama == null ? null : await Download(baseUrl, manifest.Ollama, Path.Combine(cache, "OllamaSetup.exe"), report);
+            var appZip = await Download(baseUrl, manifest.App, Path.Combine(cache, "nexo-app.zip"), Report, audit);
+            var modelZip = await Download(baseUrl, manifest.ModelArchive, Path.Combine(cache, "qwen3-model.zip"), Report, audit);
+            var ollamaSetup = manifest.Ollama == null ? null : await Download(baseUrl, manifest.Ollama, Path.Combine(cache, "OllamaSetup.exe"), Report, audit);
 
             var appRoot = Path.Combine(LocalAppData, "Programs", "Nexo");
             var stage = appRoot + ".new";
             var backup = appRoot + ".previous";
+            var stageTime = Stopwatch.StartNew();
+            audit.Record("application", "staging_started", new { version = manifest.Version });
             if (Directory.Exists(stage)) Directory.Delete(stage, true);
             Directory.CreateDirectory(stage);
             ExtractChecked(appZip, stage, 2_000_000_000);
             if (!File.Exists(Path.Combine(stage, "Nexo.exe"))) throw new InvalidDataException("O pacote não contém Nexo.exe.");
+            StageUninstaller(uninstallerSourcePath ?? Environment.ProcessPath
+                ?? throw new IOException("Executável do instalador indisponível."), stage);
+            audit.Record("uninstaller", "staged", new { file = "NexoUninstall.exe" });
+            audit.Record("application", "staged", new { version = manifest.Version, durationMs = stageTime.ElapsedMilliseconds });
 
             if (!OllamaInstalled())
             {
-                report("Instalando o Ollama…");
+                var ollamaTime = Stopwatch.StartNew();
+                Report("Instalando o Ollama…");
+                audit.Record("ollama", "install_started", new { source = ollamaSetup == null ? "winget" : "verified_package" });
                 if (ollamaSetup != null)
                 {
                     if (!await VerifyOllamaSignature(ollamaSetup))
                         throw new InvalidDataException("Pacote Ollama sem assinatura Authenticode válida.");
+                    audit.Record("ollama", "signature_verified", new { signer = "Ollama Inc." });
                     await Run(ollamaSetup, "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART", TimeSpan.FromMinutes(15));
                 }
                 else await Run("winget.exe", "install --id Ollama.Ollama --exact --source winget --silent --accept-package-agreements --accept-source-agreements", TimeSpan.FromMinutes(40));
                 if (!OllamaInstalled()) throw new IOException("O Ollama não foi encontrado após a instalação.");
+                audit.Record("ollama", "installed", new { durationMs = ollamaTime.ElapsedMilliseconds });
             }
+            else audit.Record("ollama", "already_installed");
 
-            report("Instalando o modelo local qwen3:8b…");
+            Report("Instalando o modelo local qwen3:8b…");
+            var modelTime = Stopwatch.StartNew();
+            audit.Record("model", "import_started", new { model = manifest.Model });
             var modelsRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ollama", "models");
             Directory.CreateDirectory(modelsRoot);
             await InstallModelArchive(modelZip, modelsRoot);
             var modelManifest = Path.Combine(modelsRoot, "manifests", "registry.ollama.ai", "library", "qwen3", "8b");
             if (!File.Exists(modelManifest)) throw new InvalidDataException("O modelo qwen3:8b não foi encontrado no pacote.");
+            audit.Record("model", "installed", new { model = manifest.Model, durationMs = modelTime.ElapsedMilliseconds });
 
-            report("Ativando o Nexo " + manifest.Version + "…");
+            Report("Ativando o Nexo " + manifest.Version + "…");
+            var activationTime = Stopwatch.StartNew();
+            audit.Record("application", "activation_started", new { version = manifest.Version, priorInstallation = Directory.Exists(appRoot) });
             if (Directory.Exists(backup)) Directory.Delete(backup, true);
             if (Directory.Exists(appRoot)) Directory.Move(appRoot, backup);
             try { Directory.Move(stage, appRoot); }
             catch { if (Directory.Exists(backup) && !Directory.Exists(appRoot)) Directory.Move(backup, appRoot); throw; }
-            try { CreateStartMenuShortcut(appRoot); }
-            catch (Exception ex) { report("Atalho não criado: " + ex.Message); }
-            report("Instalação concluída: " + Path.Combine(appRoot, "Nexo.exe"));
-            if (showMessage) MessageBoxW(IntPtr.Zero, "Nexo " + manifest.Version + " instalado com o modelo local. Abra pelo menu Iniciar.", "Nexo instalado", 0x40);
+            audit.Record("application", "activated", new { version = manifest.Version, durationMs = activationTime.ElapsedMilliseconds });
+            try { CreateStartMenuShortcut(appRoot); audit.Record("shortcut_start_menu", "created"); }
+            catch (Exception ex) { audit.Record("shortcut_start_menu", "failed", new { error = ex.Message }); Report("Atalho do menu Iniciar não criado: " + ex.Message); }
+            var desktopDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            audit.Record("shortcut_desktop", "creation_started", new { path = Path.Combine(desktopDirectory, "Nexo.lnk") });
+            try { CreateShortcut(appRoot, desktopDirectory); }
+            catch (Exception ex)
+            {
+                audit.Record("shortcut_desktop", "failed", new { type = ex.GetType().Name, message = ex.Message });
+                throw;
+            }
+            audit.Record("shortcut_desktop", "created", new { path = Path.Combine(desktopDirectory, "Nexo.lnk") });
+            Report("Instalação concluída: " + Path.Combine(appRoot, "Nexo.exe"));
+            Report("Log da instalação: " + audit.Path);
+            audit.Complete("success", new { version = manifest.Version, desktopShortcut = true });
+            if (showMessage) MessageBoxW(IntPtr.Zero, "Nexo " + manifest.Version + " instalado com o modelo local. Abra pela Área de Trabalho ou pelo menu Iniciar.", "Nexo instalado", 0x40);
             return 0;
         }
         catch (Exception ex)
         {
-            report("Instalação interrompida: " + ex.Message);
+            audit.Record("error", "failure", new { type = ex.GetType().Name, message = ex.Message });
+            Report("Instalação interrompida: " + ex.Message);
+            Report("Log da instalação: " + audit.Path);
+            audit.Complete("failure", new { errorType = ex.GetType().Name });
             if (!checkOnly && showMessage) MessageBoxW(IntPtr.Zero, "A instalação foi interrompida: " + ex.Message, "Nexo", 0x10);
             return 1;
+        }
         }
     }
 
@@ -169,15 +237,18 @@ public static class Installer
         }
     }
 
-    private static async Task<string> Download(Uri baseUrl, Package package, string destination, Action<string> report)
+    private static async Task<string> Download(Uri baseUrl, Package package, string destination, Action<string> report, InstallAudit? audit = null)
     {
         var source = PackageUrl(baseUrl, package);
+        var elapsed = Stopwatch.StartNew();
         if (File.Exists(destination) && new FileInfo(destination).Length == package.Bytes && await HashMatches(destination, package.Sha256))
         {
             report("Arquivo já verificado: " + Path.GetFileName(destination));
+            audit?.Record("package", "cache_verified", new { package = package.Path, bytes = package.Bytes, sha256 = package.Sha256, durationMs = elapsed.ElapsedMilliseconds });
             return destination;
         }
         report("Baixando " + Path.GetFileName(destination) + "…");
+        audit?.Record("package", "download_started", new { package = package.Path, expectedBytes = package.Bytes, expectedSha256 = package.Sha256 });
         var temp = destination + ".download";
         try
         {
@@ -203,6 +274,7 @@ public static class Installer
             }
             if (!await HashMatches(temp, package.Sha256)) throw new InvalidDataException("SHA-256 diferente do manifesto para " + package.Path);
             File.Move(temp, destination, true);
+            audit?.Record("package", "download_verified", new { package = package.Path, bytes = package.Bytes, sha256 = package.Sha256, durationMs = elapsed.ElapsedMilliseconds });
             return destination;
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }
@@ -324,17 +396,26 @@ public static class Installer
     private static bool OllamaInstalled() => File.Exists(Path.Combine(LocalAppData, "Programs", "Ollama", "ollama.exe"))
         || File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Ollama", "ollama.exe"));
 
-    private static void CreateStartMenuShortcut(string appRoot)
+    public static void CreateShortcut(string appRoot, string shortcutDirectory)
     {
         var shellType = Type.GetTypeFromProgID("WScript.Shell") ?? throw new IOException("Atalhos do Windows indisponíveis.");
         dynamic shell = Activator.CreateInstance(shellType)!;
-        var programs = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Microsoft", "Windows", "Start Menu", "Programs");
-        Directory.CreateDirectory(programs);
-        dynamic shortcut = shell.CreateShortcut(Path.Combine(programs, "Nexo.lnk"));
+        Directory.CreateDirectory(shortcutDirectory);
+        dynamic shortcut = shell.CreateShortcut(Path.Combine(shortcutDirectory, "Nexo.lnk"));
         shortcut.TargetPath = Path.Combine(appRoot, "Nexo.exe");
         shortcut.WorkingDirectory = appRoot;
         shortcut.IconLocation = Path.Combine(appRoot, "Nexo.exe");
         shortcut.Save();
+    }
+
+    private static void CreateStartMenuShortcut(string appRoot) => CreateShortcut(appRoot,
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Microsoft", "Windows", "Start Menu", "Programs"));
+
+    public static void StageUninstaller(string installerExecutable, string appStage)
+    {
+        if (!File.Exists(installerExecutable) || !Path.GetExtension(installerExecutable).Equals(".exe", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("Executável de desinstalação ausente.");
+        File.Copy(installerExecutable, Path.Combine(appStage, "NexoUninstall.exe"), true);
     }
 
     // Mesmo escape do WindowsTools.Quote: o PowerShell também fecha a string simples com ‘ ’ ‚ ‛.
