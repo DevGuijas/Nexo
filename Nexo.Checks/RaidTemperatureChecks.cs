@@ -378,6 +378,17 @@ internal static class RaidTemperatureChecks
             ("Quer que eu identifique quais programas estão ocupando mais espaço?", InvestigationEvidence.FileSearchReason),
             ("Posso verificar quais aplicativos consomem mais espaço.", InvestigationEvidence.FileSearchReason),
             ("Posso ver o uso de armazenamento do volume C:.", InvestigationEvidence.FileSearchReason),
+            // @qa: outros verbos, o uso coordenado, a utilização, o consumo e "o que está consumindo espaço".
+            ("Posso ajudar a revisar o uso do disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso checar o uso do disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso conferir o uso do disco C:.", InvestigationEvidence.FileSearchReason),
+            ("Posso consultar o uso do disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso avaliar o uso do armazenamento.", InvestigationEvidence.FileSearchReason),
+            ("Posso verificar o uso da CPU e do disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso verificar a utilização do disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso analisar o consumo de espaço no disco.", InvestigationEvidence.FileSearchReason),
+            ("Posso ajudar a identificar o que está consumindo espaço.", InvestigationEvidence.FileSearchReason),
+            ("Posso verificar o que está usando o espaço do disco.", InvestigationEvidence.FileSearchReason),
             // Negação, memória e CPU, estado e saúde do disco, orientação do Armazenamento e o ":" passam.
             ("Não posso verificar o uso do disco.", null),
             ("Posso verificar o uso de memória.", null),
@@ -388,6 +399,12 @@ internal static class RaidTemperatureChecks
             ("Vou verificar o relatório: o uso do disco não aparece nele.", null),
             ("Posso verificar se algum processo está usando muito o processador.", null),
             ("O C: tem 77,7% livre e o uso do disco está normal.", null),
+            ("Posso te mostrar como ver o uso do disco em Configurações > Sistema > Armazenamento.", null),
+            ("Quer que eu explique como verificar o uso do disco em Configurações > Sistema > Armazenamento?", null),
+            ("Posso consultar o relatório de saúde de novo para ver o estado dos discos.", null),
+            ("Posso verificar o uso da CPU e da memória.", null),
+            ("Quer que eu verifique a temperatura de novo?", null),
+            ("Posso verificar o espaço livre do C:.", null),
         ];
         var wrong = cases.Where(c => plain.ValidateStatement(c.Text, false) != c.Expected || c.Expected != null && closed.ValidateStatement(c.Text, false) == null)
             .Select(c => c.Text + " → " + plain.ValidateStatement(c.Text, false) + " / " + closed.ValidateStatement(c.Text, false)).ToList();
@@ -415,6 +432,11 @@ internal static class RaidTemperatureChecks
             (start + " Quer saber mais?", start + "\n\n" + note + "\n\nQuer saber mais?"),
             (start + " Se a lentidão continuar, reinicie o PC.", start + " Se a lentidão continuar, reinicie o PC.\n\n" + note),
             (start, start + "\n\n" + note),
+            // @qa: frase declarativa com "posso … que" não é oferta, e a resposta toda de fechamento não leva a nota para o topo.
+            ("Posso confirmar que os discos estão sem alertas informados pelo Windows.", "Posso confirmar que os discos estão sem alertas informados pelo Windows.\n\n" + note),
+            (start + " Posso afirmar que não há falhas.", start + " Posso afirmar que não há falhas.\n\n" + note),
+            ("Se quiser, posso consultar de novo: os discos estão sem alertas informados pelo Windows.", "Se quiser, posso consultar de novo: os discos estão sem alertas informados pelo Windows.\n\n" + note),
+            ("Se quiser, posso consultar de novo: os discos estão sem alertas informados pelo Windows. Quer?", "Se quiser, posso consultar de novo: os discos estão sem alertas informados pelo Windows.\n\n" + note + "\n\nQuer?"),
         ];
         var wrong = cases.Select(c => (c, Shown: disks.WithSensorFigures(c.Text).ReplaceLineEndings("\n"))).Where(x => x.Shown != x.c.Expected)
             .Select(x => x.c.Text.Replace("\n", "⏎") + " → " + x.Shown.Replace("\n", "⏎")).ToList();
@@ -448,12 +470,19 @@ internal static class RaidTemperatureChecks
         var tools = new FlowTools((name, _) => name == "get_health_report" ? WindowsTools.Ok(PcReport()) : throw new Exception("Ferramenta inesperada: " + name));
         var only = await Ask(store, actor, [User("qual a temperatura da CPU?")], tools, new CapturingModel([Text(Answer2), Text(Answer2), Text(Answer2)]));
         var general = await Ask(store, actor, [User("como está a saúde do PC e a temperatura?")], tools, new CapturingModel([Text(Answer2), Text(Answer2), Text(Answer2)]));
+        // @qa: uma ocorrência ATIVA continua no relatório do pedido só de temperatura (aqui, o T: com pouco espaço ainda presente).
+        var activeReport = PcReport().Replace("resolvida: o volume não está mais presente em 2 leituras seguidas", "persiste nas leituras atuais", StringComparison.Ordinal);
+        var activeTools = new FlowTools((name, _) => name == "get_health_report" ? WindowsTools.Ok(activeReport) : throw new Exception("Ferramenta inesperada: " + name));
+        var active = await Ask(store, actor, [User("qual a temperatura da CPU?")], activeTools, new CapturingModel([Text(Answer2), Text(Answer2), Text(Answer2)]));
         assert(only.Contains("Temperatura da CPU, pelo monitor de saúde: indisponível", StringComparison.Ordinal) && only.Contains("PawnIO", StringComparison.Ordinal)
             && !only.Contains("Espaço livre por volume", StringComparison.Ordinal) && !only.Contains("monitor de saúde não mostra ocorrência", StringComparison.Ordinal)
             && !only.Contains("Ocorrência", StringComparison.Ordinal) && !only.Contains("posso ajudar a verificar", StringComparison.Ordinal)
-            && general.Contains("Espaço livre por volume", StringComparison.Ordinal) && general.Contains("Temperatura da CPU, pelo monitor de saúde", StringComparison.Ordinal),
-            "#135 (PC 5b48461): no pedido só de temperatura, o relatório da 3ª recusa idêntica traz só a linha da temperatura do relatório de saúde; no pedido da saúde geral, o relatório inteiro"
-            + " · " + only.Replace("\n", " ") + " ‖ " + general.Replace("\n", " ")[..Math.Min(general.Length, 200)]);
+            && general.Contains("Espaço livre por volume", StringComparison.Ordinal) && general.Contains("Temperatura da CPU, pelo monitor de saúde", StringComparison.Ordinal)
+            && activeReport.Contains("persiste nas leituras atuais", StringComparison.Ordinal) && active.Contains("Ocorrência ativa no monitor de saúde", StringComparison.Ordinal)
+            && active.Contains("Pouco espaço no volume T:", StringComparison.Ordinal) && active.Contains("Temperatura da CPU, pelo monitor de saúde", StringComparison.Ordinal)
+            && !active.Contains("Espaço livre por volume", StringComparison.Ordinal),
+            "#135 (PC 5b48461): no pedido só de temperatura, o relatório da 3ª recusa idêntica traz só a linha da temperatura do relatório de saúde, mais a ocorrência ativa se houver; no pedido da saúde geral, o relatório inteiro"
+            + " · " + only.Replace("\n", " ") + " ‖ " + general.Replace("\n", " ")[..Math.Min(general.Length, 200)] + " ‖ " + active.Replace("\n", " "));
     }
 
     private static int Occurrences(string text, string part) => (text.Length - text.Replace(part, "", StringComparison.Ordinal).Length) / part.Length;
