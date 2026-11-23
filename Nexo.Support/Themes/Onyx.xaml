@@ -1,0 +1,25 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <!-- Tema Ônix (escuro, padrão) da #143. As chaves são as mesmas do Glacial.xaml; o Nexo.Checks confere chaves e contraste AA. -->
+ <SolidColorBrush x:Key="CanvasBg" Color="#0A0A0B"/>
+ <SolidColorBrush x:Key="SidebarBg" Color="#070708"/>
+ <SolidColorBrush x:Key="Surface" Color="#121214"/>
+ <SolidColorBrush x:Key="SurfaceMuted" Color="#18181B"/>
+ <SolidColorBrush x:Key="Stroke" Color="#26262B"/>
+ <SolidColorBrush x:Key="Ink" Color="#EDEDED"/>
+ <SolidColorBrush x:Key="Secondary" Color="#A6A6AE"/>
+ <SolidColorBrush x:Key="Subtle" Color="#8F8F98"/>
+ <SolidColorBrush x:Key="Accent" Color="#C9A54C"/>
+ <SolidColorBrush x:Key="AccentHover" Color="#E7C873"/>
+ <SolidColorBrush x:Key="AccentSoft" Color="#2B2414"/>
+ <SolidColorBrush x:Key="AccentBorder" Color="#5A4A24"/>
+ <SolidColorBrush x:Key="OnAccent" Color="#11100D"/>
+ <SolidColorBrush x:Key="Success" Color="#6FAF7B"/>
+ <SolidColorBrush x:Key="SuccessSoft" Color="#152017"/>
+ <SolidColorBrush x:Key="Warning" Color="#D9A441"/>
+ <SolidColorBrush x:Key="WarningSoft" Color="#2A2111"/>
+ <SolidColorBrush x:Key="Danger" Color="#E0705F"/>
+ <SolidColorBrush x:Key="UserSurface" Color="#1D1B16"/>
+ <SolidColorBrush x:Key="ScrollThumb" Color="#3A3A41"/>
+ <SolidColorBrush x:Key="LogoStrong" Color="#C7A364"/>
+ <SolidColorBrush x:Key="LogoSoft" Color="#957442"/>
+</ResourceDictionary>

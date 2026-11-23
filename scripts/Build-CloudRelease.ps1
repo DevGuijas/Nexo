@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$OllamaInstallerPath,
     [string]$OllamaExpectedSha256,
     [string]$OutputDirectory = 'artifacts/cloud-release',

@@ -1,0 +1,26 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <!-- Tema Glacial (claro) da #143. O azul da logo (#0E77B6) dá 4,44:1 sobre o fundo #F3F5F8, abaixo do AA; por isso o acento
+      dos textos e botões é o mesmo azul escurecido (#0B6AA6) e o azul original fica só na logo (LogoStrong). -->
+ <SolidColorBrush x:Key="CanvasBg" Color="#F3F5F8"/>
+ <SolidColorBrush x:Key="SidebarBg" Color="#E9EDF2"/>
+ <SolidColorBrush x:Key="Surface" Color="#FFFFFF"/>
+ <SolidColorBrush x:Key="SurfaceMuted" Color="#F6F8FA"/>
+ <SolidColorBrush x:Key="Stroke" Color="#DDE1E6"/>
+ <SolidColorBrush x:Key="Ink" Color="#1B1F24"/>
+ <SolidColorBrush x:Key="Secondary" Color="#4A5562"/>
+ <SolidColorBrush x:Key="Subtle" Color="#5B6470"/>
+ <SolidColorBrush x:Key="Accent" Color="#0B6AA6"/>
+ <SolidColorBrush x:Key="AccentHover" Color="#09598C"/>
+ <SolidColorBrush x:Key="AccentSoft" Color="#E3F0F9"/>
+ <SolidColorBrush x:Key="AccentBorder" Color="#A9CBE5"/>
+ <SolidColorBrush x:Key="OnAccent" Color="#FFFFFF"/>
+ <SolidColorBrush x:Key="Success" Color="#2F7042"/>
+ <SolidColorBrush x:Key="SuccessSoft" Color="#E8F3EB"/>
+ <SolidColorBrush x:Key="Warning" Color="#8A5A12"/>
+ <SolidColorBrush x:Key="WarningSoft" Color="#FBF1DF"/>
+ <SolidColorBrush x:Key="Danger" Color="#A83F36"/>
+ <SolidColorBrush x:Key="UserSurface" Color="#E8F1F8"/>
+ <SolidColorBrush x:Key="ScrollThumb" Color="#C3CAD3"/>
+ <SolidColorBrush x:Key="LogoStrong" Color="#0E77B6"/>
+ <SolidColorBrush x:Key="LogoSoft" Color="#BBDEF2"/>
+</ResourceDictionary>

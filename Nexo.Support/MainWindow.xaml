@@ -5,69 +5,72 @@
         Title="Nexo • Suporte inteligente"
         Width="1380" Height="900" MinWidth="980" MinHeight="680"
         WindowStartupLocation="CenterScreen">
- <Grid Background="{StaticResource CanvasBg}">
+ <Grid Background="{DynamicResource CanvasBg}">
   <Grid x:Name="Shell">
    <Grid.ColumnDefinitions>
     <ColumnDefinition Width="248"/>
     <ColumnDefinition Width="*"/>
    </Grid.ColumnDefinitions>
 
-   <Border Background="{StaticResource SidebarBg}" BorderBrush="{StaticResource Stroke}" BorderThickness="0,0,1,0">
+   <Border Background="{DynamicResource SidebarBg}" BorderBrush="{DynamicResource Stroke}" BorderThickness="0,0,1,0">
     <DockPanel Margin="18,24,18,18">
      <StackPanel DockPanel.Dock="Top" Margin="8,0,0,26">
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-       <Border Width="36" Height="36" CornerRadius="11" Background="{StaticResource AccentSoft}">
-        <Path Data="M12,1 L14.7,9.3 23,12 14.7,14.7 12,23 9.3,14.7 1,12 9.3,9.3 Z"
-              Fill="{StaticResource Accent}" Width="22" Height="22" Stretch="Uniform"
-              HorizontalAlignment="Center" VerticalAlignment="Center"/>
-       </Border>
-       <TextBlock Text="nexo" FontFamily="Segoe UI Variable Display, Segoe UI" FontWeight="Bold"
-                  FontSize="26" Foreground="{StaticResource Ink}" Margin="11,0,0,0" VerticalAlignment="Center"/>
+       <Viewbox x:Name="SidebarLogo" Width="36" Height="36" AutomationProperties.Name="Logo do Nexo">
+        <Canvas Width="24" Height="24">
+         <Path Data="{StaticResource LogoSoftLine}" Stroke="{DynamicResource LogoSoft}" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+         <Path Data="{StaticResource LogoSoftNodes}" Fill="{DynamicResource LogoSoft}"/>
+         <Path Data="{StaticResource LogoStrongBar}" Fill="{DynamicResource LogoStrong}"/>
+         <Path Data="{StaticResource LogoStrongNodes}" Fill="{DynamicResource LogoStrong}"/>
+        </Canvas>
+       </Viewbox>
+       <TextBlock Text="nexo" FontFamily="{StaticResource BodyFont}" FontWeight="SemiBold"
+                  FontSize="26" Foreground="{DynamicResource Ink}" Margin="11,0,0,0" VerticalAlignment="Center"/>
       </StackPanel>
-      <TextBlock Text="SUPORTE INTELIGENTE LOCAL" FontSize="10" FontWeight="SemiBold"
-                 Foreground="{StaticResource Subtle}" Margin="2,10,0,0"/>
+      <TextBlock Text="SUPORTE INTELIGENTE LOCAL" FontSize="11" FontWeight="SemiBold"
+                 Foreground="{DynamicResource Subtle}" Margin="2,10,0,0"/>
      </StackPanel>
 
      <Button x:Name="NewChatButton" DockPanel.Dock="Top" Click="NewChatClick"
              AutomationProperties.Name="Novo atendimento" Margin="0,0,0,28"
-             Background="{StaticResource Surface}" HorizontalContentAlignment="Left">
+             Background="{DynamicResource Surface}" HorizontalContentAlignment="Left">
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-       <Path Data="M12,5 L12,19 M5,12 L19,12" Stroke="{StaticResource Accent}" StrokeThickness="2"
+       <Path Data="M12,5 L12,19 M5,12 L19,12" Stroke="{DynamicResource Accent}" StrokeThickness="2"
              StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18" Stretch="Uniform"/>
        <TextBlock Text="Novo atendimento" Margin="11,0,0,0" VerticalAlignment="Center"/>
       </StackPanel>
      </Button>
 
      <StackPanel DockPanel.Dock="Bottom">
-      <Border Background="{StaticResource AccentSoft}" CornerRadius="12" Padding="13" Margin="0,0,0,20">
+      <Border Background="{DynamicResource AccentSoft}" CornerRadius="12" Padding="13" Margin="0,0,0,20">
        <StackPanel>
         <StackPanel Orientation="Horizontal">
-         <Ellipse Width="7" Height="7" Fill="{StaticResource Success}" VerticalAlignment="Center"/>
-         <TextBlock Text="Neste computador" Foreground="{StaticResource Accent}" FontWeight="SemiBold"
+         <Ellipse Width="7" Height="7" Fill="{DynamicResource Success}" VerticalAlignment="Center"/>
+         <TextBlock Text="Neste computador" Foreground="{DynamicResource Accent}" FontWeight="SemiBold"
                     FontSize="12" Margin="8,0,0,0"/>
         </StackPanel>
         <TextBlock Text="Seus dados e atendimentos ficam aqui." FontSize="11"
-                   Foreground="{StaticResource Secondary}" Margin="0,8,0,0"/>
+                   Foreground="{DynamicResource Secondary}" Margin="0,8,0,0"/>
        </StackPanel>
       </Border>
-      <Border BorderBrush="{StaticResource Stroke}" BorderThickness="0,1,0,0" Padding="4,17,0,0">
+      <Border BorderBrush="{DynamicResource Stroke}" BorderThickness="0,1,0,0" Padding="4,17,0,0">
        <StackPanel>
-        <TextBlock x:Name="SidebarName" Foreground="{StaticResource Ink}" FontWeight="SemiBold" FontSize="13"/>
-        <TextBlock x:Name="SidebarRole" Foreground="{StaticResource Subtle}" FontSize="11" Margin="0,3,0,0"/>
+        <TextBlock x:Name="SidebarName" Foreground="{DynamicResource Ink}" FontWeight="SemiBold" FontSize="13"/>
+        <TextBlock x:Name="SidebarRole" Foreground="{DynamicResource Subtle}" FontSize="11" Margin="0,3,0,0"/>
        </StackPanel>
       </Border>
      </StackPanel>
 
      <ScrollViewer x:Name="NavigationScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
       <StackPanel x:Name="Navigation">
-       <TextBlock Text="ÁREA DE TRABALHO" FontSize="10" FontWeight="SemiBold"
-                  Foreground="{StaticResource Subtle}" Margin="12,0,0,14"/>
+       <TextBlock Text="ÁREA DE TRABALHO" FontSize="11" FontWeight="SemiBold"
+                  Foreground="{DynamicResource Subtle}" Margin="12,0,0,14"/>
        <Button x:Name="ChatNav" Tag="chat" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Assistente"/></StackPanel></Button>
        <Button Tag="health" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Saúde do PC"/></StackPanel></Button>
        <Button Tag="history" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Atendimentos"/></StackPanel></Button>
        <Button Tag="tickets" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Encaminhamentos"/></StackPanel></Button>
        <Button Tag="tools" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Ferramentas"/></StackPanel></Button>
-       <TextBlock x:Name="AdminLabel" Text="ADMINISTRAÇÃO" FontSize="10" Foreground="{StaticResource Subtle}" Margin="12,28,0,14"/>
+       <TextBlock x:Name="AdminLabel" Text="ADMINISTRAÇÃO" FontSize="11" Foreground="{DynamicResource Subtle}" Margin="12,28,0,14"/>
        <Button x:Name="UsersNav" Tag="users" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Usuários e acessos"/></StackPanel></Button>
        <Button x:Name="SettingsNav" Tag="settings" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Configurações"/></StackPanel></Button>
        <Button x:Name="AuditNav" Tag="audit" Click="NavigateClick"><StackPanel><TextBlock Text="Registro de ações"/></StackPanel></Button>
@@ -79,15 +82,15 @@
    <Grid Grid.Column="1" Margin="38,22,38,22">
     <Grid x:Name="ChatView">
      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-     <Border Grid.Row="0" BorderBrush="{StaticResource Stroke}" BorderThickness="0,0,0,1" Padding="0,1,0,17">
+     <Border Grid.Row="0" BorderBrush="{DynamicResource Stroke}" BorderThickness="0,0,0,1" Padding="0,1,0,17">
       <DockPanel MaxWidth="960">
-       <Border DockPanel.Dock="Right" Background="{StaticResource AccentSoft}" CornerRadius="12" Padding="10,5">
-        <StackPanel Orientation="Horizontal"><Ellipse Width="6" Height="6" Fill="{StaticResource Success}" VerticalAlignment="Center"/>
-         <TextBlock Text="Local e privado" Foreground="{StaticResource Accent}" FontSize="11" FontWeight="SemiBold" Margin="7,0,0,0"/>
+       <Border DockPanel.Dock="Right" Background="{DynamicResource AccentSoft}" CornerRadius="12" Padding="10,5">
+        <StackPanel Orientation="Horizontal"><Ellipse Width="6" Height="6" Fill="{DynamicResource Success}" VerticalAlignment="Center"/>
+         <TextBlock Text="Local e privado" Foreground="{DynamicResource Accent}" FontSize="11" FontWeight="SemiBold" Margin="7,0,0,0"/>
         </StackPanel>
        </Border>
-       <StackPanel><TextBlock Text="ASSISTENTE" FontSize="10" FontWeight="SemiBold" Foreground="{StaticResource Subtle}"/>
-        <TextBlock Text="Seu espaço de suporte" FontSize="16" FontWeight="SemiBold" Foreground="{StaticResource Ink}" Margin="0,4,0,0"/>
+       <StackPanel><TextBlock Text="ASSISTENTE" FontSize="11" FontWeight="SemiBold" Foreground="{DynamicResource Subtle}"/>
+        <TextBlock Text="Seu espaço de suporte" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource Ink}" Margin="0,4,0,0"/>
        </StackPanel>
       </DockPanel>
      </Border>
@@ -101,10 +104,10 @@
        <Grid>
         <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         <ScrollViewer x:Name="ProgressScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-         <TextBlock x:Name="ProgressText" Foreground="{StaticResource Secondary}" LineHeight="22" Margin="0,0,7,0"/>
+         <TextBlock x:Name="ProgressText" Foreground="{DynamicResource Secondary}" LineHeight="22" Margin="0,0,7,0"/>
         </ScrollViewer>
-        <ProgressBar x:Name="BusyBar" Grid.Row="1" IsIndeterminate="True" Height="3" Foreground="{StaticResource Accent}"
-                     Background="{StaticResource AccentSoft}" Visibility="Collapsed" Margin="0,10,0,0"/>
+        <ProgressBar x:Name="BusyBar" Grid.Row="1" IsIndeterminate="True" Height="3" Foreground="{DynamicResource Accent}"
+                     Background="{DynamicResource AccentSoft}" Visibility="Collapsed" Margin="0,10,0,0"/>
         <Button x:Name="CancelButton" Grid.Row="2" Content="Cancelar verificação" Click="CancelClick"
                 Visibility="Collapsed" Margin="0,9,0,0"/>
        </Grid>
@@ -115,11 +118,11 @@
        <Button x:Name="TicketButton" Content="Encaminhar para a TI" Click="EscalateClick" Margin="0,0,0,12" FontSize="12"/>
       </WrapPanel>
 
-      <Border Background="{StaticResource Surface}" BorderBrush="{StaticResource Stroke}" BorderThickness="1" CornerRadius="14" Padding="12">
+      <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Stroke}" BorderThickness="1" CornerRadius="14" Padding="12">
        <DockPanel>
         <Button x:Name="SendButton" Style="{StaticResource Primary}" Click="SendClick" DockPanel.Dock="Right"
                 Width="44" Height="44" Padding="0" HorizontalContentAlignment="Center" AutomationProperties.Name="Enviar mensagem">
-         <Path Data="M12,19 L12,5 M6,11 L12,5 18,11" Stroke="White" StrokeThickness="2" StrokeStartLineCap="Round"
+         <Path Data="M12,19 L12,5 M6,11 L12,5 18,11" Stroke="{DynamicResource OnAccent}" StrokeThickness="2" StrokeStartLineCap="Round"
                StrokeEndLineCap="Round" StrokeLineJoin="Round" Width="19" Height="19" Stretch="Uniform"/>
         </Button>
         <TextBox x:Name="Composer" AutomationProperties.Name="Descreva seu problema" TextWrapping="Wrap" AcceptsReturn="True"
@@ -129,7 +132,7 @@
        </DockPanel>
       </Border>
       <TextBlock Text="Descreva o que aconteceu  ·  Shift + Enter envia  ·  Enter cria uma linha"
-                 Foreground="{StaticResource Subtle}" FontSize="11" HorizontalAlignment="Center" Margin="0,9,0,0"/>
+                 Foreground="{DynamicResource Subtle}" FontSize="11" HorizontalAlignment="Center" Margin="0,9,0,0"/>
      </StackPanel>
     </Grid>
 

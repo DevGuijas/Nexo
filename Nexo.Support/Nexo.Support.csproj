@@ -18,4 +18,5 @@
   <ItemGroup><None Update="ThirdParty/LibreHardwareMonitor/*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" /></ItemGroup>
   <ItemGroup><Using Remove="System.Drawing" /><Using Remove="System.Windows.Forms" /></ItemGroup>
   <ItemGroup><EmbeddedResource Include="Assets/nexo-tray.ico" LogicalName="Nexo.Tray.ico" /></ItemGroup>
+  <ItemGroup><Resource Include="Fonts/*.ttf" /><None Update="ThirdParty/Fonts/*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" /></ItemGroup>
 </Project>

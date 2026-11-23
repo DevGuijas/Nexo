@@ -14,3 +14,7 @@ indent_size = 2
 
 [*.{md,yml,yaml}]
 indent_size = 2
+
+# Scripts rodados por -File no PowerShell 5.1: com acento, só funcionam com BOM (os .ps1 embutidos do Nexo.Support ficam sem).
+[{scripts/*.ps1,Nexo.Checks/*.ps1}]
+charset = utf-8-bom
