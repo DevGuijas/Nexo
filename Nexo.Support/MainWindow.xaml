@@ -4,82 +4,115 @@
         Style="{StaticResource {x:Type Window}}"
         Title="Nexo • Suporte inteligente"
         Width="1380" Height="900" MinWidth="980" MinHeight="680"
-        WindowStartupLocation="CenterScreen">
+        ResizeMode="CanResize" WindowStartupLocation="CenterScreen">
+ <Window.Resources>
+  <!-- Botões da barra de título: 46 px de largura, como os do Windows, e clicáveis dentro da área de título do WindowChrome. -->
+  <Style x:Key="ChromeButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+   <Setter Property="Width" Value="46"/><Setter Property="Height" Value="43"/><Setter Property="Padding" Value="0"/>
+   <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/>
+   <Setter Property="HorizontalContentAlignment" Value="Center"/><Setter Property="VerticalAlignment" Value="Top"/>
+   <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True"/>
+  </Style>
+  <Style x:Key="ChromeCloseButton" TargetType="Button" BasedOn="{StaticResource ChromeButton}">
+   <Style.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource Danger}"/><Setter Property="BorderBrush" Value="{DynamicResource Danger}"/></Trigger></Style.Triggers>
+  </Style>
+ </Window.Resources>
+ <!-- #143, etapa 2: barra de título própria. O WindowChrome mantém arrastar, duplo clique, Win+Z, encaixe por arrasto e
+      redimensionamento pelas bordas; os botões da barra marcam IsHitTestVisibleInChrome para receber o clique. -->
+ <WindowChrome.WindowChrome>
+  <WindowChrome CaptionHeight="44" ResizeBorderThickness="6" GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False"/>
+ </WindowChrome.WindowChrome>
  <Grid Background="{DynamicResource CanvasBg}">
   <Grid x:Name="Shell">
    <Grid.ColumnDefinitions>
-    <ColumnDefinition Width="248"/>
+    <ColumnDefinition Width="Auto"/>
     <ColumnDefinition Width="*"/>
    </Grid.ColumnDefinitions>
+   <Grid.RowDefinitions>
+    <RowDefinition Height="44"/>
+    <RowDefinition Height="*"/>
+   </Grid.RowDefinitions>
 
-   <Border Background="{DynamicResource SidebarBg}" BorderBrush="{DynamicResource Stroke}" BorderThickness="0,0,1,0">
-    <DockPanel Margin="18,24,18,18">
-     <StackPanel DockPanel.Dock="Top" Margin="8,0,0,26">
-      <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-       <Viewbox x:Name="SidebarLogo" Width="36" Height="36" AutomationProperties.Name="Logo do Nexo">
-        <Canvas Width="24" Height="24">
-         <Path Data="{StaticResource LogoSoftLine}" Stroke="{DynamicResource LogoSoft}" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
-         <Path Data="{StaticResource LogoSoftNodes}" Fill="{DynamicResource LogoSoft}"/>
-         <Path Data="{StaticResource LogoStrongBar}" Fill="{DynamicResource LogoStrong}"/>
-         <Path Data="{StaticResource LogoStrongNodes}" Fill="{DynamicResource LogoStrong}"/>
-        </Canvas>
-       </Viewbox>
-       <TextBlock Text="nexo" FontFamily="{StaticResource BodyFont}" FontWeight="SemiBold"
-                  FontSize="26" Foreground="{DynamicResource Ink}" Margin="11,0,0,0" VerticalAlignment="Center"/>
-      </StackPanel>
-      <TextBlock Text="SUPORTE INTELIGENTE LOCAL" FontSize="11" FontWeight="SemiBold"
-                 Foreground="{DynamicResource Subtle}" Margin="2,10,0,0"/>
+   <Border x:Name="Sidebar" Grid.RowSpan="2" Width="232" Background="{DynamicResource SidebarBg}" BorderBrush="{DynamicResource Stroke}" BorderThickness="0,0,1,0">
+    <DockPanel Margin="12,0,12,12">
+     <StackPanel x:Name="SidebarBrand" DockPanel.Dock="Top" Orientation="Horizontal" Height="56" Margin="10,0,0,8" VerticalAlignment="Center">
+      <Viewbox x:Name="SidebarLogo" Width="26" Height="26" VerticalAlignment="Center" AutomationProperties.Name="Logo do Nexo">
+       <Canvas Width="24" Height="24">
+        <Path Data="{StaticResource LogoSoftLine}" Stroke="{DynamicResource LogoSoft}" StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+        <Path Data="{StaticResource LogoSoftNodes}" Fill="{DynamicResource LogoSoft}"/>
+        <Path Data="{StaticResource LogoStrongBar}" Fill="{DynamicResource LogoStrong}"/>
+        <Path Data="{StaticResource LogoStrongNodes}" Fill="{DynamicResource LogoStrong}"/>
+       </Canvas>
+      </Viewbox>
+      <TextBlock x:Name="SidebarWordmark" Text="nexo" FontFamily="{StaticResource BodyFont}" FontWeight="SemiBold"
+                 FontSize="22" Foreground="{DynamicResource Ink}" Margin="10,0,0,2" VerticalAlignment="Center"/>
      </StackPanel>
 
-     <Button x:Name="NewChatButton" DockPanel.Dock="Top" Click="NewChatClick"
-             AutomationProperties.Name="Novo atendimento" Margin="0,0,0,28"
+     <Button x:Name="NewChatButton" DockPanel.Dock="Top" Click="NewChatClick" ToolTip="Novo atendimento"
+             AutomationProperties.Name="Novo atendimento" Margin="0,0,0,20" Padding="12,10"
              Background="{DynamicResource Surface}" HorizontalContentAlignment="Left">
       <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
        <Path Data="M12,5 L12,19 M5,12 L19,12" Stroke="{DynamicResource Accent}" StrokeThickness="2"
              StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="18" Height="18" Stretch="Uniform"/>
-       <TextBlock Text="Novo atendimento" Margin="11,0,0,0" VerticalAlignment="Center"/>
+       <TextBlock x:Name="NewChatLabel" Text="Novo atendimento" Margin="11,0,0,0" VerticalAlignment="Center" TextWrapping="NoWrap"/>
       </StackPanel>
      </Button>
 
      <StackPanel DockPanel.Dock="Bottom">
-      <Border Background="{DynamicResource AccentSoft}" CornerRadius="12" Padding="13" Margin="0,0,0,20">
+      <Border x:Name="SidebarIdentity" BorderBrush="{DynamicResource Stroke}" BorderThickness="0,1,0,0" Padding="6,14,0,10">
        <StackPanel>
-        <StackPanel Orientation="Horizontal">
-         <Ellipse Width="7" Height="7" Fill="{DynamicResource Success}" VerticalAlignment="Center"/>
-         <TextBlock Text="Neste computador" Foreground="{DynamicResource Accent}" FontWeight="SemiBold"
-                    FontSize="12" Margin="8,0,0,0"/>
-        </StackPanel>
-        <TextBlock Text="Seus dados e atendimentos ficam aqui." FontSize="11"
-                   Foreground="{DynamicResource Secondary}" Margin="0,8,0,0"/>
-       </StackPanel>
-      </Border>
-      <Border BorderBrush="{DynamicResource Stroke}" BorderThickness="0,1,0,0" Padding="4,17,0,0">
-       <StackPanel>
-        <TextBlock x:Name="SidebarName" Foreground="{DynamicResource Ink}" FontWeight="SemiBold" FontSize="13"/>
+        <TextBlock x:Name="SidebarName" Foreground="{DynamicResource Ink}" FontWeight="SemiBold" FontSize="13" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
         <TextBlock x:Name="SidebarRole" Foreground="{DynamicResource Subtle}" FontSize="11" Margin="0,3,0,0"/>
        </StackPanel>
       </Border>
+      <Button x:Name="SidebarToggle" Style="{StaticResource NavigationButton}" Click="SidebarToggleClick"
+              AutomationProperties.Name="Recolher a barra lateral" ToolTip="Recolher a barra lateral"/>
      </StackPanel>
 
      <ScrollViewer x:Name="NavigationScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
       <StackPanel x:Name="Navigation">
-       <TextBlock Text="ÁREA DE TRABALHO" FontSize="11" FontWeight="SemiBold"
-                  Foreground="{DynamicResource Subtle}" Margin="12,0,0,14"/>
-       <Button x:Name="ChatNav" Tag="chat" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Assistente"/></StackPanel></Button>
-       <Button Tag="health" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Saúde do PC"/></StackPanel></Button>
-       <Button Tag="history" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Atendimentos"/></StackPanel></Button>
-       <Button Tag="tickets" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Encaminhamentos"/></StackPanel></Button>
-       <Button Tag="tools" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Ferramentas"/></StackPanel></Button>
-       <TextBlock x:Name="AdminLabel" Text="ADMINISTRAÇÃO" FontSize="11" Foreground="{DynamicResource Subtle}" Margin="12,28,0,14"/>
-       <Button x:Name="UsersNav" Tag="users" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Usuários e acessos"/></StackPanel></Button>
-       <Button x:Name="SettingsNav" Tag="settings" Click="NavigateClick" Margin="0,0,0,4"><StackPanel><TextBlock Text="Configurações"/></StackPanel></Button>
-       <Button x:Name="AuditNav" Tag="audit" Click="NavigateClick"><StackPanel><TextBlock Text="Registro de ações"/></StackPanel></Button>
+       <TextBlock x:Name="WorkLabel" Text="ÁREA DE TRABALHO" FontSize="11" FontWeight="SemiBold"
+                  Foreground="{DynamicResource Subtle}" Margin="12,0,0,12" TextWrapping="NoWrap"/>
+       <Button x:Name="HomeNav" Tag="home" Click="NavigateClick" Margin="0,0,0,4" AutomationProperties.Name="Início"><StackPanel><TextBlock Text="Início"/></StackPanel></Button>
+       <Button x:Name="ChatNav" Tag="chat" Click="NavigateClick" Margin="0,0,0,4" AutomationProperties.Name="Assistente"><StackPanel><TextBlock Text="Assistente"/></StackPanel></Button>
+       <Button Tag="health" Click="NavigateClick" Margin="0,0,0,4" AutomationProperties.Name="Saúde do PC"><StackPanel><TextBlock Text="Saúde do PC"/></StackPanel></Button>
+       <Button Tag="history" Click="NavigateClick" Margin="0,0,0,4" AutomationProperties.Name="Atendimentos"><StackPanel><TextBlock Text="Atendimentos"/></StackPanel></Button>
+       <Button Tag="tickets" Click="NavigateClick" Margin="0,0,0,4" AutomationProperties.Name="Encaminhamentos"><StackPanel><TextBlock Text="Encaminhamentos"/></StackPanel></Button>
+       <Button Tag="tools" Click="NavigateClick" Margin="0,0,0,4" AutomationProperties.Name="Ferramentas"><StackPanel><TextBlock Text="Ferramentas"/></StackPanel></Button>
+       <TextBlock x:Name="AdminLabel" Text="ADMINISTRAÇÃO" FontSize="11" Foreground="{DynamicResource Subtle}" Margin="12,24,0,12"/>
+       <Button x:Name="UsersNav" Tag="users" Click="NavigateClick" Margin="0,0,0,4" AutomationProperties.Name="Usuários e acessos"><StackPanel><TextBlock Text="Usuários e acessos"/></StackPanel></Button>
+       <Button x:Name="SettingsNav" Tag="settings" Click="NavigateClick" Margin="0,0,0,4" AutomationProperties.Name="Configurações"><StackPanel><TextBlock Text="Configurações"/></StackPanel></Button>
+       <Button x:Name="AuditNav" Tag="audit" Click="NavigateClick" AutomationProperties.Name="Registro de ações"><StackPanel><TextBlock Text="Registro de ações"/></StackPanel></Button>
       </StackPanel>
      </ScrollViewer>
     </DockPanel>
    </Border>
 
-   <Grid Grid.Column="1" Margin="38,22,38,22">
+   <Border x:Name="TitleBar" Grid.Column="1" Background="{DynamicResource CanvasBg}" BorderBrush="{DynamicResource Stroke}" BorderThickness="0,0,0,1">
+    <DockPanel>
+     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+      <Button x:Name="MinimizeButton" Style="{StaticResource ChromeButton}" Click="MinimizeClick" AutomationProperties.Name="Minimizar" ToolTip="Minimizar"/>
+      <Button x:Name="MaximizeButton" Style="{StaticResource ChromeButton}" Click="MaximizeClick" AutomationProperties.Name="Maximizar" ToolTip="Maximizar"/>
+      <Button x:Name="CloseButton" Style="{StaticResource ChromeCloseButton}" Click="CloseClick" AutomationProperties.Name="Fechar" ToolTip="Fechar"/>
+     </StackPanel>
+     <Button x:Name="ThemeButton" DockPanel.Dock="Right" Click="ThemeClick" Margin="0,6,12,6" Padding="12,0" FontSize="12"
+             WindowChrome.IsHitTestVisibleInChrome="True" AutomationProperties.Name="Trocar o tema"/>
+     <Button x:Name="PaletteButton" DockPanel.Dock="Left" Click="PaletteClick" Margin="16,6,0,6" Padding="12,0" Width="300"
+             HorizontalAlignment="Left" HorizontalContentAlignment="Stretch" FontWeight="Normal"
+             WindowChrome.IsHitTestVisibleInChrome="True" AutomationProperties.Name="Buscar telas e ações (Ctrl+K)" ToolTip="Buscar telas e ações (Ctrl+K)">
+      <DockPanel>
+       <TextBlock DockPanel.Dock="Right" Text="Ctrl K" FontFamily="{StaticResource MonoFont}" FontSize="11" Foreground="{DynamicResource Subtle}" VerticalAlignment="Center"/>
+       <Path Data="M10.5,17 A6.5,6.5 0 1 0 10.5,4 A6.5,6.5 0 1 0 10.5,17 Z M15.5,15.5 L20,20" Stroke="{DynamicResource Secondary}" StrokeThickness="1.8"
+             StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="15" Height="15" Stretch="Uniform" VerticalAlignment="Center"/>
+       <TextBlock Text="Buscar telas e ações" FontSize="13" Foreground="{DynamicResource Secondary}" Margin="9,0,0,0" VerticalAlignment="Center" TextWrapping="NoWrap"/>
+      </DockPanel>
+     </Button>
+     <TextBlock x:Name="TitleText" FontSize="12" Foreground="{DynamicResource Subtle}" Margin="16,0,16,0" VerticalAlignment="Center"
+                TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" HorizontalAlignment="Right"/>
+    </DockPanel>
+   </Border>
+
+   <Grid x:Name="ContentArea" Grid.Column="1" Grid.Row="1" Margin="38,22,38,22">
     <Grid x:Name="ChatView">
      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
      <Border Grid.Row="0" BorderBrush="{DynamicResource Stroke}" BorderThickness="0,0,0,1" Padding="0,1,0,17">
@@ -141,5 +174,7 @@
     </ScrollViewer>
    </Grid>
   </Grid>
+  <Border x:Name="WindowFrame" BorderBrush="{DynamicResource Stroke}" BorderThickness="1" IsHitTestVisible="False"/>
+  <Grid x:Name="PaletteHost" Visibility="Collapsed" KeyboardNavigation.TabNavigation="Cycle" KeyboardNavigation.DirectionalNavigation="Cycle"/>
  </Grid>
 </Window>

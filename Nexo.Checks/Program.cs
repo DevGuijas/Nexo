@@ -42,6 +42,7 @@ if (args.Contains("--raid-temperature"))
 if (args.Contains("--theme"))
 {
     ThemeChecks.Run(Assert);
+    ShellChecks.Run(Assert);
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
@@ -306,6 +307,7 @@ try
     await RaidTemperatureChecks.Run(store, admin, Assert);
     await ClosedOccurrenceChecks.Run(store, admin, Assert);
     ThemeChecks.Run(Assert);
+    ShellChecks.Run(Assert);
     LiveMetricsChecks.Run(Assert);
     await NetworkRecoveryChecks.Run(Assert);
     await SecurityChecks.Run(store, admin, Assert);
