@@ -59,13 +59,30 @@ public sealed class LiveMetricsSampler
     private TimeSpan? lastProcessCpu;
     private DateTimeOffset? lastTime;
     private DateTimeOffset? pausedAt;
+    // O PDH calcula a taxa entre a coleta anterior e a atual. Depois de uma pausa longa, a 1ª coleta seria a média do tempo
+    // parado (validação no PC, fa1c668: "gravação 550,1 KB/s" logo ao restaurar, enquanto CPU e rede mostravam "medindo…").
+    // Essa coleta é descartada, e o disco espera a seguinte, como as outras métricas. Vale também para a 1ª coleta de um amostrador
+    // novo: a fonte do Windows abre a consulta com uma coleta e a seguinte vem logo depois, e o intervalo curto dá um tempo ativo
+    // falso (prints da #143, 746d023: "95% ativo" e "100% ativo" com "Leitura 0 B/s" na 1ª leitura, com CPU e rede em "medindo…").
+    private bool diskStale = true;
     private readonly Queue<double?>[] history = [new(), new(), new(), new()];
     // A amostra roda fora da thread da interface; pausa, retomada e histórico vêm da interface.
     private readonly object sync = new();
 
     public LiveMetricsSampler(ILiveMetricsSource source) => this.source = source;
 
+    /// <summary>
+    /// Se o painel deve ler agora: carregado, ele mesmo visível (não basta a janela: na página Assistente a MainWindow só recolhe a
+    /// área das páginas e o painel continua carregado — validação no PC, fa1c668), com a janela visível e não minimizada.
+    /// </summary>
+    public static bool ShouldRun(bool loaded, bool panelVisible, bool windowVisible, bool windowMinimized) =>
+        loaded && panelVisible && windowVisible && !windowMinimized;
+
     public bool Paused { get { lock (sync) return pausedAt != null; } }
+    /// <summary>Sem amostra anterior (amostrador novo ou zerado por pausa longa): o painel pede uma leitura logo ao retomar, para
+    /// sair do "medindo…" um segundo antes. Depois de uma pausa curta (a tela recriada pelo monitor), não: a leitura extra cairia
+    /// num intervalo arbitrário e curto entre duas do temporizador.</summary>
+    public bool NeedsBaseline { get { lock (sync) return lastTime == null; } }
     public IReadOnlyList<double?> CpuHistory => History(0);
     public IReadOnlyList<double?> MemoryHistory => History(1);
     public IReadOnlyList<double?> DiskHistory => History(2);
@@ -90,6 +107,7 @@ public sealed class LiveMetricsSampler
     private void ResetLocked()
     {
         lastCpu = null; lastAdapters = null; lastProcessCpu = null; lastTime = null;
+        diskStale = true;
         foreach (var queue in history) queue.Clear();
     }
 
@@ -146,6 +164,11 @@ public sealed class LiveMetricsSampler
         DiskCounters counters;
         try { counters = source.ReadDisk(); }
         catch (Exception ex) { return (LiveMetric.Unavailable(ex.Message), null, null); }
+        if (diskStale)
+        {
+            diskStale = false;
+            if (counters.Status == LiveStatus.Ok) return (LiveMetric.Waiting, null, null);
+        }
         return counters.Status switch
         {
             LiveStatus.Ok when double.IsFinite(counters.IdlePercent) && double.IsFinite(counters.ReadBytesPerSecond) && double.IsFinite(counters.WriteBytesPerSecond) =>
