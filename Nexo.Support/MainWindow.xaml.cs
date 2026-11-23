@@ -1382,9 +1382,11 @@ public partial class MainWindow : Window
         panel.Children.Add(Text("A IA escolhe ferramentas, consulta o Windows, solicita as alterações necessárias e verifica os resultados. O modelo recebe o histórico recente e as saídas das ferramentas no serviço local 127.0.0.1:11434.", 14, "Secondary"));
         var enabled = Check(panel, "Usar agente IA para conduzir os atendimentos", store.Data.AiEnabled); var model = Field(panel, "Modelo com suporte a ferramentas", store.Data.Model, mono: true);
         panel.Children.Add(Text("Dispositivos, Bluetooth, áudio, câmera, impressoras, IP, DNS, serviços, processos, logs e drivers do Windows Update. Alterações no Windows continuam exigindo autorização; operações elevadas também passam pelo UAC.", 13, "Secondary"));
-        var save = Action("Salvar configuração", (_, _) => Guard(() => { store.Require(user, a => a.Id == user.Id); if (enabled.IsChecked == true && string.IsNullOrWhiteSpace(model.Text)) throw new InvalidOperationException("Informe o nome do modelo instalado."); var previous = (store.Data.Model, store.Data.AiEnabled); store.Commit(user, "Configuração de IA atualizada", () => { store.Data.Model = model.Text.Trim(); store.Data.AiEnabled = enabled.IsChecked == true; }, () => { store.Data.Model = previous.Model; store.Data.AiEnabled = previous.AiEnabled; }); RefreshIdentity(); MessageBox.Show(this, "Configuração salva. O agente será utilizado no próximo atendimento."); }), true); save.Margin = new Thickness(0, 22, 0, 0); panel.Children.Add(save);
-        var connectionStatus = Text("", 13, "Accent");
-        panel.Children.Add(Action("Verificar modelo local", async (_, _) =>
+        var save = Action("Salvar configuração", (_, _) => Guard(() => { store.Require(user, a => a.Id == user.Id); if (enabled.IsChecked == true && string.IsNullOrWhiteSpace(model.Text)) throw new InvalidOperationException("Informe o nome do modelo instalado."); var previous = (store.Data.Model, store.Data.AiEnabled); store.Commit(user, "Configuração de IA atualizada", () => { store.Data.Model = model.Text.Trim(); store.Data.AiEnabled = enabled.IsChecked == true; }, () => { store.Data.Model = previous.Model; store.Data.AiEnabled = previous.AiEnabled; }); RefreshIdentity(); MessageBox.Show(this, "Configuração salva. O agente será utilizado no próximo atendimento."); }), true);
+        // #143: Salvar (primário) e Verificar (secundário) lado a lado, com os 10 px de margem direita do Action entre eles.
+        var agentActions = new WrapPanel { Margin = new Thickness(0, 22, 0, 0) }; agentActions.Children.Add(save); panel.Children.Add(agentActions);
+        var connectionStatus = Text("", 13, "Accent"); connectionStatus.Margin = new Thickness(0, 8, 0, 0);
+        agentActions.Children.Add(Action("Verificar modelo local", async (_, _) =>
         {
             try
             {
