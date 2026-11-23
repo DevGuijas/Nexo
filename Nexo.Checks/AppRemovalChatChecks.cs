@@ -32,6 +32,7 @@ internal static class AppRemovalChatChecks
             await SymptomKeepsNextStep(store, actor, assert);
             await MixedAnswerGetsPath(store, actor, assert);
             await NoPathWithoutRemoval(store, actor, assert);
+            await QaCases(store, actor, assert);
         }
         finally { store.Data.AiEnabled = previousAi; System.Globalization.CultureInfo.CurrentCulture = previousCulture; }
     }
@@ -236,6 +237,48 @@ internal static class AppRemovalChatChecks
         var path = answer.IndexOf(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal);
         assert(model.Consumed && tools.Calls.Contains("get_health_report") && next >= 0 && path > next && !answer.Contains("A IA repetiu", StringComparison.Ordinal),
             "#127 (@qa): \"meu pc ta lento, remove os apps inúteis\" consulta a saúde e termina com o próximo passo do sintoma e o caminho do cartão · " + answer.Replace("\n", " "));
+    }
+
+    // @qa (653d30d): a resposta sem o modelo vale só para o pedido sem sintoma nem pergunta de outro assunto; a conversa continua
+    // com o modelo no turno seguinte; a linha do cartão entra depois da linha do Armazenamento e antes da pergunta final.
+    private static async Task QaCases(Store store, Account actor, Action<bool, string> assert)
+    {
+        var routing = new List<string>();
+        // Pedido de remoção com sintoma: investiga o sintoma (tópico inicial), não recebe o texto pronto.
+        if (!SupportIntake.AsksAppRemoval("remove os apps inúteis, meu som parou") || SupportIntake.InitialTopic("remove os apps inúteis, meu som parou") != "audio")
+            routing.Add("remove os apps inúteis, meu som parou");
+        // App que trava e pergunta sobre um programa pelo nome (sem "app"/"programa") seguem o fluxo normal, com o modelo.
+        foreach (var text in new[] { "como remover o app que trava?", "posso remover o OneDrive?", "ok, e o que eu removo?" })
+            if (SupportIntake.AsksAppRemoval(text)) routing.Add(text);
+
+        const string followUp = "Você escolhe os itens no cartão “Apps pré-instalados e ajustes do Windows”, no menu Ferramentas.";
+        var model = new CapturingModel([Text(followUp)]);
+        using var http = new HttpClient(model);
+        var conversation = new Conversation
+        {
+            UserId = actor.Id,
+            Entries =
+            [
+                new Entry { Role = "user", Text = "remove os apps inúteis do windows pra mim" },
+                new Entry { Role = "assistant", Text = AgentProtocol.AppRemovalGuidance },
+                new Entry { Role = "user", Text = "ok, e o que eu removo?" },
+            ],
+        };
+        var answer = await new AgentService(store, new FlowTools(), http).Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None);
+        var followed = model.Consumed && answer.Contains(followUp, StringComparison.Ordinal) && !answer.Contains("indique", StringComparison.Ordinal);
+
+        var storage = "O C: tem 5% livre. " + InvestigationEvidence.StorageGuidance + "\n\nQuer que eu consulte de novo?";
+        var both = InvestigationEvidence.WithAppRemovalGuidance(storage);
+        var s = both.IndexOf(InvestigationEvidence.StorageGuidance, StringComparison.Ordinal);
+        var a = both.IndexOf(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal);
+        var q = both.IndexOf("Quer que eu consulte", StringComparison.Ordinal);
+        var ordered = s >= 0 && a > s && q > a && both.IndexOf(InvestigationEvidence.StorageGuidance, s + 1, StringComparison.Ordinal) < 0
+            && InvestigationEvidence.WithAppRemovalGuidance(both) == both;
+
+        assert(routing.Count == 0 && followed && ordered,
+            "#127 (@qa 653d30d): pedido com sintoma investiga o sintoma; app que trava, OneDrive pelo nome e a continuação vão ao modelo; a linha do cartão vem depois do Armazenamento e antes da pergunta, sem duplicar"
+            + (routing.Count > 0 ? " · roteadas errado: " + string.Join(" | ", routing) : "") + (followed ? "" : " · continuação: " + answer.ReplaceLineEndings(" "))
+            + (ordered ? "" : " · ordem: " + both.ReplaceLineEndings(" ")));
     }
 
     private static async Task<string> Ask(Store store, Account actor, string request, CapturingModel model)
