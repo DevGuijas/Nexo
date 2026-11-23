@@ -74,8 +74,9 @@ internal static class PageLayoutChecks
         assert(tickets.Contains("Nenhum chamado é enviado automaticamente") && tickets.Contains("Exportar relatório .txt") && !Regex.IsMatch(tickets, "(?i)glpi|jira|enviar chamado"),
             "#143: Encaminhamentos é o relatório local exportável, sem envio a ferramenta de chamados");
         var tools = Method(window, "private void Tools()");
-        assert(Regex.Matches(tools, @"ToolCard\(\d+,").Count == 2 && tools.Contains("officeCard") && tools.Contains("optimizeCard"),
-            "#143: os cartões numerados de Ferramentas são só as ferramentas da própria tela");
+        assert(Regex.Matches(tools, @"ToolCard\(\d+,").Count == 3 && Regex.IsMatch(tools, @"ToolCard\(1, [^;]*officeCard\)") && Regex.IsMatch(tools, @"ToolCard\(2, [^;]*optimizeCard\)")
+            && Regex.IsMatch(tools, @"ToolCard\(3, ""[^""]+"", ""Apps pré-instalados e ajustes do Windows"", [^;]*debloatCard\)") && tools.Contains("var debloatCard = Card(DebloatCard());"),
+            "#143: os cartões numerados de Ferramentas são só as ferramentas da própria tela, com o de apps e ajustes (#127) como o 3º");
 
         // 3. Estados da Saúde do PC e do Assistente.
         var health = Method(window, "private void Health()");
@@ -97,6 +98,14 @@ internal static class PageLayoutChecks
         assert(render.Contains("TurnFacts.Body(entry.Text)") && render.Contains("if (facts.Length > 0) body.Children.Add(FactsLine(facts));")
             && render.Contains("if (facts.Length > 0 && shownText.Length == 0) { shownText = facts; facts = \"\"; }") && render.Contains("QuickReplies.For(entry.Text)"),
             "#143: a linha de fatos (#73) ganha faixa própria e os atalhos continuam lendo o texto inteiro");
+        // A etapa que não é aviso (ex.: "Nenhum dispositivo encontrado", "Restaurado a seu pedido") não ganha o check verde de sucesso:
+        // o Describe só distingue aviso, e fora dele a etapa usa o escudo no acento, como antes da #143.
+        var toolEntry = Method(window, "private void RenderToolEntry(Entry entry)");
+        assert(toolEntry.Contains("var color = warning ? \"Warning\" : \"Accent\";") && toolEntry.Contains("Brush(warning ? \"WarningSoft\" : \"AccentSoft\")")
+            && toolEntry.Contains("UiIcons.Create(\"shield\", 11, Brush(color))") && !Regex.IsMatch(toolEntry, @"""Success(?:Soft)?""|""check""")
+            && !ToolResultPresentation.Describe("Identificando hardware e drivers instalados", "{\"success\":true,\"data\":{\"Devices\":[]}}").Warning
+            && ToolResultPresentation.Describe("Identificando hardware e drivers instalados", "{\"success\":true,\"data\":{\"Devices\":[]}}").State == "Nenhum dispositivo encontrado",
+            "#143: etapa sem aviso, como \"Nenhum dispositivo encontrado\" e \"Restaurado a seu pedido\", fica com o escudo no acento, sem o check verde de sucesso");
         var confirm = Method(window, "private Task<bool> ConfirmChange(ChangeRequest request, Action<Window>? onRendered)");
         assert(confirm.Contains("\"Estado atual:\"") && confirm.Contains("aviso do UAC") && confirm.Contains("detailLines.Where(line => !stateLines.Contains(line))"),
             "#143: o cartão de aprovação destaca o estado atual e avisa do UAC sem repetir o detalhe");

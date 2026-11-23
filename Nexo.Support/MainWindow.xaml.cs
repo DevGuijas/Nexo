@@ -726,7 +726,9 @@ public partial class MainWindow : Window
         var label = (separator >= 0 ? entry.Text[..separator] : entry.Text).TrimEnd('…');
         var raw = separator >= 0 ? entry.Text[(separator + 1)..] : "";
         var (state, explanation, warning) = ToolResultPresentation.Describe(label, raw);
-        var color = warning ? "Warning" : "Success";
+        // O Describe só separa aviso do resto: "Nenhum dispositivo encontrado" e "Restaurado a seu pedido" não são sucesso. Fora do
+        // aviso, a etapa mantém o escudo no acento de antes da #143; o check verde fica para o cartão de resultado.
+        var color = warning ? "Warning" : "Accent";
         var detail = new TextBox { Text = explanation, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, BorderThickness = new Thickness(0), Background = Brushes.Transparent,
             Padding = new Thickness(0), MaxHeight = 240, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, IsReadOnlyCaretVisible = false, FontSize = 13 };
         AutomationProperties.SetName(detail, "Detalhe da etapa " + label);
@@ -734,8 +736,8 @@ public partial class MainWindow : Window
         var title = new Grid();
         title.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         title.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        title.Children.Add(new Border { Width = 20, Height = 20, CornerRadius = new CornerRadius(10), Background = Brush(warning ? "WarningSoft" : "SuccessSoft"),
-            BorderBrush = Brush(color), BorderThickness = new Thickness(1), VerticalAlignment = VerticalAlignment.Top, Child = UiIcons.Create(warning ? "shield" : "check", 11, Brush(color)) });
+        title.Children.Add(new Border { Width = 20, Height = 20, CornerRadius = new CornerRadius(10), Background = Brush(warning ? "WarningSoft" : "AccentSoft"),
+            BorderBrush = Brush(color), BorderThickness = new Thickness(1), VerticalAlignment = VerticalAlignment.Top, Child = UiIcons.Create("shield", 11, Brush(color)) });
         var name = new TextBlock { Text = label + "  ·  " + state, Foreground = Brush(warning ? "Warning" : "Ink"), FontSize = 13, FontWeight = FontWeights.Medium,
             Margin = new Thickness(10, 1, 8, 0), TextWrapping = TextWrapping.Wrap };
         Grid.SetColumn(name, 1); title.Children.Add(name);
@@ -1137,9 +1139,10 @@ public partial class MainWindow : Window
         optimizePanel.Children.Add(optimizeActions);
         optimizePanel.Children.Add(Text("Se a etapa de disco já começou, o Nexo aguarda seu término para informar o resultado. A manutenção executada não é revertida pelo cancelamento.", 11, "Subtle"));
         var optimizeCard = Card(optimizePanel); PageContent.Children.Add(optimizeCard);
-        PageContent.Children.Add(Card(DebloatCard()));
+        var debloatCard = Card(DebloatCard()); PageContent.Children.Add(debloatCard);
         overview.Children.Add(ToolCard(1, "Instalação", "Instalar Office", "Office LTSC 2024 com o aviso de licença por volume.", "Microsoft · Office LTSC 2024", officeCard));
         overview.Children.Add(ToolCard(2, "Manutenção", "Otimizar PC", "Temporários antigos e manutenção nativa dos discos.", "Temporários · disco", optimizeCard));
+        overview.Children.Add(ToolCard(3, "Privacidade · aparência", "Apps pré-instalados e ajustes do Windows", "Apps que vêm com o Windows e ajustes, aplicados só depois da sua confirmação.", "Apps · serviços · ajustes", debloatCard));
         UpdateToolsView();
     }
     // Situação da ferramenta numa faixa própria, com o rótulo em mono.
@@ -1165,7 +1168,7 @@ public partial class MainWindow : Window
         hero.ClipToBounds = true;
         content.Children.Add(new Border { Background = Brush("SurfaceMuted"), CornerRadius = new CornerRadius(9, 9, 0, 0), Child = hero });
         var text = new StackPanel { Margin = new Thickness(14, 12, 14, 12) };
-        text.Children.Add(new TextBlock { Text = title, FontFamily = Font("DisplayFont"), FontWeight = FontWeights.SemiBold, FontSize = 22, Foreground = Brush("Ink") });
+        text.Children.Add(new TextBlock { Text = title, FontFamily = Font("DisplayFont"), FontWeight = FontWeights.SemiBold, FontSize = 22, Foreground = Brush("Ink"), TextWrapping = TextWrapping.Wrap });
         var about = Text(description, 13, "Secondary"); about.Margin = new Thickness(0, 4, 0, 10); text.Children.Add(about);
         var bottom = new DockPanel();
         var arrow = UiIcons.Create("arrow", 14); DockPanel.SetDock(arrow, Dock.Right); bottom.Children.Add(arrow);
@@ -1193,8 +1196,8 @@ public partial class MainWindow : Window
         panel.Children.Add(Text("Remove do seu usuário apps que vêm com o Windows e aplica ajustes de privacidade e de aparência. Primeiro o Nexo verifica o que existe neste PC e mostra cada item; nada muda antes de você clicar em Aplicar e confirmar.", 13, "Secondary"));
         panel.Children.Add(Text(DebloatPresentation.CardNotice, 12, "Secondary"));
         panel.Children.Add(Text(DebloatCatalog.Credit, 11, "Subtle"));
-        debloatProgressView = Text(debloatStatus, 12, "Secondary"); debloatProgressView.Margin = new Thickness(0, 12, 0, 10);
-        panel.Children.Add(debloatProgressView);
+        debloatProgressView = Text(debloatStatus, 13, "Ink");
+        panel.Children.Add(ToolStatus(debloatProgressView));
         debloatListView = new StackPanel();
         panel.Children.Add(debloatListView);
         RenderDebloatList();
