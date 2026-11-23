@@ -20,6 +20,7 @@ internal static class ShellChecks
         HomeContent(assert);
         HomeHealth(assert);
         Window(assert);
+        AppIcon(assert);
     }
 
     private static void Palette(Action<bool, string> assert)
@@ -242,6 +243,43 @@ internal static class ShellChecks
             "#143: o resultado da restauração de rede da abertura aparece no Assistente, não fica escondido atrás da Início");
         assert(shell.Contains("store.Data.SidebarCollapsed = collapsed;") && shell.Contains("catch { store.Data.SidebarCollapsed = stored;"),
             "#143: a lateral grava a preferência e desfaz a troca se a gravação falhar");
+    }
+
+    // Ícone do Nexo (#143): o .exe, o atalho, a janela e a bandeja usam o mesmo Assets/nexo.ico. Confere o csproj, o arquivo e a janela;
+    // a aparência na barra de tarefas é conferida no PC.
+    private static void AppIcon(Action<bool, string> assert)
+    {
+        var project = Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Project");
+        var csproj = XDocument.Parse(File.ReadAllText(Path.Combine(project, "Nexo.Support.csproj")));
+        string? Item(string kind) => csproj.Descendants(kind).Select(item => (string?)item.Attribute("Include")).FirstOrDefault(path => path?.Replace('\\', '/') == "Assets/nexo.ico");
+        var tray = csproj.Descendants("EmbeddedResource").FirstOrDefault(item => (string?)item.Attribute("LogicalName") == "Nexo.Tray.ico");
+        assert(csproj.Descendants("ApplicationIcon").Select(item => item.Value.Replace('\\', '/')).SingleOrDefault() == "Assets/nexo.ico"
+            && Item("Resource") != null && ((string?)tray?.Attribute("Include"))?.Replace('\\', '/') == "Assets/nexo.ico",
+            "#143: o csproj põe Assets/nexo.ico no executável (ApplicationIcon), como Resource da janela e como Nexo.Tray.ico da bandeja");
+
+        var ico = File.ReadAllBytes(Path.Combine(project, "nexo.ico"));
+        var count = ico.Length >= 6 ? BitConverter.ToUInt16(ico, 4) : 0;
+        var sizes = new List<int>(); var valid = ico.Length >= 6 && BitConverter.ToUInt16(ico, 0) == 0 && BitConverter.ToUInt16(ico, 2) == 1 && count > 0;
+        for (var i = 0; valid && i < count; i++)
+        {
+            var entry = 6 + 16 * i;
+            if (entry + 16 > ico.Length) { valid = false; break; }
+            var size = ico[entry] == 0 ? 256 : ico[entry];
+            var length = BitConverter.ToInt32(ico, entry + 8); var offset = BitConverter.ToInt32(ico, entry + 12);
+            if (ico[entry] != ico[entry + 1] || length <= 0 || offset < 6 + 16 * count || (long)offset + length > ico.Length) { valid = false; break; }
+            // Cada imagem é PNG (assinatura) ou DIB (BITMAPINFOHEADER de 40 bytes com a largura da entrada e altura dobrada).
+            var png = ico.AsSpan(offset, 8).SequenceEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A });
+            var dib = BitConverter.ToInt32(ico, offset) == 40 && BitConverter.ToInt32(ico, offset + 4) == size && BitConverter.ToInt32(ico, offset + 8) == size * 2;
+            valid &= png || dib; sizes.Add(size);
+        }
+        assert(valid && new[] { 16, 32, 48, 256 }.All(sizes.Contains) && sizes.Distinct().Count() == sizes.Count,
+            "#143: Assets/nexo.ico é um ICO válido com as entradas 16, 32, 48 e 256 (lidas: " + string.Join(", ", sizes) + ")");
+
+        var window = XDocument.Parse(Source("MainWindow.xaml")).Root!;
+        assert(((string?)window.Attribute("Icon"))?.EndsWith("/Assets/nexo.ico", StringComparison.Ordinal) == true
+            && Source("MainWindow.xaml.cs").Contains("Style = (Style)FindResource(typeof(Window)), Icon = Icon };")
+            && Source("MainWindow.xaml.cs").Contains("GetManifestResourceStream(\"Nexo.Tray.ico\")"),
+            "#143: a janela, o diálogo de confirmação e a bandeja usam o ícone do Nexo");
     }
 
     private static string Source(string name)

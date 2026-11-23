@@ -900,7 +900,7 @@ public partial class MainWindow : Window
     private Task<bool> ConfirmChange(ChangeRequest request) => ConfirmChange(request, null);
     private Task<bool> ConfirmChange(ChangeRequest request, Action<Window>? onRendered)
     {
-        var dialog = new Window { Owner = this, Title = request.Title, Width = 700, Height = 600, WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize, Style = (Style)FindResource(typeof(Window)) };
+        var dialog = new Window { Owner = this, Title = request.Title, Width = 700, Height = 600, WindowStartupLocation = WindowStartupLocation.CenterOwner, ResizeMode = ResizeMode.NoResize, Style = (Style)FindResource(typeof(Window)), Icon = Icon };
         AutomationProperties.SetName(dialog, "Confirmação de ação: " + request.Title);
         var panel = new DockPanel { Margin = new Thickness(25) };
         var header = new StackPanel { Margin = new Thickness(0, 0, 0, 16) };
