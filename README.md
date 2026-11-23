@@ -1,6 +1,6 @@
 # Nexo — agente de suporte para Windows
 
-Aplicativo C# / WPF com IA local que escolhe ferramentas do Windows, executa ações autorizadas, recebe os resultados e continua a investigação. O aplicativo abre direto no atendimento e usa a sessão atual do Windows.
+Aplicativo C# / WPF com IA local que escolhe ferramentas do Windows, executa ações autorizadas, recebe os resultados e continua a investigação. O aplicativo abre na tela **Início** (estado do computador, atalhos e atendimentos recentes), usa a sessão atual do Windows e busca telas e ações com **Ctrl+K**.
 
 O desenvolvimento acontece na branch `development`. Convenções de commits, testes, issues e arquivos que não devem ser enviados estão em [CONTRIBUTING.md](CONTRIBUTING.md).
 

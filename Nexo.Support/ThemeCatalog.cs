@@ -49,7 +49,7 @@ public static class ThemeCatalog
                 pairs.Add((text, background));
         foreach (var background in new[] { "CanvasBg", "SidebarBg", "Surface", "SurfaceMuted", "AccentSoft" }) pairs.Add(("Subtle", background));
         foreach (var background in new[] { "CanvasBg", "SidebarBg", "Surface", "SurfaceMuted", "AccentSoft", "UserSurface" }) pairs.Add(("Accent", background));
-        pairs.Add(("OnAccent", "Accent")); pairs.Add(("OnAccent", "AccentHover"));
+        pairs.Add(("OnAccent", "Accent")); pairs.Add(("OnAccent", "AccentHover")); pairs.Add(("OnAccent", "AccentPressed"));
         foreach (var (state, soft) in new[] { ("Success", "SuccessSoft"), ("Warning", "WarningSoft"), ("Danger", "Surface") })
             foreach (var background in new[] { "CanvasBg", "Surface", "SurfaceMuted", soft }.Distinct()) pairs.Add((state, background));
         return pairs;

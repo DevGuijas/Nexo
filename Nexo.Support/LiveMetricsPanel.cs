@@ -37,6 +37,8 @@ public sealed class LiveMetricsPanel : Border
         CornerRadius = new CornerRadius(12); Padding = new Thickness(18); Margin = new Thickness(0, 0, 0, 14);
         var panel = new StackPanel();
         var title = new TextBlock { Text = "Agora", FontSize = 16, FontWeight = FontWeights.SemiBold, Foreground = Resource("Ink") };
+        // #143: título do cartão em Barlow Condensed, como os das outras seções da Saúde do PC.
+        if (TryFindResource("DisplayFont") is FontFamily display) { title.FontFamily = display; title.FontSize = 21; }
         panel.Children.Add(title);
         var grid = new System.Windows.Controls.Primitives.UniformGrid { Columns = 4, Margin = new Thickness(0, 12, 0, 10) };
         cpu = new Tile("CPU", "performance"); memory = new Tile("Memória", "health"); disk = new Tile("Disco", "storage"); network = new Tile("Rede", "network");
@@ -183,7 +185,8 @@ public sealed class LiveMetricsPanel : Border
                 var x = ChartWidth * index / Math.Max(1, LiveMetricsSampler.HistoryCapacity - 1);
                 points.Add(new Point(x, ChartHeight - ChartHeight * Math.Clamp(sample / max, 0, 1)));
             }
-            line.Points = points;
+            // #143: com menos de 2 amostras não há linha; um ponto só aparecia solto na Memória, enquanto CPU e Disco não desenhavam nada.
+            line.Points = points.Count >= 2 ? points : new PointCollection();
         }
     }
 }

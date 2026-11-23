@@ -87,6 +87,8 @@ public sealed class Database
     public int AgentVersion { get; set; }
     // Tema da interface (#143): "onyx" (padrão) ou "glacial". Ausente num data.json antigo, fica no padrão.
     public string Theme { get; set; } = ThemeCatalog.Onyx;
+    // Barra lateral recolhida (#143), só ícones. Ausente num data.json antigo, abre expandida.
+    public bool SidebarCollapsed { get; set; }
 }
 public sealed record SupportMetrics(int Open, int Resolved, int Escalated, double? ResolutionRate, double? EscalationRate, double? AverageClosureMinutes)
 {
