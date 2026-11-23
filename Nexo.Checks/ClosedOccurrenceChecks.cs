@@ -68,6 +68,14 @@ internal static class ClosedOccurrenceChecks
             ("O espaço está normalizando?", null),
             ("O C: tem 77,7% de espaço livre.", null),
             ("A CPU está estabilizando em 12%.", null),
+            // @qa: o futuro inventado também é evolução; o verbo com objeto e o assunto depois da evolução não são.
+            ("O espaço do T: deve voltar ao normal.", InvestigationEvidence.ClosedTrendReason),
+            ("O espaço do T: vai se normalizar sozinho.", InvestigationEvidence.ClosedTrendReason),
+            ("O espaço do T: está aumentando a cada leitura.", InvestigationEvidence.ClosedTrendReason),
+            ("Manter espaço livre no disco tende a melhorar o desempenho.", null),
+            ("A limpeza do disco está melhorando o desempenho do PC.", null),
+            ("A conexão está caindo, mas o disco C: está sem alertas.", null),
+            ("A CPU está diminuindo o uso e a memória está em 40%.", null),
         ];
         var wrong = cases.Where(c => closed.ValidateStatement(c.Text, false) != c.Closed || plain.ValidateStatement(c.Text, false) != null)
             .Select(c => c.Text + " → " + closed.ValidateStatement(c.Text, false) + " / " + plain.ValidateStatement(c.Text, false)).ToArray();
@@ -107,6 +115,13 @@ internal static class ClosedOccurrenceChecks
             ("Recomendo fechar os programas que você não estiver usando.", null),
             (Answer1bAdvice, null),
             ("O Chrome está usando mais memória que os outros programas.", null),
+            // @qa: o aumento de memória como upgrade não é crescimento; "acumulando" e "memory leak" são.
+            ("Recomendo um aumento de memória para 16 GB.", null),
+            ("Um aumento de memória RAM para 16 GB ajudaria nos jogos.", null),
+            ("Considere um aumento de memória.", null),
+            ("O NexoMemTeste-toca apresenta aumento de memória.", InvestigationEvidence.ClosedMemoryReason),
+            ("Um processo vem acumulando memória.", InvestigationEvidence.ClosedMemoryReason),
+            ("Há um memory leak no sistema.", InvestigationEvidence.ClosedMemoryReason),
         ];
         var wrong = cases.Where(c => closed.ValidateStatement(c.Text, false) != c.Closed || systemOnly.ValidateStatement(c.Text, false) != c.Closed
                 || plain.ValidateStatement(c.Text, false) != null)
@@ -138,6 +153,10 @@ internal static class ClosedOccurrenceChecks
         var empty = Observed(PcReport(SystemClosed + ProcessClosed));
         empty.Observe("get_health_report", "h3", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok("Nenhuma amostra de saúde nas últimas 24 horas."));
         if (empty.ValidateStatement(MemorySentence, false) != null) wrong.Add("relatório novo sem amostra: " + empty.ValidateStatement(MemorySentence, false));
+        // @qa: depois de uma frase sobre os processos da consulta atual, "fechá-los" fala deles, não do crescimento encerrado.
+        const string Referent = "O crescimento de memória já foi resolvido. O chrome e o Nexo.Support são os que mais usam memória agora. Recomendo fechá-los.";
+        if (withProcesses.ValidateStatement(Referent, false) != null || Observed(PcReport(SystemClosed + ProcessClosed)).ValidateStatement(Referent, false) != InvestigationEvidence.ClosedMemoryReason)
+            wrong.Add("referente atual: " + withProcesses.ValidateStatement(Referent, false));
         const string Chrome = "O chrome está usando cada vez mais memória.";
         if (withProcesses.ValidateStatement(Chrome, false) != null || Observed(PcReport(SystemClosed + ProcessClosed)).ValidateStatement(Chrome, false) != InvestigationEvidence.ClosedMemoryReason)
             wrong.Add("consulta atual: " + withProcesses.ValidateStatement(Chrome, false));
@@ -155,6 +174,9 @@ internal static class ClosedOccurrenceChecks
             ("O NexoMemTeste-toca está consumindo memória, normalizando.", InvestigationEvidence.StaleProcessReason),
             ("O T: tinha pouco espaço, mas agora está normal.", null),
             ("O NexoMemTeste-toca consome memória, mas já está normal.", null),
+            // @qa: o passado de "normalizar" continua isentando, como "resolvido".
+            ("O pouco espaço no T: foi normalizado.", null),
+            ("O NexoMemTeste-toca está consumindo memória, mas foi normalizado.", null),
         ];
         var wrong = cases.Where(c => closed.ValidateStatement(c.Text, false) != c.Closed).Select(c => c.Text + " → " + closed.ValidateStatement(c.Text, false)).ToArray();
         assert(wrong.Length == 0, "#139, " + culture + ": \"normalizando\" não isenta a falta de espaço nem o consumo do processo encerrado; \"está normal\" continua isentando"

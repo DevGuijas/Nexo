@@ -637,7 +637,7 @@ public sealed class InvestigationEvidence
     // A frase só conta sem pergunta, condição, passado ou isenção de estado; "verificar se há…" é pergunta indireta, não condição,
     // e só é lida assim para o que ocupa espaço (#135): a leitura da falta de espaço não muda.
     private static bool ClosedDiskSentence(string sentence, Regex pattern, string conditionText) =>
-        !sentence.Contains('?') && !Regex.IsMatch(PoliteCondition.Replace(conditionText, " "), @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve|teve|tinha|tiveram)\b|\bnormal(?!iz)|\bja foi\b|\bantes\b")
+        !sentence.Contains('?') && !Regex.IsMatch(PoliteCondition.Replace(conditionText, " "), @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve|teve|tinha|tiveram)\b|\bnormal(?!iz(?:ando|a|am|ar|ara|arao)\b)|\bja foi\b|\bantes\b")
         && !StateExempt(sentence) && !NoNeed.IsMatch(sentence)
         && pattern.Matches(sentence).Any(match => !Negated(sentence, match) && !NotNeeded.IsMatch(sentence[(match.Index + match.Length)..])
             && !NeedlessBefore.IsMatch(sentence[..match.Index]));
@@ -682,7 +682,7 @@ public sealed class InvestigationEvidence
         var stale = staleProcesses.Select(AgentProtocol.Normalize).Where(name => !current.Contains(name)).ToArray();
         if (stale.Length == 0) return false;
         return Sentences(normalized).Any(sentence =>
-            !sentence.Contains('?') && !Regex.IsMatch(sentence, @"\b(se|quando|enquanto)\b|resolvid|\bnormal(?!iz)|\bja foi\b")
+            !sentence.Contains('?') && !Regex.IsMatch(sentence, @"\b(se|quando|enquanto)\b|resolvid|\bnormal(?!iz(?:ando|a|am|ar|ara|arao)\b)|\bja foi\b")
             && stale.Any(name => Regex.IsMatch(sentence, @"(?<![\w.-])" + Regex.Escape(name) + @"(?:\.exe)?(?![\w-]|\.\w)"))
             && PresentUse.Matches(sentence).Any(use => !Regex.Matches(sentence[..use.Index], @"[\p{L}\p{N}]+").TakeLast(3).Any(word => word.Value is "nao" or "nem" or "nunca")));
     }
@@ -697,12 +697,15 @@ public sealed class InvestigationEvidence
     // ("se", "quando", "caso"), a explicação genérica ("pode", "costuma"), o passado ("houve", "teve", "antes") e a frase que diz
     // que a ocorrência foi resolvida, está encerrada, é histórica ou não está ativa; também a que cita um processo de consulta
     // atual (get_processes ou ocorrência atual). O uso de memória medido agora ("a memória está em 40%") não é crescimento.
+    // Gate do @qa: "aumento de memória" como upgrade ("recomendo um aumento de memória para 16 GB", "aumento de memória RAM")
+    // não é crescimento; "vem acumulando memória" e "memory leak" são.
     internal const string ClosedMemoryReason = "A resposta apresenta como atual o crescimento de memória, mas o relatório de saúde só mostra essa ocorrência encerrada (resolvida ou com estado atual desconhecido) e nenhuma ocorrência de memória atual. Não recomende verificar nem encerrar esses processos: diga que essa ocorrência não está ativa ou cite só as leituras atuais.";
-    private static readonly Regex MemoryGrowth = new(@"\b(?:crescimento|aumento|vazamento)\s+(?:\w+\s+){0,3}?memoria\b"
+    private static readonly Regex MemoryGrowth = new(@"\b(?:crescimento|vazamento)\s+(?:\w+\s+){0,3}?memoria\b|\bmemory leaks?\b"
+        + @"|(?<!\b(?:recomend|consider|sugir|sugiro|sugest|instal|compr|adicion|upgrade)\w*\b[^.;!?]*)\baumento\s+(?:\w+\s+){0,3}?memoria\b(?!\s+(?:ram\b|para\b|de\s+\d|\d))"
         + @"|\bmemoria\s+(?:\w+\s+){0,2}?(?:em\s+crescimento|crescente|crescendo|aumentando|subindo)\b"
         + @"|\b(?:usando|consumindo|ocupando|alocando|segurando|usam|consomem)\s+cada\s+vez\s+mais\s+memoria\b"
         + @"|\b(?:usando|consumindo|ocupando|alocando|segurando|usam|consomem)\s+mais\s+memoria\b(?=[^.;!?]{0,40}\b(?:ao longo do tempo|com o tempo|gradualmente|progressivamente|continuamente|a cada (?:leitura|minuto|hora))\b)"
-        + @"|\b(?:aumentand\w*|crescend\w*|subind\w*)\s+(?:\w+\s+){0,3}?memoria\b");
+        + @"|\b(?:aumentand\w*|crescend\w*|subind\w*|acumuland\w*)\s+(?:\w+\s+){0,3}?memoria\b");
     private static readonly Regex ClosedState = new(@"resolvid|encerrad|historic|\bnao (?:esta|estao|e|sao)(?: mais)? (?:ativ\w*|atua(?:l|is))\b|\bja (?:foi|passou|terminou|parou)\b");
     private static readonly Regex PastOrGeneric = new(@"\b(?:se|quando|enquanto|caso|houve|teve|tinha|tiveram|estava|estavam|esteve|ficou|antes|anteriormente|pode|podem|poderia|costuma|costumam)\b");
     private static readonly Regex ActOnProcesses = new(@"\b(?:verifi\w*|confir[am]\w*|confer\w*|chec\w*|cheque|monitor(?:e|em|ar|ando)\b|acompanh\w*|observ\w*|analis\w*|investig\w*|revis\w*|encerr\w*|fech\w*|finaliz\w*|reinici\w*|desinstal\w*)"
@@ -719,6 +722,8 @@ public sealed class InvestigationEvidence
             var free = sentence.Contains('?') || PastOrGeneric.IsMatch(IndirectQuestion.Replace(sentence, " ")) || current.Any(name => Cites(sentence, name));
             if (growth.Length > 0 && !free && !ClosedState.IsMatch(sentence)) return true;
             if (growthSeen && !free && ActOnProcesses.Matches(sentence).Any(match => !Negated(sentence, match))) return true;
+            // Uma frase sobre processo de consulta atual troca o referente de "esses processos" e "-los" (@qa).
+            if (growth.Length == 0 && current.Any(name => Cites(sentence, name))) growthSeen = false;
             growthSeen |= growth.Length > 0;
         }
         return false;
@@ -730,10 +735,16 @@ public sealed class InvestigationEvidence
     // ou a memória só em ocorrência encerrada, a frase sobre esse assunto que diz que ele evolui agora ("está normalizando",
     // "vem melhorando", "continua diminuindo", "em recuperação") é recusada, mesmo com "resolvida" na frase. O passado ("voltou
     // ao normal", "já foi resolvida"), a negação, a pergunta e a condição ("se o espaço continuar diminuindo") passam.
+    // Gate do @qa: o futuro inventado ("deve voltar ao normal", "vai se normalizar") também conta; o verbo com objeto ("tende a
+    // melhorar o desempenho") não é evolução, e o assunto precisa vir antes dela na frase. Só o presente, o gerúndio e o futuro
+    // de "normalizar" deixam de isentar nas travas do disco e do processo encerrados: "foi normalizado" isenta como "resolvido".
     internal const string ClosedTrendReason = "A resposta diz como uma ocorrência encerrada evolui agora (\"normalizando\", \"melhorando\", \"diminuindo\"), mas o relatório de saúde só mostra que ela está encerrada (resolvida ou com estado atual desconhecido), sem leitura dessa evolução. Diga apenas que a ocorrência não está ativa e cite as leituras atuais, como o espaço livre por volume.";
     private static readonly Regex Trend = new(@"\b(?:esta|estao|ta|tao|vem|vai|continua|continuam|segue|seguem|anda|andam|parece|parecem)\s+(?:(?:se|cada vez mais|aos poucos|gradualmente|lentamente)\s+)*"
         + @"(?:normalizand\w*|melhorand\w*|estabilizand\w*|recuperand\w*|regularizand\w*|diminuind\w*|reduzind\w*|caind\w*|aumentand\w*|subind\w*|crescend\w*|liberand\w*|voltando ao normal)\b"
-        + @"|\bem (?:processo de )?(?:normalizacao|recuperacao|estabilizacao|melhora)\b|\b(?:normaliza|melhora|estabiliza|regulariza)-se\b|\b(?:tende|tendem) a (?:normalizar|melhorar|estabilizar|diminuir)\b");
+        + @"(?!\s+(?:o|os|as|seu|sua|seus|suas)\b|\s+a\b(?!\s+cada\b)|\s+espaco\b)"
+        + @"|\bem (?:processo de )?(?:normalizacao|recuperacao|estabilizacao|melhora)\b|\b(?:normaliza|melhora|estabiliza|regulariza)-se\b"
+        + @"|\b(?:tende|tendem|deve|devem|vai|vao|ira|irao)\s+(?:a\s+)?(?:se\s+)?(?:normalizar|melhorar|estabilizar|diminuir|regularizar|recuperar|voltar ao normal)\b"
+        + @"(?!\s+(?:o|os|as|seu|sua|seus|suas)\b|\s+a\b(?!\s+cada\b)|\s+espaco\b)");
     private static readonly Regex DiskTopic = new(@"\b(?:disco|discos|unidade|volume|espaco|armazenamento)\b|(?<![\w:])[a-z]:(?!\w)");
     private static readonly Regex MemoryTopic = new(@"\b(?:memoria|ram)\b");
     private bool PresentsClosedTrend(string normalized)
@@ -742,8 +753,9 @@ public sealed class InvestigationEvidence
         var memory = memoryClosed && !memoryActive;
         if (!disk && !memory) return false;
         return Sentences(normalized).Any(sentence => !sentence.Contains('?')
-            && (disk && DiskTopic.IsMatch(sentence) || memory && MemoryTopic.IsMatch(sentence))
             && Trend.Matches(sentence).Any(match => !Negated(sentence, match)
+                // O assunto vem antes da evolução (@qa): "a conexão está caindo, mas o disco C:…" e "você está liberando espaço" passam.
+                && (disk && DiskTopic.IsMatch(sentence[..match.Index]) || memory && MemoryTopic.IsMatch(sentence[..match.Index]))
                 // A condição vale dentro da oração; os dois-pontos da letra da unidade ("C:") não a cortam.
                 && !Regex.IsMatch(Regex.Split(sentence[..match.Index], @"[,;]|(?<!(?<!\w)\w):")[^1], @"\b(?:se|caso|quando|enquanto)\b")));
     }
