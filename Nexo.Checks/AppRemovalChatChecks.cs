@@ -38,6 +38,9 @@ internal static class AppRemovalChatChecks
             await PcMixedRefusal(store, actor, assert);
             await SelfOfferGetsLine(store, actor, assert);
             await CopiedWithoutRefusal(store, actor, assert);
+            RepeatedAnswerRule(assert);
+            await PcCopyRefused(store, actor, assert);
+            await PcCopyGivesUp(store, actor, assert);
         }
         finally { store.Data.AiEnabled = previousAi; System.Globalization.CultureInfo.CurrentCulture = previousCulture; }
     }
@@ -372,6 +375,78 @@ internal static class AppRemovalChatChecks
         var cards = Regex.Matches(answer, "Apps pré-instalados e ajustes do Windows").Count;
         assert(model.Consumed && tools.Calls.Contains("get_health_report") && findings >= 0 && cards == 1 && answer.IndexOf("Apps pré-instalados", StringComparison.Ordinal) > findings,
             "#127 (@qa): no pedido misto, a 1ª resposta que só copia o caminho do cartão, sem recusa, vira o relato das consultas com o cartão uma vez · " + answer.Replace("\n", " "));
+    }
+
+    // Repetição no PC da a6fcbea (23/11): depois da resposta pronta, "ok, e o que eu removo?" recebeu do modelo o mesmo texto, palavra por
+    // palavra. A trava recusa a resposta que cobre 80% ou mais dos trechos de 4 palavras da última resposta do assistente, só com as
+    // duas longas (60 caracteres e 10 palavras); respostas curtas iguais e o pedido explícito de repetir passam.
+    private static readonly string PriorGuidance = AgentProtocol.AppRemovalGuidance + "\n\n" + TurnFacts.Prefix + " nenhuma.";
+
+    private static void RepeatedAnswerRule(Action<bool, string> assert)
+    {
+        const string health = "O monitor de saúde não mostra ocorrência ativa. A CPU está em 12% e a memória em 54%, e o disco C: tem 77,7% de espaço livre. Se a lentidão continuar, me diga em que momento ela aparece.";
+        (string Message, string Prior, string Request)[] repeated =
+        [
+            (AgentProtocol.AppRemovalGuidance, PriorGuidance, "ok, e o que eu removo?"),
+            ("**" + AgentProtocol.AppRemovalGuidance.Replace("“", "\"").Replace("”", "\"") + "**", PriorGuidance, "ok, e o que eu removo?"),
+            (AgentProtocol.AppRemovalGuidance + " Se precisar de mais ajuda, é só falar.", PriorGuidance, "e agora?"),
+            ("Claro! " + health, health, "e agora?"),
+        ];
+        (string Message, string Prior, string Request)[] accepted =
+        [
+            ("Certo.", "Certo.", "ok"),
+            ("Tudo bem, qualquer coisa estou à disposição.", "Tudo bem, qualquer coisa estou à disposição.", "valeu"),
+            ("Você escolhe os itens no cartão “Apps pré-instalados e ajustes do Windows”, no menu Ferramentas.", PriorGuidance, "ok, e o que eu removo?"),
+            ("Depende do que aparecer no seu PC: clique em “Verificar este PC” e veja os itens sugeridos, que já vêm marcados. Se tiver dúvida sobre algum, deixe desmarcado.", PriorGuidance, "ok, e o que eu removo?"),
+            ("A CPU está em 12% e a memória em 54%. Como a lentidão aparece ao abrir o navegador, vale conferir as extensões instaladas nele e testar com elas desativadas.", health, "aparece quando abro o navegador"),
+            (AgentProtocol.AppRemovalGuidance, PriorGuidance, "pode repetir?"),
+            (AgentProtocol.AppRemovalGuidance, "", "ok, e o que eu removo?"),
+        ];
+        var wrong = repeated.Where(c => !AgentProtocol.RepeatsPriorAnswer(c.Message, c.Prior, c.Request)).Select(c => "passou: " + c.Message[..Math.Min(60, c.Message.Length)])
+            .Concat(accepted.Where(c => AgentProtocol.RepeatsPriorAnswer(c.Message, c.Prior, c.Request)).Select(c => "recusada: " + c.Message[..Math.Min(60, c.Message.Length)])).ToArray();
+        string[] followUps = ["ok, e o que eu removo?", "quais eu tiro?", "o que dá pra remover?", "quais apps eu desinstalo?", "qual programa eu removo?", "o que vale a pena tirar?"];
+        string[] notFollowUps = ["ok, obrigado", "e como eu reinstalo o que removi?", "o que é o Clipchamp?", "meu pc ta lento", "o que tirar da inicialização?"];
+        var routing = followUps.Where(f => !SupportIntake.AsksWhatToRemove(f)).Select(f => "não reconhecido: " + f)
+            .Concat(notFollowUps.Where(SupportIntake.AsksWhatToRemove).Select(f => "reconhecido: " + f)).ToArray();
+        assert(wrong.Length == 0 && routing.Length == 0 && !AgentProtocol.AppRemovalFollowUp.Contains(AgentProtocol.AppRemovalGuidance[..40], StringComparison.Ordinal)
+            && AgentProtocol.AppRemovalFollowUp.Contains("Verificar este PC", StringComparison.Ordinal),
+            "#127 (PC a6fcbea): a resposta que repete a anterior é recusada (longa, 80% dos trechos), as curtas e o pedido de repetir passam; o seguimento sobre o que remover é reconhecido"
+            + (wrong.Length > 0 ? " · " + string.Join(" | ", wrong) : "") + (routing.Length > 0 ? " · " + string.Join(" | ", routing) : ""));
+    }
+
+    private static Conversation FollowUpConversation(Account actor) => new()
+    {
+        UserId = actor.Id,
+        Entries =
+        [
+            new Entry { Role = "user", Text = "remove os apps inúteis do windows pra mim" },
+            new Entry { Role = "assistant", Text = PriorGuidance },
+            new Entry { Role = "user", Text = "ok, e o que eu removo?" },
+        ],
+    };
+
+    // O fluxo do PC: a cópia é recusada pelo motivo próprio, e a 2ª tentativa, com palavras próprias, é aceita.
+    private static async Task PcCopyRefused(Store store, Account actor, Action<bool, string> assert)
+    {
+        const string own = "Depende do que aparecer no seu PC: clique em “Verificar este PC” e veja os itens sugeridos, que já vêm marcados. Se tiver dúvida sobre algum, deixe desmarcado.";
+        var model = new CapturingModel([Text(AgentProtocol.AppRemovalGuidance), Text(own)]);
+        using var http = new HttpClient(model);
+        var answer = (await new AgentService(store, new FlowTools(), http).Run(actor, FollowUpConversation(actor), new Progress<string>(), (_, _) => { }, CancellationToken.None)).ReplaceLineEndings("\n");
+        var control = model.Calls > 1 ? model.SystemMessages(1).LastOrDefault() ?? "" : "";
+        assert(model.Consumed && answer.StartsWith(own, StringComparison.Ordinal) && !answer.Contains(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal)
+            && control.Contains(AgentProtocol.RepeatedAnswerReason, StringComparison.Ordinal),
+            "#127 (PC a6fcbea): no seguimento \"ok, e o que eu removo?\", a cópia da resposta anterior é recusada e a resposta nova é aceita · " + answer.Replace("\n", " "));
+    }
+
+    // Três cópias idênticas: a regra da 3ª recusa idêntica (#125) encerra o turno, com a explicação curta do seguimento.
+    private static async Task PcCopyGivesUp(Store store, Account actor, Action<bool, string> assert)
+    {
+        var model = new CapturingModel([Text(AgentProtocol.AppRemovalGuidance), Text(AgentProtocol.AppRemovalGuidance), Text(AgentProtocol.AppRemovalGuidance)]);
+        using var http = new HttpClient(model);
+        var answer = (await new AgentService(store, new FlowTools(), http).Run(actor, FollowUpConversation(actor), new Progress<string>(), (_, _) => { }, CancellationToken.None)).ReplaceLineEndings("\n");
+        assert(model.Consumed && answer.Contains(AgentProtocol.AppRemovalFollowUp, StringComparison.Ordinal) && !answer.Contains(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal)
+            && !answer.Contains("A IA repetiu", StringComparison.Ordinal),
+            "#127 (PC a6fcbea): três cópias da resposta anterior encerram o turno com a explicação curta do seguimento, diferente do texto pronto · " + answer.Replace("\n", " "));
     }
 
     private static async Task<string> Ask(Store store, Account actor, string request, CapturingModel model)

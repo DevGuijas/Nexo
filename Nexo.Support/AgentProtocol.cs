@@ -72,6 +72,32 @@ public static class AgentProtocol
     // do turno com achados: o resultado das consultas continua sendo o principal da resposta.
     internal const string AppRemovalLine = "O Nexo não remove apps pelo chat: para os apps que vêm com o Windows, use o cartão " + AppRemovalCard
         + ", onde “Verificar este PC” mostra o que existe neste PC e nada muda antes de você confirmar.";
+    // Fim do turno pelas recusas num seguimento sobre o que remover ("ok, e o que eu removo?"), numa conversa em que o Nexo já
+    // indicou o cartão (repetição no PC da a6fcbea): uma explicação curta e diferente do texto pronto, sem inventar itens. A lista
+    // só tem o que existe no PC (RenderDebloatList), marca os itens com Default disponíveis e mostra o detalhe (aviso) abaixo de
+    // alguns; nada muda antes da confirmação do Aplicar.
+    internal const string AppRemovalFollowUp = "Isso depende do que existe neste PC, e a escolha é sua. No cartão " + AppRemovalCard
+        + ", “Verificar este PC” lista só o que existe aqui: os itens sugeridos já vêm marcados, os outros vêm desmarcados e alguns trazem um aviso abaixo do nome. Se ficar em dúvida sobre um item, deixe-o desmarcado; nada muda antes de você confirmar.";
+
+    // Resposta que repete a anterior (#127, repetição no PC da a6fcbea): depois da resposta pronta sobre o cartão, "ok, e o que eu
+    // removo?" recebeu do modelo o mesmo texto, palavra por palavra, apesar do prompt. Vale para qualquer conversa: a resposta do
+    // modelo que cobre quase toda a última resposta do assistente (80% dos trechos de 4 palavras dela) não responde à mensagem nova.
+    // Só contam respostas longas (60 caracteres e 10 palavras, depois de normalizar): "Certo.", "Tudo bem, até mais!" e
+    // confirmações curtas se repetem por natureza. O relatório determinístico do Nexo não passa por esta trava (não é resposta do
+    // modelo); se o modelo o copiar inteiro, a cópia também não responde à mensagem nova. O pedido explícito de repetir passa.
+    internal const string RepeatedAnswerReason = "A resposta repete a sua resposta anterior nesta conversa e não responde à nova mensagem do usuário. Responda à pergunta nova com as suas palavras, sem copiar a resposta anterior; se ela já respondia, diga isso em uma frase e acrescente só o que for novo para esta pergunta.";
+    private static string[] Words(string text) => Regex.Replace(Normalize(text), @"[^\p{L}\p{N}]+", " ").Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+    private static HashSet<string> Shingles(string[] words) => words.Length < 4 ? [string.Join(' ', words)]
+        : [.. Enumerable.Range(0, words.Length - 3).Select(i => string.Join(' ', words, i, 4))];
+    public static bool RepeatsPriorAnswer(string message, string? prior, string userRequest)
+    {
+        if (string.IsNullOrWhiteSpace(prior) || Regex.IsMatch(Normalize(userRequest), @"\brepet(?:e|ir|ia|ita|indo)\b")) return false;
+        var previous = Words(TurnFacts.Body(prior));
+        var answer = Words(message);
+        if (previous.Length < 10 || answer.Length < 10 || string.Join(' ', previous).Length < 60 || string.Join(' ', answer).Length < 60) return false;
+        var covered = Shingles(previous);
+        return covered.Count(Shingles(answer).Contains) >= 0.8 * covered.Count;
+    }
     // Frases que só repetem o caminho do cartão (o modelo copiou o texto do Nexo): saem antes de medir se a resposta tem conteúdo.
     private static readonly string[] NexoRemovalSentences = [.. Regex.Split(AppRemovalGuidance + " " + AppRemovalLine, @"(?<=[.!?:])\s+")
         .Select(sentence => Regex.Replace(Normalize(sentence), @"\W+", " ").Trim()).Where(sentence => sentence.Length > 0)];

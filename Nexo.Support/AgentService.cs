@@ -223,6 +223,11 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         evidence.AsksDiskHealth = SupportIntake.AsksDiskHealth(userRequest);
         evidence.AsksOnlyTemperature = SupportIntake.AsksOnlyTemperature(userRequest);
         var appRemovalRequest = SupportIntake.AsksAppRemoval(userRequest);
+        // Seguimento sobre o que remover numa conversa em que o Nexo já indicou o cartão (#127, repetição no PC da a6fcbea).
+        var appRemovalFollowUp = SupportIntake.AsksWhatToRemove(userRequest)
+            && evidence.PriorAnswers.Any(prior => AgentProtocol.CitesAppRemovalPath(AgentProtocol.Normalize(prior)));
+        // A resposta do modelo que repete a última resposta do assistente é recusada (#127, PC a6fcbea: cópia palavra por palavra).
+        string? RepeatsPrior(string text) => AgentProtocol.RepeatsPriorAnswer(text, evidence.PriorAnswers.LastOrDefault(), userRequest) ? AgentProtocol.RepeatedAnswerReason : null;
         // Tópicos do incidente: os da última mensagem do usuário que tinha tópico. Uma continuação genérica do sistema
         // ("continua lento", "ainda tá demorando") soma o sistema aos tópicos anteriores, em vez de trocá-los.
         var incidentTopics = SupportIntake.ConversationTopics(conversation.Entries.Where(e => e.Role == "user").Reverse().Select(e => e.Text));
@@ -370,7 +375,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 // Tool calls are for observing/acting, not a mandatory format for conversation.
                 var rejection = observationOnly && !reconnectAttempted ? ObservationPending
                     : AgentProtocol.Validate(content.Contains('?') ? "ask_user" : "finish_support", JsonSerializer.SerializeToElement(new { reason = "manual_test" }), content, readOnly)
-                      ?? evidence.ValidateStatement(content, userConfirmedFunction);
+                      ?? RepeatsPrior(content) ?? evidence.ValidateStatement(content, userConfirmedFunction);
                 if (rejection == null) return Finish(ModelAnswer(content));
                 // A narrated intention is not a completed operation. This is controller feedback,
                 // never a fabricated user message or consent to change Windows settings.
@@ -450,7 +455,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                     var error = calls.Value.GetArrayLength() != 1 ? "Conclua somente após receber os resultados das ferramentas; envie uma chamada de controle por vez." : AgentProtocol.Validate(name, arguments, text, readOnly);
                     if (error == null && observationOnly && !reconnectAttempted && (name == "finish_support" || !arguments.TryGetProperty("reason", out var questionReason) || questionReason.GetString() == "manual_test"))
                         error = ObservationPending;
-                    if (error == null) error = evidence.ValidateStatement(text, userConfirmedFunction);
+                    if (error == null) error = RepeatsPrior(text) ?? evidence.ValidateStatement(text, userConfirmedFunction);
                     result = JsonSerializer.Serialize(new { success = error == null, error });
                     history.Add(new AgentMessage { role = "tool", tool_name = name, content = result });
                     if (error == null) return Finish(ModelAnswer(text));
@@ -695,7 +700,10 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 await ControllerCall("Relatório de saúde antes de encerrar", "get_health_report", JsonSerializer.SerializeToElement(new { }));
             // Pedido de remover apps ou recusa por oferecer remover (#127): o fim indica o cartão de Ferramentas, e não "A IA repetiu…".
             // Com achados de consultas (pedido que também traz um sintoma, @qa), o próximo passo do sintoma continua antes do caminho.
-            var end = reason == AgentProtocol.AppRemovalReason || appRemovalRequest
+            // No seguimento "o que eu removo?" depois do cartão (PC a6fcbea), o fim é a explicação curta, e não o texto pronto de novo.
+            var end = appRemovalFollowUp && !appRemovalRequest
+                ? (evidence.HasFindings ? NextStep + "\n" + AgentProtocol.AppRemovalFollowUp : AgentProtocol.AppRemovalFollowUp)
+                : reason == AgentProtocol.AppRemovalReason || appRemovalRequest
                 ? (evidence.HasFindings ? NextStep + "\n" + AgentProtocol.AppRemovalLine : AgentProtocol.AppRemovalGuidance)
                 : evidence.HasFindings ? NextStep : withoutEvidence;
             return evidence.Report(evidence.UserRaisedSecurity ? end + "\n" + InvestigationEvidence.SecurityGuidance : end);

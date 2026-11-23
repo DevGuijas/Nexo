@@ -202,6 +202,15 @@ public static class SupportIntake
         return Regex.IsMatch(text, AppRemovalRequest)
             && !Regex.IsMatch(text, @"\b(?:reinstal\w*|trav\w*|virus|malware|de volta|inicializac\w*|startup|segundo plano|abre\w* junto|abrem junto|iniciam? junto)\b");
     }
+    // Seguimento sobre o que remover (#127, repetição no PC da a6fcbea): depois da orientação do cartão, "ok, e o que eu
+    // removo?" recebeu do modelo a cópia, palavra por palavra, da resposta anterior. A pergunta é sobre quais itens escolher;
+    // ela só vale como seguimento numa conversa em que o Nexo já indicou o cartão (o AgentService confere isso).
+    public static bool AsksWhatToRemove(string request)
+    {
+        var text = AgentProtocol.Normalize(request);
+        return Regex.IsMatch(text, @"\b(?:o que|quais?|qual (?:app|aplicativo|programa)s?)\b(?: (?:eu|que|da|vale|a|pena|devo|posso|pode|ser|pra|para|os|as|dos|desses|deles|apps?|aplicativos?|programas?|itens?))* (?:remov|tir|desinstal|apag|exclu|desmarc|marc)\w*")
+            && !Regex.IsMatch(text, @"\b(?:reinstal\w*|de volta|inicializac\w*)\b");
+    }
     public static bool AsksDiskHealth(string request)
     {
         var text = AgentProtocol.Normalize(request);
