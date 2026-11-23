@@ -28,6 +28,8 @@ public partial class MainWindow : Window
     private OperationalStore? healthStore;
     private MonitoringEngine? healthMonitor;
     private HealthSettings healthSettings = new();
+    // #141: uma instância só, devolvida à tela Saúde a cada reconstrução (o monitor recria a tela a cada leitura).
+    private LiveMetricsPanel? liveMetrics;
     private string? healthError;
     private List<string> eventWarnings = [];
     private DateTimeOffset lastEventScan = DateTimeOffset.MinValue;
@@ -373,9 +375,16 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) { healthError = ex.Message; }
     }
+    private void LiveMetricsSection()
+    {
+        liveMetrics ??= new LiveMetricsPanel();
+        if (liveMetrics.Parent is Panel previous) previous.Children.Remove(liveMetrics);
+        PageContent.Children.Add(liveMetrics);
+    }
     private void Health()
     {
         Heading("Saúde do computador", "Leituras locais enquanto o Nexo está em execução. Achados são hipóteses até a função ser testada.");
+        LiveMetricsSection();
         if (healthStore == null) { PageContent.Children.Add(Card(Text("Histórico operacional indisponível: " + healthError, 14, "Warning"))); return; }
         if (healthError != null) PageContent.Children.Add(Card(Text("Última falha de coleta: " + healthError, 13, "Warning")));
         if (healthMonitor?.LastError != null) PageContent.Children.Add(Card(Text("Monitoramento: " + healthMonitor.LastError, 13, "Warning")));
