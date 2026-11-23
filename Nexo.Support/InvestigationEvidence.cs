@@ -843,7 +843,7 @@ public sealed class InvestigationEvidence
     // da pergunta final, como o caminho do Armazenamento.
     public static string WithAppRemovalGuidance(string answer) =>
         string.IsNullOrWhiteSpace(answer) || AgentProtocol.CitesAppRemovalPath(AgentProtocol.Normalize(answer)) ? answer
-            : BeforeQuestions(answer, AgentProtocol.AppRemovalGuidance);
+            : BeforeQuestions(answer, AgentProtocol.AppRemovalLine);
 
     // A linha do Nexo entra no fim; uma pergunta ao usuário continua sendo a última coisa da resposta.
     // Na repetição no PC da 5b48461 (22/11, #135), a linha do RAID entrou entre "Se quiser, posso ajudar a verificar…" e

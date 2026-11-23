@@ -57,13 +57,31 @@ public static class AgentProtocol
     // programas, ou que pede ao usuário a lista do que remover. Passam a negação ("não posso remover apps pelo chat"), a frase
     // que leva ao cartão de Ferramentas e a explicação de como o usuário faz ("posso explicar como desinstalar um programa").
     // Na repetição no PC da fcca5cd (23/11, #127), o modelo copiou o verbo da instrução para o usuário ("indique **Ferramentas >
-    // Apps pré-instalados** e ajustes do Windows"), com o negrito cortando o nome do cartão. O motivo traz a frase já dirigida
-    // ao usuário, com o nome inteiro do cartão entre aspas, para o modelo repetir.
-    internal const string AppRemovalReason = "O Nexo não remove nem desinstala apps ou programas pelo chat: não ofereça remover e não pergunte quais apps remover. Diga ao usuário, com estas palavras: \"" + AppRemovalPath + "\"";
-    private const string AppRemovalPath = "Para os apps que vêm com o Windows, use o cartão “Apps pré-instalados e ajustes do Windows”, no menu Ferramentas: o Nexo verifica o que existe neste PC, você escolhe os itens e confirma antes de qualquer mudança, e pode desfazer depois. Outros programas são desinstalados em Configurações > Aplicativos do Windows.";
-    // Texto do Nexo, sem o modelo: a resposta ao pedido só de remover apps, o fim do turno de um pedido de remoção e a linha
-    // acrescentada à resposta de um pedido misto que não citou o cartão (repetição no PC da fcca5cd).
-    internal const string AppRemovalGuidance = "O Nexo não remove apps pelo chat. " + AppRemovalPath;
+    // Apps pré-instalados** e ajustes do Windows"), com o negrito cortando o nome do cartão. Na repetição da e7c8b32, o motivo
+    // mandava dizer o caminho "com estas palavras": em "meu pc ta lento, remove os apps inúteis", o modelo obedeceu e a resposta
+    // ficou só com o caminho, sem nada da lentidão consultada. O motivo não traz mais o caminho: pede para tirar a oferta e
+    // manter o resto, e o próprio Nexo acrescenta o caminho (AppRemovalLine) à resposta aceita.
+    internal const string AppRemovalReason = "A resposta oferece remover ou desinstalar apps ou programas, ou pergunta quais remover, e o Nexo não faz isso pelo chat. Tire essa oferta e essa pergunta e mantenha o resto da resposta: o que as consultas mostraram e a orientação sobre o problema do usuário. Não escreva onde remover os apps; o Nexo acrescenta essa orientação à resposta.";
+    private const string AppRemovalCard = "“Apps pré-instalados e ajustes do Windows”, no menu Ferramentas";
+    // Texto do Nexo, sem o modelo, para o pedido só de remover apps e para o fim do turno sem achados. Na repetição da e7c8b32,
+    // "ok, e o que eu removo?" recebeu do modelo a cópia do texto anterior, que não respondia: o texto diz o que a verificação
+    // mostra (a lista só com o que existe no PC, os itens com Default já marcados, os opcionais desmarcados, alguns com aviso).
+    internal const string AppRemovalGuidance = "O Nexo não remove apps pelo chat. Para os apps que vêm com o Windows, use o cartão " + AppRemovalCard
+        + ", e clique em “Verificar este PC”: a lista mostra só o que existe neste PC, com os itens sugeridos já marcados e os opcionais desmarcados, alguns com um aviso do que deixa de funcionar. Você escolhe os itens, confirma antes de qualquer mudança e pode desfazer depois. Outros programas são desinstalados em Configurações > Aplicativos do Windows.";
+    // Linha curta que o Nexo acrescenta à resposta aceita de um pedido misto ou de um turno em que a oferta foi recusada, e ao fim
+    // do turno com achados: o resultado das consultas continua sendo o principal da resposta.
+    internal const string AppRemovalLine = "O Nexo não remove apps pelo chat: para os apps que vêm com o Windows, use o cartão " + AppRemovalCard
+        + ", onde “Verificar este PC” mostra o que existe neste PC e nada muda antes de você confirmar.";
+    // Frases que só repetem o caminho do cartão (o modelo copiou o texto do Nexo): saem antes de medir se a resposta tem conteúdo.
+    private static readonly string[] NexoRemovalSentences = [.. Regex.Split(AppRemovalGuidance + " " + AppRemovalLine, @"(?<=[.!?:])\s+")
+        .Select(sentence => Regex.Replace(Normalize(sentence), @"\W+", " ").Trim()).Where(sentence => sentence.Length > 0)];
+    public static string WithoutAppRemovalPath(string text) => string.Join(" ", Regex.Split(text.Trim(), @"(?<=[.!?])\s+|\n+").Where(sentence =>
+    {
+        var normalized = Normalize(sentence);
+        var plain = Regex.Replace(normalized, @"\W+", " ").Trim();
+        return plain.Length > 0 && !RemovalPath.IsMatch(normalized) && !(plain.Length >= 12 && NexoRemovalSentences.Any(nexo => nexo.Contains(plain, StringComparison.Ordinal)))
+            && !Regex.IsMatch(normalized, @"\bnao remove\w*\b[^.]*\bpelo chat\b|\bconfigurac\w*\W+aplicativos\b");
+    }));
     // A resposta já leva ao cartão: o nome "Apps pré-instalados e ajustes" (com ou sem Ferramentas antes) basta.
     public static bool CitesAppRemovalPath(string normalized) => RemovalPath.IsMatch(normalized);
     private const string AppObject = @"(?:apps?|aplicativos?|programas?|softwares?|bloatwares?)";

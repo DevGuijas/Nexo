@@ -27,12 +27,15 @@ internal static class AppRemovalChatChecks
                 Requests(assert, culture);
             }
             GuidanceLine(assert);
+            CopiedPath(assert);
             await DirectAnswer(store, actor, assert);
             await RepeatedOfferFlow(store, actor, assert);
             await SymptomKeepsNextStep(store, actor, assert);
             await MixedAnswerGetsPath(store, actor, assert);
             await NoPathWithoutRemoval(store, actor, assert);
             await QaCases(store, actor, assert);
+            await PcMixedRefusal(store, actor, assert);
+            await SelfOfferGetsLine(store, actor, assert);
         }
         finally { store.Data.AiEnabled = previousAi; System.Globalization.CultureInfo.CurrentCulture = previousCulture; }
     }
@@ -87,14 +90,21 @@ internal static class AppRemovalChatChecks
         assert(wrongRefused.Length == 0 && wrongAccepted.Length == 0,
             "#127 (PC 63f01f0), " + culture + ": a oferta de remover ou desinstalar apps pelo chat tem motivo próprio; a negação, a explicação, o caminho de Ferramentas, o driver e o cache passam"
             + (wrongRefused.Length > 0 ? " · deviam ser recusadas: " + string.Join(" | ", wrongRefused) : "") + (wrongAccepted.Length > 0 ? " · deviam passar: " + string.Join(" | ", wrongAccepted) : ""));
-        // Repetição no PC da fcca5cd: o modelo copiou "indique **Ferramentas > Apps pré-instalados** e ajustes do Windows". O motivo
-        // e o texto do Nexo trazem a frase dirigida ao usuário, com o nome inteiro do cartão entre aspas, sem o verbo da instrução.
+        // Repetição no PC da fcca5cd: o modelo copiou "indique **Ferramentas > Apps pré-instalados** e ajustes do Windows". O texto
+        // do Nexo traz a frase dirigida ao usuário, com o nome inteiro do cartão entre aspas. Na repetição da e7c8b32, o motivo mandava
+        // dizer o caminho "com estas palavras" e a resposta perdeu a lentidão consultada: o motivo não traz mais o caminho e pede
+        // para manter o resto. O texto pronto diz o que "Verificar este PC" mostra ("ok, e o que eu removo?" não era respondido).
         const string card = "“Apps pré-instalados e ajustes do Windows”, no menu Ferramentas";
-        assert(AgentProtocol.AppRemovalReason.Contains(card, StringComparison.Ordinal) && AgentProtocol.AppRemovalGuidance.Contains(card, StringComparison.Ordinal)
-            && !AgentProtocol.AppRemovalReason.Contains("indique", StringComparison.Ordinal) && !AgentProtocol.AppRemovalGuidance.Contains("indique", StringComparison.Ordinal)
-            && AgentProtocol.Validate("finish_support", JsonSerializer.SerializeToElement(new { }), AgentProtocol.AppRemovalGuidance) == null
-            && AgentProtocol.Guidance(AgentProtocol.AppRemovalReason, PcOffer) == AgentProtocol.AppRemovalReason,
-            "#127, " + culture + ": o motivo e o texto do Nexo dirigem-se ao usuário e indicam o cartão pelo nome inteiro, entre aspas");
+        var reason = AgentProtocol.AppRemovalReason;
+        assert(!reason.Contains(card, StringComparison.Ordinal) && !reason.Contains("com estas palavras", StringComparison.Ordinal) && !reason.Contains("Apps pré-instalados", StringComparison.Ordinal)
+            && reason.Contains("mantenha o resto", StringComparison.Ordinal) && reason.Contains("o que as consultas mostraram", StringComparison.Ordinal)
+            && AgentProtocol.AppRemovalGuidance.Contains(card, StringComparison.Ordinal) && AgentProtocol.AppRemovalLine.Contains(card, StringComparison.Ordinal)
+            && AgentProtocol.AppRemovalGuidance.Contains("“Verificar este PC”", StringComparison.Ordinal) && AgentProtocol.AppRemovalGuidance.Contains("já marcados", StringComparison.Ordinal)
+            && AgentProtocol.AppRemovalLine.Contains("“Verificar este PC”", StringComparison.Ordinal) && AgentProtocol.AppRemovalLine.Length < AgentProtocol.AppRemovalGuidance.Length
+            && !reason.Contains("indique", StringComparison.Ordinal) && !AgentProtocol.AppRemovalGuidance.Contains("indique", StringComparison.Ordinal) && !AgentProtocol.AppRemovalLine.Contains("indique", StringComparison.Ordinal)
+            && Validate(AgentProtocol.AppRemovalGuidance) == null && Validate(AgentProtocol.AppRemovalLine) == null
+            && AgentProtocol.Guidance(reason, PcOffer) == reason,
+            "#127 (PC e7c8b32), " + culture + ": o motivo pede para tirar a oferta e manter o resto, sem o caminho; o texto e a linha do Nexo indicam o cartão pelo nome inteiro e o que \"Verificar este PC\" mostra");
         var repeated = new InvestigationEvidence().RepeatedGuidance(AgentProtocol.AppRemovalReason, PcOffer);
         assert(repeated.Contains("posso ajudar com isso", StringComparison.Ordinal) && repeated.Contains("me diga quais aplicativos", StringComparison.Ordinal),
             "#127, " + culture + ": na 2ª recusa, o controle cita os trechos da oferta · " + repeated);
@@ -164,7 +174,8 @@ internal static class AppRemovalChatChecks
         assert(answer.Contains(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal) && !answer.Contains("A IA repetiu", StringComparison.Ordinal)
             && !answer.Contains("posso ajudar com isso", StringComparison.Ordinal) && control.Contains(AgentProtocol.AppRemovalReason, StringComparison.Ordinal)
             && !control.Contains("Use a ferramenta para a próxima consulta", StringComparison.Ordinal)
-            && prompt.Contains("O Nexo não remove nem desinstala apps pelo chat", StringComparison.Ordinal) && !prompt.Contains("indique Ferramentas", StringComparison.Ordinal),
+            && prompt.Contains("O Nexo não remove nem desinstala apps pelo chat", StringComparison.Ordinal) && !prompt.Contains("indique Ferramentas", StringComparison.Ordinal)
+            && prompt.Contains("sem repetir uma resposta anterior", StringComparison.Ordinal),
             "#127 (PC 63f01f0): a oferta repetida de remover apps é recusada com o motivo próprio e o turno termina indicando o cartão de Ferramentas · " + answer.Replace("\n", " "));
     }
 
@@ -173,13 +184,14 @@ internal static class AppRemovalChatChecks
     {
         const string pc = "A lentidão do seu PC pode estar relacionada a processos em execução. 1. **Verifique os processos em execução**. 2. **Reinicie o PC**. 3. **Verifique se há atualizações pendentes**. Você pode me dizer se algum desses pontos se aplica ao seu caso?";
         var withLine = InvestigationEvidence.WithAppRemovalGuidance(pc);
-        var line = withLine.IndexOf(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal);
+        var line = withLine.IndexOf(AgentProtocol.AppRemovalLine, StringComparison.Ordinal);
         var question = withLine.IndexOf("Você pode me dizer", StringComparison.Ordinal);
         string[] cited =
         [
             "Para remover apps, use o cartão “Apps pré-instalados e ajustes do Windows”, no menu Ferramentas.",
             "Os apps saem pelo menu Ferramentas > Apps pré-instalados e ajustes do Windows.",
             AgentProtocol.AppRemovalGuidance,
+            AgentProtocol.AppRemovalLine,
         ];
         var duplicated = cited.Where(text => InvestigationEvidence.WithAppRemovalGuidance(text) != text).ToArray();
         assert(line > 0 && question > line && withLine.EndsWith("ao seu caso?", StringComparison.Ordinal) && duplicated.Length == 0,
@@ -197,10 +209,10 @@ internal static class AppRemovalChatChecks
         var conversation = new Conversation { UserId = actor.Id, Entries = [new Entry { Role = "user", Text = "meu pc ta lento, remove os apps inúteis" }] };
         var tools = new FlowTools(name => name == "get_health_report" ? WindowsTools.Ok("Espaço livre por volume: C: 77,7% livre.") : null);
         var answer = (await new AgentService(store, tools, http).Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None)).ReplaceLineEndings("\n");
-        var line = answer.IndexOf(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal);
+        var line = answer.IndexOf(AgentProtocol.AppRemovalLine, StringComparison.Ordinal);
         var question = answer.IndexOf("Você pode me dizer", StringComparison.Ordinal);
         assert(model.Consumed && tools.Calls.Contains("get_health_report") && line > 0 && question > line
-            && answer.IndexOf(AgentProtocol.AppRemovalGuidance, line + 1, StringComparison.Ordinal) < 0,
+            && answer.IndexOf(AgentProtocol.AppRemovalLine, line + 1, StringComparison.Ordinal) < 0,
             "#127 (PC fcca5cd): no pedido misto, a resposta aceita do modelo ganha o caminho do cartão antes da pergunta final · " + answer.Replace("\n", " "));
     }
 
@@ -234,7 +246,7 @@ internal static class AppRemovalChatChecks
         var tools = new FlowTools(name => name == "get_health_report" ? WindowsTools.Ok("Espaço livre por volume: C: 77,7% livre.") : null);
         var answer = (await new AgentService(store, tools, http).Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None)).ReplaceLineEndings("\n");
         var next = answer.IndexOf(AgentService.NextStep, StringComparison.Ordinal);
-        var path = answer.IndexOf(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal);
+        var path = answer.IndexOf(AgentProtocol.AppRemovalLine, StringComparison.Ordinal);
         assert(model.Consumed && tools.Calls.Contains("get_health_report") && next >= 0 && path > next && !answer.Contains("A IA repetiu", StringComparison.Ordinal),
             "#127 (@qa): \"meu pc ta lento, remove os apps inúteis\" consulta a saúde e termina com o próximo passo do sintoma e o caminho do cartão · " + answer.Replace("\n", " "));
     }
@@ -270,7 +282,7 @@ internal static class AppRemovalChatChecks
         var storage = "O C: tem 5% livre. " + InvestigationEvidence.StorageGuidance + "\n\nQuer que eu consulte de novo?";
         var both = InvestigationEvidence.WithAppRemovalGuidance(storage);
         var s = both.IndexOf(InvestigationEvidence.StorageGuidance, StringComparison.Ordinal);
-        var a = both.IndexOf(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal);
+        var a = both.IndexOf(AgentProtocol.AppRemovalLine, StringComparison.Ordinal);
         var q = both.IndexOf("Quer que eu consulte", StringComparison.Ordinal);
         var ordered = s >= 0 && a > s && q > a && both.IndexOf(InvestigationEvidence.StorageGuidance, s + 1, StringComparison.Ordinal) < 0
             && InvestigationEvidence.WithAppRemovalGuidance(both) == both;
@@ -279,6 +291,62 @@ internal static class AppRemovalChatChecks
             "#127 (@qa 653d30d): pedido com sintoma investiga o sintoma; app que trava, OneDrive pelo nome e a continuação vão ao modelo; a linha do cartão vem depois do Armazenamento e antes da pergunta, sem duplicar"
             + (routing.Count > 0 ? " · roteadas errado: " + string.Join(" | ", routing) : "") + (followed ? "" : " · continuação: " + answer.ReplaceLineEndings(" "))
             + (ordered ? "" : " · ordem: " + both.ReplaceLineEndings(" ")));
+    }
+
+    // Repetição no PC da e7c8b32: a frase que só repete o caminho do cartão (copiada do texto do Nexo) não conta como conteúdo.
+    private static void CopiedPath(Action<bool, string> assert)
+    {
+        const string pcFinal = "Para os apps que vêm com o Windows, use o cartão “Apps pré-instalados e ajustes do Windows”, no menu Ferramentas: o Nexo verifica o que existe neste PC, você escolhe os itens e confirma antes de qualquer mudança, e pode desfazer depois. Outros programas são desinstalados em Configurações > Aplicativos do Windows.";
+        const string kept = "O seu PC está com uso moderado de CPU e memória, e há espaço suficiente em disco.";
+        var wrong = new List<string>();
+        foreach (var copied in new[] { pcFinal, AgentProtocol.AppRemovalGuidance, AgentProtocol.AppRemovalLine })
+            if (AgentProtocol.WithoutAppRemovalPath(copied).Length != 0) wrong.Add(copied + " → " + AgentProtocol.WithoutAppRemovalPath(copied));
+        var mixed = AgentProtocol.WithoutAppRemovalPath(kept + " " + AgentProtocol.AppRemovalLine);
+        if (mixed != kept) wrong.Add("misto → " + mixed);
+        if (AgentProtocol.WithoutAppRemovalPath("Reinicie o PC e me diga se a lentidão continua.") != "Reinicie o PC e me diga se a lentidão continua.") wrong.Add("sem caminho");
+        assert(wrong.Count == 0, "#127 (PC e7c8b32): a cópia do caminho do cartão sai antes de medir o conteúdo da resposta; o resto fica" + (wrong.Count > 0 ? " · " + string.Join(" | ", wrong) : ""));
+    }
+
+    // Repetição no PC da e7c8b32: "meu pc ta lento, remove os apps inúteis" teve 1 recusa pela oferta de remover, e a resposta aceita
+    // foi só o caminho do cartão, sem a lentidão consultada. Com o caminho copiado, o Nexo mostra o que as consultas trouxeram e a
+    // linha do cartão; com o resto mantido (o que o motivo pede), a resposta do modelo fica e ganha a linha, uma vez só.
+    private static async Task PcMixedRefusal(Store store, Account actor, Action<bool, string> assert)
+    {
+        const string refused = "O seu PC está com uso moderado de CPU e memória, mas há espaço suficiente em disco. Se quiser, posso ajudar a identificar e remover aplicativos que você não usa. Você deseja que eu remova algum aplicativo?";
+        const string copied = "Para os apps que vêm com o Windows, use o cartão “Apps pré-instalados e ajustes do Windows”, no menu Ferramentas: o Nexo verifica o que existe neste PC, você escolhe os itens e confirma antes de qualquer mudança, e pode desfazer depois. Outros programas são desinstalados em Configurações > Aplicativos do Windows.";
+        const string keptAnswer = "O seu PC está com uso moderado de CPU e memória, e há espaço suficiente em disco. Se a lentidão continuar, reinicie o PC e me diga se ela aparece em algum programa específico.";
+        var results = new List<string>();
+        foreach (var (second, keepsModel) in new[] { (copied, false), (keptAnswer, true) })
+        {
+            var model = new CapturingModel([Text(refused), Text(second)]);
+            using var http = new HttpClient(model);
+            var conversation = new Conversation { UserId = actor.Id, Entries = [new Entry { Role = "user", Text = "meu pc ta lento, remove os apps inúteis" }] };
+            var tools = new FlowTools(name => name == "get_health_report" ? WindowsTools.Ok("Espaço livre por volume: C: 77,7% livre.") : null);
+            var answer = (await new AgentService(store, tools, http).Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None)).ReplaceLineEndings("\n");
+            var control = model.Calls > 1 ? model.SystemMessages(1).LastOrDefault() ?? "" : "";
+            var line = answer.IndexOf(AgentProtocol.AppRemovalLine, StringComparison.Ordinal);
+            var ok = model.Consumed && tools.Calls.Contains("get_health_report") && control.Contains(AgentProtocol.AppRemovalReason, StringComparison.Ordinal)
+                && !control.Contains("Apps pré-instalados", StringComparison.Ordinal) && line >= 0 && answer.IndexOf(AgentProtocol.AppRemovalLine, line + 1, StringComparison.Ordinal) < 0
+                && !answer.Contains("posso ajudar a identificar e remover", StringComparison.Ordinal)
+                && (keepsModel ? answer.Contains("uso moderado de CPU e memória", StringComparison.Ordinal) && line > answer.IndexOf("uso moderado", StringComparison.Ordinal)
+                    : answer.Contains("O monitor de saúde não mostra ocorrência ativa", StringComparison.Ordinal) && line > answer.IndexOf("O monitor de saúde", StringComparison.Ordinal)
+                        && !answer.Contains("Outros programas são desinstalados", StringComparison.Ordinal));
+            if (!ok) results.Add((keepsModel ? "mantida" : "copiada") + " → " + answer.Replace("\n", " ") + " · controle: " + control);
+        }
+        assert(results.Count == 0, "#127 (PC e7c8b32): no pedido misto, depois da recusa da oferta de remover, a resposta traz a lentidão consultada e a linha do cartão uma vez" + (results.Count > 0 ? " · " + string.Join(" | ", results) : ""));
+    }
+
+    // O modelo ofereceu remover apps sem o usuário pedir: depois da recusa, a resposta aceita ganha a linha do cartão, porque o
+    // motivo diz que o Nexo acrescenta a orientação.
+    private static async Task SelfOfferGetsLine(Store store, Account actor, Action<bool, string> assert)
+    {
+        const string accepted = "Você pode reiniciar o PC e fechar os programas que não está usando para deixar o Windows mais leve.";
+        var model = new CapturingModel([Text(PcOffer), Text(accepted)]);
+        var answer = await Ask(store, actor, "o que dá pra fazer pra deixar o windows mais limpo?", model);
+        var line = answer.IndexOf(AgentProtocol.AppRemovalLine, StringComparison.Ordinal);
+        assert(answer.Contains(accepted, StringComparison.Ordinal) && line > answer.IndexOf(accepted, StringComparison.Ordinal)
+            && answer.IndexOf(AgentProtocol.AppRemovalLine, line + 1, StringComparison.Ordinal) < 0,
+            "#127 (PC e7c8b32): sem pedido de remoção, a oferta recusada do modelo faz a resposta aceita ganhar a linha do cartão · " + answer.Replace("\n", " "));
     }
 
     private static async Task<string> Ask(Store store, Account actor, string request, CapturingModel model)
