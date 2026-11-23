@@ -28,7 +28,9 @@ public partial class MainWindow
         LiveMetricsSection();
 
         PageContent.Children.Add(HomeSectionHeader("Resolver rápido", "Abre o Assistente com o pedido escrito. Você revisa e envia.", null, null));
+        // Seis por linha quando cada atalho tem ao menos 140 px; na janela pequena, três.
         var fixes = new UniformGrid { Columns = 3, Margin = new Thickness(0, 0, -12, 6) };
+        fixes.SizeChanged += (_, e) => fixes.Columns = e.NewSize.Width >= 6 * (140 + 12) ? 6 : 3;
         foreach (var fix in HomeData.QuickFixes) fixes.Children.Add(QuickFixTile(fix));
         PageContent.Children.Add(fixes);
 
@@ -83,7 +85,7 @@ public partial class MainWindow
         {
             var failure = Text("Monitoramento: " + monitorError, 12, "Warning"); failure.Margin = new Thickness(0, 8, 0, 0); panel.Children.Add(failure);
         }
-        var open = Action("Ver saúde do PC", (_, _) => Guard(() => ShowPage("health")), primary: true);
+        var open = Action("Ver saúde do PC", (_, _) => Guard(() => ShowPage("health")), primary: true, icon: "health");
         open.Tag = "home:health"; open.Margin = new Thickness(0, 16, 0, 0);
         panel.Children.Add(open);
         var card = Card(panel);
@@ -109,14 +111,16 @@ public partial class MainWindow
         content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        content.Children.Add(UiIcons.Create(fix.Icon, 20));
-        var number = new TextBlock { Text = fix.Number.ToString("00"), FontFamily = Font("MonoFont"), FontSize = 12, Foreground = Brush("Subtle"),
+        // Como no protótipo: ícone em cima à esquerda, número à direita, título e subtítulo embaixo.
+        var glyph = UiIcons.Create(fix.Icon, 18); glyph.HorizontalAlignment = HorizontalAlignment.Left; glyph.VerticalAlignment = VerticalAlignment.Top;
+        content.Children.Add(glyph);
+        var number = new TextBlock { Text = fix.Number.ToString("00"), FontFamily = Font("MonoFont"), FontSize = 11, Foreground = Brush("Subtle"),
             HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top };
         content.Children.Add(number);
-        var name = Text(fix.Title, 14); name.FontWeight = FontWeights.SemiBold; name.Margin = new Thickness(0, 12, 0, 0); Grid.SetRow(name, 1); content.Children.Add(name);
-        var sub = Text(fix.Subtitle, 12, "Secondary"); sub.Margin = new Thickness(0, 3, 0, 0); Grid.SetRow(sub, 2); content.Children.Add(sub);
-        var button = new Button { Content = content, Tag = "home:fix:" + fix.Number, Background = Brush("Surface"), Padding = new Thickness(16, 14, 16, 14),
-            Margin = new Thickness(0, 0, 12, 12), MinHeight = 104, HorizontalContentAlignment = HorizontalAlignment.Stretch, VerticalContentAlignment = VerticalAlignment.Top,
+        var name = Text(fix.Title, 13); name.FontWeight = FontWeights.SemiBold; name.Margin = new Thickness(0, 12, 0, 0); Grid.SetRow(name, 1); content.Children.Add(name);
+        var sub = Text(fix.Subtitle, 11.5, "Secondary"); sub.Margin = new Thickness(0, 3, 0, 0); Grid.SetRow(sub, 2); content.Children.Add(sub);
+        var button = new Button { Content = content, Tag = "home:fix:" + fix.Number, Style = (Style)FindResource("QuickTile"), Padding = new Thickness(14, 12, 14, 12),
+            Margin = new Thickness(0, 0, 12, 12), MinHeight = 84,
             ToolTip = "Escreve no Assistente: \"" + fix.Prompt + "\". Tecla " + fix.Number + "." };
         AutomationProperties.SetName(button, fix.Number + ". " + fix.Title + ": escreve \"" + fix.Prompt + "\" no Assistente, sem enviar");
         // Preenche o compositor e para: o envio continua sendo do usuário.

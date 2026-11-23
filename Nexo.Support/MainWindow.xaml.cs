@@ -235,11 +235,20 @@ public partial class MainWindow : Window
             || normalized.Contains("formato invalido") || normalized.Contains("voce recusou")
             ? "error" : "result";
     }
-    private Button Action(string label, RoutedEventHandler handler, bool primary = false)
+    // #143: primário dourado ou secundário com contorno (estilos Primary e SecondaryAction do App.xaml), 36 px de altura e ícone opcional
+    // à esquerda do texto. Com ícone, o nome acessível continua sendo o texto do botão.
+    private Button Action(string label, RoutedEventHandler handler, bool primary = false, string? icon = null)
     {
         var b = new Button { Content = label, Margin = new Thickness(0, 0, 10, 8), HorizontalContentAlignment = HorizontalAlignment.Center,
-            HorizontalAlignment = HorizontalAlignment.Left, MinHeight = 38 };
-        if (primary) b.Style = (Style)FindResource("Primary");
+            HorizontalAlignment = HorizontalAlignment.Left, MinHeight = 36, Style = (Style)FindResource(primary ? "Primary" : "SecondaryAction") };
+        if (icon != null)
+        {
+            var row = new StackPanel { Orientation = Orientation.Horizontal };
+            var glyph = UiIcons.Create(icon, 16, ThemeManager.Live(primary ? "OnAccent" : "Accent")); glyph.VerticalAlignment = VerticalAlignment.Center;
+            row.Children.Add(glyph);
+            row.Children.Add(new TextBlock { Text = label, Margin = new Thickness(8, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center });
+            b.Content = row; AutomationProperties.SetName(b, label);
+        }
         b.Click += handler; return b;
     }
     private Border Card(UIElement content) => new() { Style = (Style)FindResource("Card"), Child = content, Margin = new Thickness(0, 0, 0, 14) };
@@ -612,7 +621,7 @@ public partial class MainWindow : Window
     private void Users()
     {
         Heading("Usuários e acessos", "Gerencie contas e escolha o que cada pessoa pode fazer neste computador.");
-        PageContent.Children.Add(Action("Criar usuário", (_, _) => AccountEditor(null), true));
+        PageContent.Children.Add(Action("Criar usuário", (_, _) => AccountEditor(null), true, icon: "plus"));
         foreach (var account in store.Data.Accounts.OrderBy(a => a.Name))
         {
             var row = new DockPanel(); var edit = Action("Editar acesso", (_, _) => AccountEditor(account)); DockPanel.SetDock(edit, Dock.Right); row.Children.Add(edit);
@@ -1211,7 +1220,7 @@ public partial class MainWindow : Window
         RenderDebloatList();
         try { debloatCanUndo = DebloatServiceFor().UndoCandidate() != null; } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { debloatCanUndo = false; }
         var actions = new WrapPanel();
-        debloatScanView = Action("Verificar este PC", async (_, _) => await GuardAsync(ScanDebloat));
+        debloatScanView = Action("Verificar este PC", async (_, _) => await GuardAsync(ScanDebloat), icon: "search");
         debloatApplyView = Action("Aplicar selecionados", async (_, _) => await GuardAsync(ApplyDebloat), true);
         debloatUndoView = Action("Desfazer a última aplicação", async (_, _) => await GuardAsync(UndoDebloat));
         debloatCancelView = Action("Cancelar próximas etapas", (_, _) => debloatCancellation?.Cancel());

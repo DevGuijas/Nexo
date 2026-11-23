@@ -69,7 +69,7 @@ public partial class MainWindow
         foreach (var (width, height, file) in new[] { (1060d, 720d, "nexo-home-small.png"), (980d, 680d, "nexo-home-compact.png") })
         {
             Width = width; Height = height; UpdateLayout();
-            Require(QuickFixButtons().All(button => button.ActualHeight >= 96 && button.ActualWidth >= 150
+            Require(QuickFixButtons().All(button => button.ActualHeight >= 76 && button.ActualWidth >= 130
                 && button.TranslatePoint(new Point(button.ActualWidth, 0), PageScroll).X <= PageScroll.ActualWidth + 1),
                 $"Atalhos da Início cortados ou pequenos em {width}x{height}.");
             await capture(file);

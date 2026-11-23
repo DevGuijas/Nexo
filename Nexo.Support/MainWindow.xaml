@@ -96,7 +96,24 @@
       <Button x:Name="CloseButton" Style="{StaticResource ChromeCloseButton}" Click="CloseClick" AutomationProperties.Name="Fechar" ToolTip="Fechar"/>
      </StackPanel>
      <Button x:Name="ThemeButton" DockPanel.Dock="Right" Click="ThemeClick" Margin="0,6,12,6" Padding="12,0" FontSize="12"
-             WindowChrome.IsHitTestVisibleInChrome="True" AutomationProperties.Name="Trocar o tema"/>
+             WindowChrome.IsHitTestVisibleInChrome="True" AutomationProperties.Name="Trocar o tema">
+      <!-- O conteúdo continua sendo o nome do tema (texto); o modelo põe a lua no Ônix e o sol no Glacial, como no protótipo. -->
+      <Button.ContentTemplate>
+       <DataTemplate>
+        <StackPanel Orientation="Horizontal">
+         <Path x:Name="ThemeGlyph" Data="M20,14.5 A8.5,8.5 0 1 1 9.5,4 A6.8,6.8 0 0 0 20,14.5 Z" Stroke="{DynamicResource Accent}" StrokeThickness="1.6"
+               StrokeLineJoin="Round" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Width="14" Height="14" Stretch="Uniform"
+               Margin="0,0,7,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
+         <TextBlock Text="{Binding}" VerticalAlignment="Center"/>
+        </StackPanel>
+        <DataTemplate.Triggers>
+         <DataTrigger Binding="{Binding}" Value="Glacial">
+          <Setter TargetName="ThemeGlyph" Property="Data" Value="M12,8 A4,4 0 1 0 12,16 A4,4 0 1 0 12,8 Z M12,2.5 L12,4.5 M12,19.5 L12,21.5 M2.5,12 L4.5,12 M19.5,12 L21.5,12 M5.3,5.3 L6.7,6.7 M17.3,17.3 L18.7,18.7 M5.3,18.7 L6.7,17.3 M17.3,6.7 L18.7,5.3"/>
+         </DataTrigger>
+        </DataTemplate.Triggers>
+       </DataTemplate>
+      </Button.ContentTemplate>
+     </Button>
      <Button x:Name="PaletteButton" DockPanel.Dock="Left" Click="PaletteClick" Margin="16,6,0,6" Padding="12,0" Width="300"
              HorizontalAlignment="Left" HorizontalContentAlignment="Stretch" FontWeight="Normal"
              WindowChrome.IsHitTestVisibleInChrome="True" AutomationProperties.Name="Buscar telas e ações (Ctrl+K)" ToolTip="Buscar telas e ações (Ctrl+K)">

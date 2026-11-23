@@ -21,6 +21,7 @@ internal static class ShellChecks
         HomeHealth(assert);
         Window(assert);
         AppIcon(assert);
+        ActionButtons(assert);
     }
 
     private static void Palette(Action<bool, string> assert)
@@ -243,6 +244,24 @@ internal static class ShellChecks
             "#143: o resultado da restauração de rede da abertura aparece no Assistente, não fica escondido atrás da Início");
         assert(shell.Contains("store.Data.SidebarCollapsed = collapsed;") && shell.Contains("catch { store.Data.SidebarCollapsed = stored;"),
             "#143: a lateral grava a preferência e desfaz a troca se a gravação falhar");
+    }
+
+    // Botões do novo layout (#143): primário e secundário com estados próprios e sem animação, ícone de tema e atalhos compactos.
+    private static void ActionButtons(Action<bool, string> assert)
+    {
+        var app = Source("App.xaml"); var code = Source("MainWindow.xaml.cs"); var home = Source("HomePage.cs"); var xaml = Source("MainWindow.xaml");
+        var template = Regex.Match(app, "<ControlTemplate x:Key=\"ActionTemplate\".*?</ControlTemplate>", RegexOptions.Singleline).Value;
+        assert(template.Contains("CornerRadius=\"7\"") && template.Contains("Property=\"IsEnabled\" Value=\"False\"") && template.Contains("Property=\"IsKeyboardFocused\" Value=\"True\"")
+            && Regex.IsMatch(app, "x:Key=\"SecondaryAction\"[^\n]*Property=\"IsPressed\"") && Regex.IsMatch(app, "x:Key=\"Primary\"[^\n]*BasedOn=\"\\{StaticResource SecondaryAction\\}\"[^\n]*Property=\"IsPressed\"")
+            && !app.Contains("Storyboard") && !Regex.IsMatch(app, "x:Key=\"Secondary\"\\s"),
+            "#143: botões de ação com cantos de 7 px, hover, pressionado, desabilitado e foco visível, sem animação e sem esconder a cor Secondary");
+        assert(code.Contains("MinHeight = 36, Style = (Style)FindResource(primary ? \"Primary\" : \"SecondaryAction\")") && code.Contains("AutomationProperties.SetName(b, label);"),
+            "#143: Action usa os estilos de ação e mantém o texto como nome acessível quando tem ícone");
+        assert(Regex.IsMatch(xaml, "x:Name=\"ThemeButton\".*?x:Name=\"ThemeGlyph\".*?Binding=\"\\{Binding\\}\" Value=\"Glacial\"", RegexOptions.Singleline),
+            "#143: o botão de tema mostra lua no Ônix e sol no Glacial, com o nome do tema como conteúdo");
+        assert(home.Contains("Style = (Style)FindResource(\"QuickTile\")") && home.Contains("? 6 : 3") && home.Contains("glyph.HorizontalAlignment = HorizontalAlignment.Left")
+            && Source("ShellPreview.cs").Contains("button.ActualHeight >= 76 && button.ActualWidth >= 130"),
+            "#143: atalhos Resolver rápido compactos, com ícone à esquerda, seis por linha quando cabem e área de clique conferida na prévia");
     }
 
     // Ícone do Nexo (#143): o .exe, o atalho, a janela e a bandeja usam o mesmo Assets/nexo.ico. Confere o csproj, o arquivo e a janela;
