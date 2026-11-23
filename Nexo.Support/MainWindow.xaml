@@ -172,10 +172,12 @@
 
       <Border Background="{DynamicResource Surface}" BorderBrush="{DynamicResource Stroke}" BorderThickness="1" CornerRadius="14" Padding="12">
        <DockPanel>
-        <Button x:Name="SendButton" Style="{StaticResource Primary}" Click="SendClick" DockPanel.Dock="Right"
-                Width="44" Height="44" Padding="0" HorizontalContentAlignment="Center" AutomationProperties.Name="Enviar mensagem">
-         <Path Data="M12,19 L12,5 M6,11 L12,5 18,11" Stroke="{DynamicResource OnAccent}" StrokeThickness="2" StrokeStartLineCap="Round"
-               StrokeEndLineCap="Round" StrokeLineJoin="Round" Width="19" Height="19" Stretch="Uniform"/>
+        <!-- #143: enviar em 40×40 com o molde Primary (raio 8, hover, pressionado, foco por anel externo, desabilitado com opacidade).
+             A seta fica numa grade fixa de 20×20, sem Stretch, para o traço de 2,2 px não ser esticado; haste e ponta arredondadas. -->
+        <Button x:Name="SendButton" Style="{StaticResource Primary}" Click="SendClick" DockPanel.Dock="Right" Margin="10,0,0,0"
+                Width="40" Height="40" Padding="0" VerticalAlignment="Center" HorizontalContentAlignment="Center" VerticalContentAlignment="Center" AutomationProperties.Name="Enviar mensagem">
+         <Path x:Name="SendGlyph" Data="M10,15.5 L10,4.5 M5,9.5 L10,4.5 15,9.5" Stroke="{DynamicResource OnAccent}" StrokeThickness="2.2" StrokeStartLineCap="Round"
+               StrokeEndLineCap="Round" StrokeLineJoin="Round" Width="20" Height="20" Stretch="None" HorizontalAlignment="Center" VerticalAlignment="Center"/>
         </Button>
         <TextBox x:Name="Composer" AutomationProperties.Name="Descreva seu problema" TextWrapping="Wrap" AcceptsReturn="True"
                  MaxLength="6000" MinHeight="44" MaxHeight="110" Background="Transparent" BorderThickness="0"

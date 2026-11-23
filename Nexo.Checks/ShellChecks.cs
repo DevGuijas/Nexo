@@ -299,6 +299,15 @@ internal static class ShellChecks
             && Pressed("BorderBrush") != Rest("BorderBrush") && ThemeCatalog.ReadablePairs.Contains(("OnAccent", "AccentPressed")),
             "#143: o Primary pressionado usa AccentPressed, diferente do repouso, com contraste AA no texto OnAccent");
 
+        var send = XDocument.Parse(xaml).Descendants().Single(e => (string?)e.Attribute(Xaml + "Name") == "SendButton");
+        var glyph = send.Elements().SingleOrDefault();
+        assert((string?)send.Attribute("Style") == "{StaticResource Primary}" && (string?)send.Attribute("Width") == "40" && (string?)send.Attribute("Height") == "40"
+            && (string?)send.Attribute("Click") == "SendClick" && (string?)send.Attribute(XName.Get("AutomationProperties.Name")) == "Enviar mensagem"
+            && glyph?.Name.LocalName == "Path" && (string?)glyph.Attribute("Stretch") == "None" && (string?)glyph.Attribute("Stroke") == "{DynamicResource OnAccent}"
+            && double.Parse((string)glyph.Attribute("StrokeThickness")!, CultureInfo.InvariantCulture) is >= 2 and <= 2.2
+            && new[] { "StrokeStartLineCap", "StrokeEndLineCap", "StrokeLineJoin" }.All(a => (string?)glyph.Attribute(a) == "Round"),
+            "#143: enviar do Assistente em 40×40 no molde Primary, seta vetorial de 2 a 2,2 px sem esticar, traço arredondado e o mesmo nome acessível");
+
         var tool = Regex.Match(Source("MainWindow.xaml.cs"), @"private Button ToolCard\(.*?\n    \}", RegexOptions.Singleline).Value;
         assert(tool.Contains("CornerRadius = new CornerRadius(7, 7, 0, 0)") && tool.Contains("PageKit.ClipRounded(content, 7);") && tool.Contains("FindResource(\"ToolCardButton\")")
             && !tool.Contains("ClipToBounds = true }") && code["PageKit.cs"].Contains("ClipRounded(layout, 9);"),
