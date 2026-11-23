@@ -675,7 +675,9 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
                 or InvestigationEvidence.StaleProcessReason or InvestigationEvidence.StablePlateauReason))
                 await ControllerCall("Relatório de saúde antes de encerrar", "get_health_report", JsonSerializer.SerializeToElement(new { }));
             // Pedido de remover apps ou recusa por oferecer remover (#127): o fim indica o cartão de Ferramentas, e não "A IA repetiu…".
-            var end = reason == AgentProtocol.AppRemovalReason || appRemovalRequest ? AgentProtocol.AppRemovalGuidance
+            // Com achados de consultas (pedido que também traz um sintoma, @qa), o próximo passo do sintoma continua antes do caminho.
+            var end = reason == AgentProtocol.AppRemovalReason || appRemovalRequest
+                ? (evidence.HasFindings ? NextStep + "\n" + AgentProtocol.AppRemovalGuidance : AgentProtocol.AppRemovalGuidance)
                 : evidence.HasFindings ? NextStep : withoutEvidence;
             return evidence.Report(evidence.UserRaisedSecurity ? end + "\n" + InvestigationEvidence.SecurityGuidance : end);
         }

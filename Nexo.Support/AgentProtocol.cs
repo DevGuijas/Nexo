@@ -63,13 +63,16 @@ public static class AgentProtocol
     // Entre o verbo e o objeto cabem até 3 palavras, sem um alvo que não é app ("apagar o arquivo do programa", "limpar o cache
     // do aplicativo", "remover o vírus do programa"). Particípio não conta ("verificar se o app foi removido").
     private const string NotAppTarget = @"(?!(?:arquivos?|pastas?|dados|cache|historico|fila|atalhos?|icones?|virus|malware|notificac\w*|janelas?|abas?)\b)";
-    private const string RemovalVerb = @"(?:remov|desinstal|exclu|apag|delet|elimin)(?!\w*(?:id[oa]s?|ad[oa]s?)\b)\w*";
+    // O verbo no passado não é oferta (@qa): "me diga qual programa você desinstalou", "desde que você removeu o app" são perguntas
+    // de diagnóstico de quem desinstalou algo e viu outro problema aparecer.
+    private const string PastForm = @"(?!(?:ei|uei|ou|eu|iu|i|eram|aram|iram)\b)";
+    private const string RemovalVerb = @"(?:remov|desinstal|exclu|apag|delet|elimin)" + PastForm + @"(?!\w*(?:id[oa]s?|ad[oa]s?)\b)\w*";
     private static readonly Regex AppRemoval = new(@"\b" + RemovalVerb + @"(?:-(?:lo|la|los|las))?\s+(?:" + NotAppTarget + @"[\w-]+\s+){0,3}?" + AppObject + @"\b"
         + @"|\b" + AppObject + @"\s+(?:[\w-]+\s+){0,3}?" + RemovalVerb
         + @"|\blimp\w*\s+(?:(?:os|as|esses|estes|seus|alguns|todos os)\s+)?" + AppObject + @"\b|\bdebloat\w*"
         // Desinstalar um app pelo nome ("vou desinstalar o Clipchamp"); driver, dispositivo e atualização ficam de fora.
-        + @"|\bdesinstal(?!\w*(?:id[oa]s?|ad[oa]s?)\b)\w*\b(?:-(?:lo|la|los|las))?(?!\s+(?:\w+\s+){0,2}?(?:drivers?|dispositivos?|atualizac\w*|updates?)\b)");
-    private static readonly Regex RemovalOffer = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo"
+        + @"|\bdesinstal" + PastForm + @"(?!\w*(?:id[oa]s?|ad[oa]s?)\b)\w*\b(?:-(?:lo|la|los|las))?(?!\s+(?:\w+\s+){0,4}?(?:drivers?|dispositivos?|atualizac\w*|updates?)\b)");
+    private static readonly Regex RemovalOffer = new(@"\b(?:posso|podemos|poderia|poderiamos|consigo|vou|vamos|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo"
         + @"|me (?:diga|informe|fale|avise|mande|liste|passe)(?: (?:quais|qual|os|o nome|os nomes))?)\b");
     private static readonly Regex RemovalPath = new(@"\bferramentas\b[^.;!?]*\bpre-?\s?instalad|\bpre-?\s?instalad\w* e ajustes\b");
     private static readonly Regex RemovalExplanation = new(@"\b(?:explic|orient|ensin)\w*|\b(?:mostrar|dizer|indicar)(?: a voce| para voce)? (?:como|onde)\b");

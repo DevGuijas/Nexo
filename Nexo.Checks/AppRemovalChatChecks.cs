@@ -28,6 +28,7 @@ internal static class AppRemovalChatChecks
             }
             await RepeatedOfferFlow(store, actor, assert);
             await RequestEndsWithPath(store, actor, assert);
+            await SymptomKeepsNextStep(store, actor, assert);
         }
         finally { store.Data.AiEnabled = previousAi; System.Globalization.CultureInfo.CurrentCulture = previousCulture; }
     }
@@ -47,6 +48,11 @@ internal static class AppRemovalChatChecks
             "Posso limpar os aplicativos pré-instalados do Windows para você.",
             "Vou desinstalar o Clipchamp e o Dev Home.",
             "Deseja que eu remova o bloatware do Windows?",
+            // @qa: variações do qwen3:8b.
+            "Vamos remover juntos os apps que você não usa.",
+            "Posso te ajudar a desinstalar o Xbox.",
+            "Deseja que eu desinstale o Xbox?",
+            "Me passe a lista dos aplicativos que você quer desinstalar.",
         ];
         string[] accepted =
         [
@@ -62,6 +68,15 @@ internal static class AppRemovalChatChecks
             "Vou reinstalar o driver de vídeo.",
             "O app do banco travou; posso consultar os erros recentes.",
             "Posso ajudar você a remover os apps pelo cartão Apps pré-instalados e ajustes do Windows, em Ferramentas.",
+            // @qa: o passado é pergunta de diagnóstico de quem desinstalou algo e viu outro problema aparecer.
+            "Me diga qual programa você desinstalou e quando isso aconteceu.",
+            "Me diga quando você removeu o aplicativo.",
+            "Posso verificar os eventos desde que você desinstalou o programa.",
+            "Posso verificar se o programa que você removeu deixou erros nos eventos.",
+            "Me diga se os aplicativos foram desinstalados por outra pessoa.",
+            "Posso desinstalar a versão anterior do driver NVIDIA.",
+            "Posso cancelar os trabalhos da impressora selecionada.",
+            "Posso desabilitar o dispositivo e habilitá-lo de novo.",
         ];
         var wrongRefused = refused.Where(text => !AgentProtocol.OffersAppRemoval(AgentProtocol.Normalize(text)) || Validate(text) != AgentProtocol.AppRemovalReason).ToArray();
         var wrongAccepted = accepted.Where(text => AgentProtocol.OffersAppRemoval(AgentProtocol.Normalize(text)) || Validate(text) == AgentProtocol.AppRemovalReason).ToArray();
@@ -96,6 +111,16 @@ internal static class AppRemovalChatChecks
             ("apagar o cache do aplicativo", false),
             ("meu pc ta lento", false),
             ("quero remover e reinstalar o app da câmera", false),
+            // @qa: relato no passado e tirar da inicialização não são pedido de remover apps.
+            ("desinstalei o app e agora a impressora não imprime", false),
+            ("removi um programa e o som parou", false),
+            ("desinstalaram um aplicativo aqui e parou a câmera", false),
+            ("apaguei o aplicativo sem querer e quero ele de volta", false),
+            ("tirar o programa da inicialização", false),
+            ("como tiro os programas que abrem junto com o windows?", false),
+            ("como removo os apps que vieram no pc?", true),
+            ("tira esses programas inúteis", true),
+            ("meu pc ta lento, remove os apps inúteis", true),
         ];
         var wrong = cases.Where(c => SupportIntake.AsksAppRemoval(c.Text) != c.Removal).Select(c => c.Text).ToArray();
         assert(wrong.Length == 0, "#127 (PC 63f01f0), " + culture + ": o pedido de remover apps pré-instalados é reconhecido; app travado, reinstalar, vírus, temporários, print e cache não"
@@ -125,6 +150,20 @@ internal static class AppRemovalChatChecks
             "#127: num pedido de remover apps, o turno que termina por outra recusa também indica o cartão de Ferramentas · " + answer.Replace("\n", " "));
     }
 
+    // @qa: o pedido que também traz um sintoma investiga o sintoma; no fim, o próximo passo do sintoma vem antes do caminho do cartão.
+    private static async Task SymptomKeepsNextStep(Store store, Account actor, Action<bool, string> assert)
+    {
+        var model = new CapturingModel([Text(PcOffer), Text(PcOffer), Text(PcOffer)]);
+        using var http = new HttpClient(model);
+        var conversation = new Conversation { UserId = actor.Id, Entries = [new Entry { Role = "user", Text = "meu pc ta lento, remove os apps inúteis" }] };
+        var tools = new FlowTools(name => name == "get_health_report" ? WindowsTools.Ok("Espaço livre por volume: C: 77,7% livre.") : null);
+        var answer = (await new AgentService(store, tools, http).Run(actor, conversation, new Progress<string>(), (_, _) => { }, CancellationToken.None)).ReplaceLineEndings("\n");
+        var next = answer.IndexOf(AgentService.NextStep, StringComparison.Ordinal);
+        var path = answer.IndexOf(AgentProtocol.AppRemovalGuidance, StringComparison.Ordinal);
+        assert(model.Consumed && tools.Calls.Contains("get_health_report") && next >= 0 && path > next && !answer.Contains("A IA repetiu", StringComparison.Ordinal),
+            "#127 (@qa): \"meu pc ta lento, remove os apps inúteis\" consulta a saúde e termina com o próximo passo do sintoma e o caminho do cartão · " + answer.Replace("\n", " "));
+    }
+
     private static async Task<string> Ask(Store store, Account actor, string request, CapturingModel model)
     {
         using var http = new HttpClient(model);
@@ -138,13 +177,13 @@ internal static class AppRemovalChatChecks
 
     private static string Text(string content) => JsonSerializer.Serialize(new { message = new { role = "assistant", content } });
 
-    private sealed class FlowTools : IAgentTools
+    private sealed class FlowTools(Func<string, string?>? results = null) : IAgentTools
     {
         internal List<string> Calls { get; } = [];
         public Task<string> Execute(string name, JsonElement args, CancellationToken token)
         {
             Calls.Add(name);
-            return Task.FromResult(JsonSerializer.Serialize(new { success = false, error = "indisponível no teste" }));
+            return Task.FromResult(results?.Invoke(name) ?? JsonSerializer.Serialize(new { success = false, error = "indisponível no teste" }));
         }
     }
 
