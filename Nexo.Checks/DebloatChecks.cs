@@ -707,6 +707,42 @@ internal static class DebloatChecks
             && !DebloatPresentation.Result(Visual(DebloatStatus.Failed, "acesso negado"), undo: false).Contains("próximo logon")
             && !DebloatPresentation.Result(new("Completed", null, [new("file-extensions", "Mostrar extensões de arquivo", DebloatStatus.Ok, "1 valor(es) gravado(s) no seu perfil.")], null), undo: false).Contains("próximo logon"),
             "Debloat: o aviso do próximo logon sai só quando os efeitos visuais são aplicados com Ok, nunca no Desfazer");
+
+        ScreenWiring(check);
+    }
+
+    // O MainWindow (WPF) não compila aqui; o roteiro acima só vale se o Aplicar e o Desfazer da tela usam a mesma trava e o mesmo texto.
+    private static void ScreenWiring(Action<bool, string> check)
+    {
+        string? root = null;
+        foreach (var start in new[] { AppContext.BaseDirectory, Environment.CurrentDirectory })
+            for (var directory = new DirectoryInfo(start); root == null && directory != null; directory = directory.Parent)
+                if (File.Exists(Path.Combine(directory.FullName, "Nexo.Support", "MainWindow.xaml.cs"))) root = directory.FullName;
+        check(root != null, "Debloat: repositório encontrado para conferir a trava do progresso no MainWindow");
+        if (root == null) return;
+        var window = string.Join("\n", File.ReadAllLines(Path.Combine(root, "Nexo.Support", "MainWindow.xaml.cs")).Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+        static string Between(string text, string from, string to)
+        {
+            var start = text.IndexOf(from, StringComparison.Ordinal);
+            var end = start < 0 ? -1 : text.IndexOf(to, start, StringComparison.Ordinal);
+            return start < 0 || end < 0 ? "" : text[start..end];
+        }
+        static bool Wired(string body, string call, bool undo)
+        {
+            var guard = body.IndexOf("new Progress<string>(gate.Guard(", StringComparison.Ordinal);
+            var awaited = body.IndexOf(call, StringComparison.Ordinal);
+            var finish = awaited < 0 ? -1 : body.IndexOf("gate.Finish();", awaited, StringComparison.Ordinal);
+            var shown = body.IndexOf($"debloatStatus = DebloatPresentation.Result(result, undo: {(undo ? "true" : "false")});", StringComparison.Ordinal);
+            var final = body.IndexOf("finally", StringComparison.Ordinal);
+            return guard >= 0 && awaited > guard && finish > awaited && shown > finish
+                && final > shown && body.IndexOf("gate.Finish();", final, StringComparison.Ordinal) > final
+                && !body.Contains("new Progress<string>(message", StringComparison.Ordinal);
+        }
+        var apply = Between(window, "private async Task ApplyDebloat()", "private async Task UndoDebloat()");
+        var undoBody = Between(window, "private async Task UndoDebloat()", "private void RefreshDebloatUndo()");
+        check(Wired(apply, "await DebloatServiceFor().ApplyAsync(", undo: false) && Wired(undoBody, "await DebloatServiceFor().UndoAsync(", undo: true)
+            && !window.Contains("ShowDebloatResult", StringComparison.Ordinal),
+            "Debloat: o Aplicar e o Desfazer do MainWindow passam o progresso pela trava, fecham-na antes do resultado e no finally");
     }
 
     private static int CountOf(string text, string part) => (text.Length - text.Replace(part, "").Length) / part.Length;
