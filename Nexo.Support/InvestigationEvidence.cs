@@ -34,6 +34,9 @@ public sealed class InvestigationEvidence
     // Memória em uso do PC na amostra do relatório de saúde, e se há ocorrência de memória atual que não é só informativa (#71).
     private double? memoryPercent;
     private bool memoryProblemActive;
+    // Alguma ocorrência de memória encerrada no relatório e alguma atual, inclusive só informativa (#139).
+    private bool memoryClosed;
+    private bool memoryActive;
     private double? lowestFreePercent;
     // Temperatura e discos físicos do último relatório de saúde do turno (#135), como o relatório os escreveu.
     private string? temperatureReport;
@@ -267,12 +270,14 @@ public sealed class InvestigationEvidence
                 return "A resposta descreve uma verificação de componente sem resultado bem sucedido dessa categoria.";
         }
         if (PresentsStaleProcess(text)) return StaleProcessReason;
+        if (PresentsClosedMemory(text)) return ClosedMemoryReason;
         if (InventsProcessPurpose(text)) return ProcessPurposeReason;
         if (OffersFileSearch(text)) return FileSearchReason;
         if (ClaimsDriveContents(text)) return SuggestsClosedDiskUsage(text) ? ClosedDiskReason : DriveContentsReason;
         if (OffersUnsupportedAction(text)) return UnsupportedActionReason;
         if (OffersSensorDriverCheck(text)) return SensorDriverOfferReason;
         if (SendsToTaskManagerForTemperature(text)) return TemperatureSourceReason;
+        if (PresentsClosedTrend(text)) return ClosedTrendReason;
         if (PresentsClosedDisk(text)) return ClosedDiskReason;
         if (SuggestsMalware(text)) return MalwareReason;
         if (BlamesStablePlateau(text)) return StablePlateauReason;
@@ -287,6 +292,8 @@ public sealed class InvestigationEvidence
         Func<string, bool>? refuses = reason switch
         {
             StaleProcessReason => PresentsStaleProcess,
+            ClosedMemoryReason => PresentsClosedMemory,
+            ClosedTrendReason => PresentsClosedTrend,
             ProcessPurposeReason => InventsProcessPurpose,
             FileSearchReason => OffersFileSearch,
             DriveContentsReason => ClaimsDriveContents,
@@ -630,7 +637,7 @@ public sealed class InvestigationEvidence
     // A frase só conta sem pergunta, condição, passado ou isenção de estado; "verificar se há…" é pergunta indireta, não condição,
     // e só é lida assim para o que ocupa espaço (#135): a leitura da falta de espaço não muda.
     private static bool ClosedDiskSentence(string sentence, Regex pattern, string conditionText) =>
-        !sentence.Contains('?') && !Regex.IsMatch(PoliteCondition.Replace(conditionText, " "), @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve|teve|tinha|tiveram)\b|\bnormal|\bja foi\b|\bantes\b")
+        !sentence.Contains('?') && !Regex.IsMatch(PoliteCondition.Replace(conditionText, " "), @"\b(se|quando|enquanto|caso|estava|estavam|ficou|esteve|teve|tinha|tiveram)\b|\bnormal(?!iz(?:ando|a|am|ar|ara|arao)\b)|\bja foi\b|\bantes\b")
         && !StateExempt(sentence) && !NoNeed.IsMatch(sentence)
         && pattern.Matches(sentence).Any(match => !Negated(sentence, match) && !NotNeeded.IsMatch(sentence[(match.Index + match.Length)..])
             && !NeedlessBefore.IsMatch(sentence[..match.Index]));
@@ -675,9 +682,82 @@ public sealed class InvestigationEvidence
         var stale = staleProcesses.Select(AgentProtocol.Normalize).Where(name => !current.Contains(name)).ToArray();
         if (stale.Length == 0) return false;
         return Sentences(normalized).Any(sentence =>
-            !sentence.Contains('?') && !Regex.IsMatch(sentence, @"\b(se|quando|enquanto)\b|resolvid|\bnormal|\bja foi\b")
+            !sentence.Contains('?') && !Regex.IsMatch(sentence, @"\b(se|quando|enquanto)\b|resolvid|\bnormal(?!iz(?:ando|a|am|ar|ara|arao)\b)|\bja foi\b")
             && stale.Any(name => Regex.IsMatch(sentence, @"(?<![\w.-])" + Regex.Escape(name) + @"(?:\.exe)?(?![\w-]|\.\w)"))
             && PresentUse.Matches(sentence).Any(use => !Regex.Matches(sentence[..use.Index], @"[\p{L}\p{N}]+").TakeLast(3).Any(word => word.Value is "nao" or "nem" or "nunca")));
+    }
+
+    // Validação da #135 no PC (b8213bd, 22/11, 23:05–23:10, "como está a saúde dos meus discos?", #139): com o crescimento de
+    // memória só em ocorrência encerrada, "**Crescimento de memória em processos**: Alguns processos estão usando mais memória ao
+    // longo do tempo…" e "**Processos com crescimento de memória:** … Recomendo verificar se esses processos estão funcionando
+    // corretamente…" passaram: a trava do processo encerrado só olha a frase que cita o nome dele, e o crescimento do sistema
+    // (memory-growing, sem processo) não tinha trava. Com ocorrência de memória encerrada e nenhuma atual (nem informativa), a
+    // frase que apresenta o crescimento como atual é recusada, com ou sem o nome; e também a recomendação de agir sobre "esses
+    // processos" ("verifique", "encerre", "-los") depois de uma frase sobre o crescimento. Passam: a pergunta, a condição
+    // ("se", "quando", "caso"), a explicação genérica ("pode", "costuma"), o passado ("houve", "teve", "antes") e a frase que diz
+    // que a ocorrência foi resolvida, está encerrada, é histórica ou não está ativa; também a que cita um processo de consulta
+    // atual (get_processes ou ocorrência atual). O uso de memória medido agora ("a memória está em 40%") não é crescimento.
+    // Gate do @qa: "aumento de memória" como upgrade ("recomendo um aumento de memória para 16 GB", "aumento de memória RAM")
+    // não é crescimento; "vem acumulando memória" e "memory leak" são.
+    internal const string ClosedMemoryReason = "A resposta apresenta como atual o crescimento de memória, mas o relatório de saúde só mostra essa ocorrência encerrada (resolvida ou com estado atual desconhecido) e nenhuma ocorrência de memória atual. Não recomende verificar nem encerrar esses processos: diga que essa ocorrência não está ativa ou cite só as leituras atuais.";
+    private static readonly Regex MemoryGrowth = new(@"\b(?:crescimento|vazamento)\s+(?:\w+\s+){0,3}?memoria\b|\bmemory leaks?\b"
+        + @"|(?<!\b(?:recomend|consider|sugir|sugiro|sugest|instal|compr|adicion|upgrade)\w*\b[^.;!?]*)\baumento\s+(?:\w+\s+){0,3}?memoria\b(?!\s+(?:ram\b|para\b|de\s+\d|\d))"
+        + @"|\bmemoria\s+(?:\w+\s+){0,2}?(?:em\s+crescimento|crescente|crescendo|aumentando|subindo)\b"
+        + @"|\b(?:usando|consumindo|ocupando|alocando|segurando|usam|consomem)\s+cada\s+vez\s+mais\s+memoria\b"
+        + @"|\b(?:usando|consumindo|ocupando|alocando|segurando|usam|consomem)\s+mais\s+memoria\b(?=[^.;!?]{0,40}\b(?:ao longo do tempo|com o tempo|gradualmente|progressivamente|continuamente|a cada (?:leitura|minuto|hora))\b)"
+        + @"|\b(?:aumentand\w*|crescend\w*|subind\w*|acumuland\w*)\s+(?:\w+\s+){0,3}?memoria\b");
+    private static readonly Regex ClosedState = new(@"resolvid|encerrad|historic|\bnao (?:esta|estao|e|sao)(?: mais)? (?:ativ\w*|atua(?:l|is))\b|\bja (?:foi|passou|terminou|parou)\b");
+    private static readonly Regex PastOrGeneric = new(@"\b(?:se|quando|enquanto|caso|houve|teve|tinha|tiveram|estava|estavam|esteve|ficou|antes|anteriormente|pode|podem|poderia|costuma|costumam)\b");
+    private static readonly Regex ActOnProcesses = new(@"\b(?:verifi\w*|confir[am]\w*|confer\w*|chec\w*|cheque|monitor(?:e|em|ar|ando)\b|acompanh\w*|observ\w*|analis\w*|investig\w*|revis\w*|encerr\w*|fech\w*|finaliz\w*|reinici\w*|desinstal\w*)"
+        + @"(?:-l[oa]s\b|\b[^.;:!?]{0,40}?\b(?:esses|estes|tais|aqueles|desses|destes|daqueles|nesses|nestes)\s+(?:processos|programas|aplicativos|apps)\b)");
+    private bool PresentsClosedMemory(string normalized)
+    {
+        if (!memoryClosed || memoryActive) return false;
+        var current = topProcesses.Select(p => p.Name).Concat(currentProcesses).ToArray();
+        var growthSeen = false;
+        foreach (var sentence in Sentences(normalized))
+        {
+            var growth = MemoryGrowth.Matches(sentence).Where(match => !Negated(sentence, match)).ToArray();
+            // "verificar se esses processos…" é pergunta indireta, não condição.
+            var free = sentence.Contains('?') || PastOrGeneric.IsMatch(IndirectQuestion.Replace(sentence, " ")) || current.Any(name => Cites(sentence, name));
+            if (growth.Length > 0 && !free && !ClosedState.IsMatch(sentence)) return true;
+            if (growthSeen && !free && ActOnProcesses.Matches(sentence).Any(match => !Negated(sentence, match))) return true;
+            // Uma frase sobre processo de consulta atual troca o referente de "esses processos" e "-los" (@qa).
+            if (growth.Length == 0 && current.Any(name => Cites(sentence, name))) growthSeen = false;
+            growthSeen |= growth.Length > 0;
+        }
+        return false;
+    }
+
+    // Na mesma validação (#139, 1a), "Foi identificado um volume (T:) com pouco espaço livre, mas essa situação já foi resolvida,
+    // e o espaço está normalizando" passou: "resolvida" isentava a frase inteira, e o "normal" de "normalizando" também. O T:
+    // já não existia (o VHDX foi desmontado), e o relatório não tem leitura da evolução de uma ocorrência encerrada. Com o disco
+    // ou a memória só em ocorrência encerrada, a frase sobre esse assunto que diz que ele evolui agora ("está normalizando",
+    // "vem melhorando", "continua diminuindo", "em recuperação") é recusada, mesmo com "resolvida" na frase. O passado ("voltou
+    // ao normal", "já foi resolvida"), a negação, a pergunta e a condição ("se o espaço continuar diminuindo") passam.
+    // Gate do @qa: o futuro inventado ("deve voltar ao normal", "vai se normalizar") também conta; o verbo com objeto ("tende a
+    // melhorar o desempenho") não é evolução, e o assunto precisa vir antes dela na frase. Só o presente, o gerúndio e o futuro
+    // de "normalizar" deixam de isentar nas travas do disco e do processo encerrados: "foi normalizado" isenta como "resolvido".
+    internal const string ClosedTrendReason = "A resposta diz como uma ocorrência encerrada evolui agora (\"normalizando\", \"melhorando\", \"diminuindo\"), mas o relatório de saúde só mostra que ela está encerrada (resolvida ou com estado atual desconhecido), sem leitura dessa evolução. Diga apenas que a ocorrência não está ativa e cite as leituras atuais, como o espaço livre por volume.";
+    private static readonly Regex Trend = new(@"\b(?:esta|estao|ta|tao|vem|vai|continua|continuam|segue|seguem|anda|andam|parece|parecem)\s+(?:(?:se|cada vez mais|aos poucos|gradualmente|lentamente)\s+)*"
+        + @"(?:normalizand\w*|melhorand\w*|estabilizand\w*|recuperand\w*|regularizand\w*|diminuind\w*|reduzind\w*|caind\w*|aumentand\w*|subind\w*|crescend\w*|liberand\w*|voltando ao normal)\b"
+        + @"(?!\s+(?:o|os|as|seu|sua|seus|suas)\b|\s+a\b(?!\s+cada\b)|\s+espaco\b)"
+        + @"|\bem (?:processo de )?(?:normalizacao|recuperacao|estabilizacao|melhora)\b|\b(?:normaliza|melhora|estabiliza|regulariza)-se\b"
+        + @"|\b(?:tende|tendem|deve|devem|vai|vao|ira|irao)\s+(?:a\s+)?(?:se\s+)?(?:normalizar|melhorar|estabilizar|diminuir|regularizar|recuperar|voltar ao normal)\b"
+        + @"(?!\s+(?:o|os|as|seu|sua|seus|suas)\b|\s+a\b(?!\s+cada\b)|\s+espaco\b)");
+    private static readonly Regex DiskTopic = new(@"\b(?:disco|discos|unidade|volume|espaco|armazenamento)\b|(?<![\w:])[a-z]:(?!\w)");
+    private static readonly Regex MemoryTopic = new(@"\b(?:memoria|ram)\b");
+    private bool PresentsClosedTrend(string normalized)
+    {
+        var disk = diskClosed && !diskActive && !(lowestFreePercent < LowFreePercent);
+        var memory = memoryClosed && !memoryActive;
+        if (!disk && !memory) return false;
+        return Sentences(normalized).Any(sentence => !sentence.Contains('?')
+            && Trend.Matches(sentence).Any(match => !Negated(sentence, match)
+                // O assunto vem antes da evolução (@qa): "a conexão está caindo, mas o disco C:…" e "você está liberando espaço" passam.
+                && (disk && DiskTopic.IsMatch(sentence[..match.Index]) || memory && MemoryTopic.IsMatch(sentence[..match.Index]))
+                // A condição vale dentro da oração; os dois-pontos da letra da unidade ("C:") não a cortam.
+                && !Regex.IsMatch(Regex.Split(sentence[..match.Index], @"[,;]|(?<!(?<!\w)\w):")[^1], @"\b(?:se|caso|quando|enquanto)\b")));
     }
 
     // Os MB do processo que segura memória entram na resposta (#88): no PC, a resposta citou "NexoMemTeste PID 23132" e só
@@ -1059,7 +1139,7 @@ public sealed class InvestigationEvidence
     // Assunto do pedido do usuário ("space" ou "slowness"): a recomendação ligada a ele vem primeiro no limite de duas.
     public string? Focus { get; set; }
 
-    private void ForgetFindings() { findings.Clear(); topProcesses.Clear(); memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear(); diskActive = diskClosed = false; lowestFreePercent = null; memoryPercent = null; memoryProblemActive = false; healthAttention = false; }
+    private void ForgetFindings() { findings.Clear(); topProcesses.Clear(); memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear(); diskActive = diskClosed = false; lowestFreePercent = null; memoryPercent = null; memoryProblemActive = memoryClosed = memoryActive = false; healthAttention = false; }
 
     // Só a evidência é encurtada; a orientação de segurança que acompanha a linha nunca é cortada.
     private void Finding(string key, string text, string guidance = "")
@@ -1170,7 +1250,7 @@ public sealed class InvestigationEvidence
         findings.RemoveAll(f => f.Key is "health" or "health:unknown" or "health:informative" or "health:volumes" or "health:temperature" or "health:storage");
         temperatureReport = storageReport = null; physicalDisks.Clear(); raidReported = false;
         memoryHolders.Clear(); staleProcesses.Clear(); currentProcesses.Clear();
-        diskActive = diskClosed = false; lowestFreePercent = null; memoryPercent = null; memoryProblemActive = false; healthAttention = false;
+        diskActive = diskClosed = false; lowestFreePercent = null; memoryPercent = null; memoryProblemActive = memoryClosed = memoryActive = false; healthAttention = false;
         if (report.StartsWith("Nenhuma amostra", StringComparison.Ordinal)) { Finding("health", "O relatório de saúde não tem leituras das últimas 24 horas."); return; }
         // O relatório marca a amostra velha na linha de coleta, pelo mesmo critério de HealthOccurrences.CollectionNotice.
         var stale = Regex.IsMatch(report, @"^Última coleta: [^\n]*Sem leitura recente: o estado atual das ocorrências é desconhecido\.", RegexOptions.Multiline);
@@ -1193,6 +1273,8 @@ public sealed class InvestigationEvidence
             .ToArray();
         diskActive = lines.Any(line => line.Category == "disk" && line.Active);
         memoryProblemActive = lines.Any(line => line.Category == "memory" && line.Active && !Informative(line.Status));
+        memoryActive = lines.Any(line => line.Category == "memory" && line.Active);
+        memoryClosed = lines.Any(line => line.Category == "memory" && !line.Active);
         if (!stale && Regex.Match(report, @"^CPU: [^;\n]*; memória: (?<used>\d{1,3})%", RegexOptions.Multiline) is { Success: true } used)
             memoryPercent = double.Parse(used.Groups["used"].Value, CultureInfo.InvariantCulture);
         diskClosed = lines.Any(line => line.Category == "disk" && !line.Active);
