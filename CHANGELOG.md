@@ -30,6 +30,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - [ ] Validar no PC as métricas ao vivo contra o Gerenciador de Tarefas e medir o custo de CPU do Nexo (#141).
 - [ ] Validar no PC os temas da #143: `scripts/Check-UiPreview.ps1` com `-Theme onyx` e `-Theme glacial` sem falha, as capturas dos dois temas conferidas a olho e a troca em Configurações > Aparência mantida depois de fechar e abrir o Nexo.
 - [ ] Validar no PC a janela e a Início da #143 (etapas 2 e 3): `scripts/Check-UiPreview.ps1 -Theme onyx` e `-Theme glacial` sem falha, snap layouts ao passar sobre o maximizar no Windows 11, maximizar sem cortar a borda e a janela em 100%, 125% e 150% de escala.
+- [ ] Validar no PC a instalação do PawnIO pelo Nexo (#142): confirmação, UAC, assistente oficial, assinatura registrada no resultado e na auditoria, driver detectado depois; e a leitura com administrador (valor e horário na Saúde do PC, UAC cancelado sem valor, ACL de `%ProgramData%\NexoSupport\sensors`).
 - [ ] Trocar "não publicada" pela data de publicação, gerar os pacotes e registrar abaixo o commit e os hashes impressos pelo script.
 
 ### Saúde do computador
@@ -42,6 +43,7 @@ Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mud
 - Sondagens opcionais de gateway, DNS e destino HTTP(S), desligadas por padrão.
 - Serviços automáticos que o Windows deixa parados de propósito (início atrasado ou por gatilho com código 0) não geram alerta.
 - Temperatura da CPU pelo LibreHardwareMonitorLib incorporado ao Nexo (sensor de pacote ou die) e estado dos discos físicos pelo Windows Storage, com origem e horário da leitura; sem fonte confiável, o painel diz "indisponível" e o motivo (#19, PR #79). O driver PawnIO não é instalado pelo Nexo. Em 16/11/2026, uma leitura elevada neste PC retornou 63,8 °C do sensor AMD `Core (Tctl/Tdie)`; cinco leituras sem elevação descartaram valor zero como indisponível. AMD-RAID segue sem ensaio real.
+- PawnIO opcional e leitura com administrador (#142): **Instalar PawnIO (driver oficial)**, na Saúde do PC e em Ferramentas, baixa só com confirmação a release oficial 2.2.0 fixada (tamanho, SHA-256 e assinatura conferidos, redirecionamento só para o GitHub) e abre o assistente do PawnIO com UAC; **Ler temperatura (pede administrador)** roda `Nexo.exe --read-sensors` num processo separado elevado, um UAC por clique, com o resultado na pasta protegida `%ProgramData%\NexoSupport\sensors`. O relatório de saúde usa a leitura elevada por até 5 min, com origem e horário. O modelo continua sem oferecer o PawnIO (#135).
 - Serviço automático parado com saída normal só gera alerta se o Nexo o viu em execução estável nos 10 minutos anteriores; os demais, como os GoogleUpdater, ficam num cartão informativo e não vão ao modelo como problema (#57). Saída com erro continua gerando alerta.
 - Limiares digitados com ponto não são mais multiplicados por dez.
 
