@@ -271,7 +271,8 @@ internal static class LiveSensorChecks
 
         var install = SystemSensorReader.InstallScript(source, files, ProtectedFolderScript.Text);
         var remove = SystemSensorReader.RemoveScript(ProtectedFolderScript.Text);
-        int At(string text, string value) => text.IndexOf(value, StringComparison.Ordinal);
+        // O checkout do Windows (CI e PC) traz os scripts com CRLF; a ordem é conferida com o texto em LF.
+        int At(string text, string value) => text.ReplaceLineEndings("\n").IndexOf(value, StringComparison.Ordinal);
         var outer = OptimizationDiskExecutor.BuildScript(NetworkRecovery.Compact(install), Path.Combine("C:\\Program Files", "NexoOptimize-x"), "C:\\Program Files\\NexoOptimize-x\\result.json", "S-1-5-21-1-2-3-1001");
         var launchOk = true;
         try { WindowsTools.CheckElevatedLaunch(["-NoProfile", "-NonInteractive", "-Command", outer]); } catch (InvalidOperationException) { launchOk = false; }
