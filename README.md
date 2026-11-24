@@ -14,6 +14,8 @@ O monitor mostra separadamente a interface local, o gateway, a resolução DNS e
 
 Em **Ferramentas**, o botão **Otimizar PC** remove arquivos com mais de sete dias apenas das pastas temporárias do perfil e do Windows, depois pede ao Windows a manutenção nativa de discos elegíveis. Discos virtuais são ignorados. A tela mostra quantidades, tempo, erros e resultado por etapa; acesso negado aparece como resultado parcial. O Nexo não mede nem promete ganho de desempenho. O cancelamento não reverte arquivos já removidos.
 
+Em **Ferramentas**, o cartão **Componentes do Windows para jogos e programas** (#150, 1.8.0) verifica, só lendo, os Visual C++ Redistributable de 2005 a 2015–2022 (x86 e x64), as DLLs do DirectX de junho de 2010 e a versão do .NET Framework. Ele instala só o que você marcar, pelos instaladores oficiais da Microsoft, com host restrito, assinatura conferida antes do UAC e resultado por item no histórico; o assistente não oferece essa instalação pelo chat. Fontes, hashes e como atualizar: [docs/runtimes.md](docs/runtimes.md).
+
 ## Abrir
 
 Para executar a compilação local, rode `dotnet run --project Nexo.Support -c Release`. Para instalar o aplicativo com o modelo local, baixe [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe). Ele consulta a versão publicada na Oracle ao ser executado; veja [o procedimento de instalação e publicação](docs/INSTALADOR-NUVEM.md). A versão publicada atual é a 1.6.3; a 1.7.0 desta branch ainda não foi publicada. Histórico, pré-requisitos de publicação e hashes dos arquivos publicados estão em [CHANGELOG.md](CHANGELOG.md).
@@ -207,6 +209,7 @@ dotnet run --project Nexo.Checks -- --interaction-evals
 dotnet run --project Nexo.Checks -- --interface-probe-live
 dotnet run --project Nexo.Checks -- --hardware-live
 dotnet run --project Nexo.Checks -- --debloat
+dotnet run --project Nexo.Checks -- --runtimes
 dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.7.0
 dotnet run --project Nexo.Setup.Checks -c Release
 ```

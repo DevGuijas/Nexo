@@ -4,6 +4,16 @@ Cada versão publicada é imutável: os arquivos de `releases/<versão>/` no arm
 
 A data no título de uma versão é o dia em que o `latest.json` dela foi publicado. Enquanto o título disser "não publicada", `scripts/Build-CloudRelease.ps1` se recusa a gerar os pacotes.
 
+## [1.8.0] — não publicada
+
+### Ferramentas
+
+- Cartão **Componentes do Windows para jogos e programas** (#150): verifica, só lendo, os Visual C++ Redistributable de 2005 a 2015–2022 (x86 e x64), as DLLs do DirectX End-User Runtime de junho de 2010 e a versão do .NET Framework, e instala só o que o usuário marcar pelos instaladores oficiais da Microsoft. Os instaladores imutáveis têm URL, tamanho e SHA-256 fixados; o VC++ v14 usa o link permanente da Microsoft com assinatura Authenticode Microsoft e teto de 64 MB. Host restrito nos redirecionamentos, um UAC por item, reinício pendente avisado sem reiniciar, resultado por item em `runtimes-audit.ndjson` e no `operations.db`. O assistente não oferece essa instalação pelo chat. Detalhes em [docs/runtimes.md](docs/runtimes.md).
+
+### Antes de publicar
+
+- [ ] Validar no PC o cartão de componentes (#150): verificar, instalar um item que falta (ou reinstalar o v14 sobre ele mesmo), conferir assinatura, auditoria e `operations.db`, e o UAC cancelado.
+
 ## [1.7.0] — não publicada
 
 Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mudou desde a 1.6.3.
