@@ -172,7 +172,8 @@ public sealed record RuntimeInstallResult(RuntimeItem Item, RuntimeOutcome Outco
 public sealed record RuntimeAudit(DateTimeOffset At, string Id, string Title, string Outcome, int? ExitCode, string Url, string FinalUrl, long Bytes, string Sha256, bool Pinned, string Signer, string Message, string Leftover = "");
 
 /// <summary>Get-AuthenticodeSignature e a raiz da cadeia do SignerCertificate (impressão digital SHA-1), da mesma chamada.</summary>
-public sealed record RuntimeSignature(string Status, string Subject, string Root);
+/// <summary>Chain vazio quando a cadeia foi montada (Build verdadeiro) só com prazo vencido ou revogação desconhecida; senão, o motivo.</summary>
+public sealed record RuntimeSignature(string Status, string Subject, string Root, string Chain = "");
 
 /// <summary>O que a instalação precisa do Windows e da rede; as verificações trocam tudo por simulações.</summary>
 public interface IRuntimeInstallSystem : IRuntimeProbe
@@ -197,7 +198,8 @@ public interface IRuntimeInstallSystem : IRuntimeProbe
 /// Microsoft por HTTPS (redirecionamentos conferidos um a um), com limite de tamanho durante o download, gravado numa pasta nova
 /// em %TEMP%\Nexo\Runtimes, mantido aberto sem compartilhar escrita até o instalador terminar, conferido pelo SHA-256 fixado
 /// (quando houver), por link ou junção no caminho e pela assinatura Authenticode Valid do assinante Microsoft esperado, com a cadeia
-/// terminando na raiz esperada. Antes do UAC, a pasta ganha uma DACL protegida e o Nexo confere que ela contém só o instalador.
+/// montada e terminando na raiz esperada. A pasta ganha uma DACL protegida logo depois de o instalador ser criado vazio, antes do
+/// download, e antes do UAC o Nexo confere que ela contém só o instalador.
 /// Depois do instalador, a verificação confere o componente. Um UAC cancelado encerra a fila: os itens seguintes ficam "não iniciado".
 /// </summary>
 public static class RuntimeInstaller
@@ -244,9 +246,25 @@ public static class RuntimeInstaller
         try
         {
             Directory.CreateDirectory(directory);
-            progress?.Report(item.Title + ": baixando o instalador oficial da Microsoft...");
-            if (await Download(system, item, file, trace, token) is { } failure) return failure;
-            // Aberto sem permitir escrita nem exclusão até o instalador terminar.
+            // O instalador nasce vazio, já aberto para escrita sem compartilhamento, e a DACL vem logo em seguida, antes do download.
+            // Um processo da mesma conta poderia gravar uma DLL na pasta, e os instaladores antigos (IExpress) carregam DLLs da própria
+            // pasta já como administrador. A DACL protegida tira do dono a criação de arquivos e o WRITE_DAC; o acesso do handle já
+            // aberto foi concedido na abertura, então o Nexo continua gravando nele.
+            var output = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            try
+            {
+                try { system.ProtectDirectory(directory); }
+                catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or InvalidOperationException or IdentityNotMappedException or PlatformNotSupportedException)
+                {
+                    return new(item, RuntimeOutcome.Failed, "Não foi possível proteger a pasta do instalador (" + Short(ex.Message) + "). Nada foi baixado nem executado.");
+                }
+                progress?.Report(item.Title + ": baixando o instalador oficial da Microsoft...");
+                if (await Download(system, item, output, trace, token) is { } failure) return failure;
+            }
+            finally { await output.DisposeAsync(); }
+            // Reaberto só para leitura, sem permitir escrita nem exclusão, até o instalador terminar. O Get-AuthenticodeSignature e o
+            // runas leem com compartilhamento de leitura, o que um handle de escrita impediria. Se outro handle de escrita existir
+            // (aberto antes da DACL), a abertura falha; se algo mudou o arquivo entre o fechamento e esta abertura, o hash acusa.
             await using var held = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
             var limit = item.Size ?? item.MaxSize;
             if (item.Size is { } size && held.Length != size) return Integrity(item, $"o arquivo tem {held.Length} bytes, e o esperado é {size}");
@@ -256,16 +274,9 @@ public static class RuntimeInstaller
                 return Integrity(item, "o SHA-256 não é o fixado no Nexo", hash);
             if (system.Linked(file) is { } link)
                 return new(item, RuntimeOutcome.Link, $"O caminho do instalador passa por um link ou junção ({link}). O arquivo foi apagado e nada foi executado.", Sha256: hash);
-            // Um processo da mesma conta poderia gravar uma DLL na pasta antes do UAC, e os instaladores antigos (IExpress) carregam
-            // DLLs da própria pasta já como administrador. A DACL protegida tira do dono a criação de arquivos e o WRITE_DAC.
-            try { system.ProtectDirectory(directory); }
-            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or InvalidOperationException or IdentityNotMappedException or PlatformNotSupportedException)
-            {
-                return new(item, RuntimeOutcome.Failed, "Não foi possível proteger a pasta do instalador (" + Short(ex.Message) + "). Nada foi executado.", Sha256: hash);
-            }
             progress?.Report(item.Title + ": conferindo a assinatura digital...");
-            string status, signer, root;
-            try { (status, signer, root) = await system.Signature(file, token); }
+            string status, signer, root, chain;
+            try { (status, signer, root, chain) = await system.Signature(file, token); }
             catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or Win32Exception)
             {
                 return new(item, RuntimeOutcome.Signature, "Não foi possível conferir a assinatura digital (" + Short(ex.Message) + "). O arquivo foi apagado e nada foi executado.", Sha256: hash);
@@ -274,6 +285,9 @@ public static class RuntimeInstaller
                 return new(item, RuntimeOutcome.Signature, $"A assinatura digital não é válida (estado: {(status.Length == 0 ? "desconhecido" : status)}). O arquivo foi apagado e nada foi executado.", Signer: signer, Sha256: hash);
             if (!string.Equals(signer, item.Signer, StringComparison.Ordinal))
                 return new(item, RuntimeOutcome.Signature, $"O assinante não é o da Microsoft esperado ({(signer.Length == 0 ? "não informado" : signer)}). O arquivo foi apagado e nada foi executado.", Signer: signer, Sha256: hash);
+            // Cadeia que não fecha (PartialChain), com assinatura inválida ou com qualquer outro problema além do prazo e da revogação.
+            if (chain.Length > 0)
+                return new(item, RuntimeOutcome.Untrusted, $"Assinatura não confiável: a cadeia do certificado não foi validada ({chain}). O arquivo foi apagado e nada foi executado.", Signer: signer, Sha256: hash);
             // Uma raiz extra no PC (adware, proxy TLS) emitiria um certificado com o mesmo Subject; a raiz da cadeia não seria a da Microsoft.
             if (!string.Equals(root, item.Root, StringComparison.OrdinalIgnoreCase))
                 return new(item, RuntimeOutcome.Untrusted, $"Assinatura não confiável: a cadeia do certificado termina em outra raiz ({(root.Length == 0 ? "não informada" : root)}), e a esperada é a {item.Root}. O arquivo foi apagado e nada foi executado.", Signer: signer, Sha256: hash);
@@ -318,7 +332,7 @@ public static class RuntimeInstaller
     }
 
     // Cada salto é conferido antes do pedido: HTTPS, porta 443, sem usuário na URL e host exato da lista da Microsoft.
-    private static async Task<RuntimeInstallResult?> Download(IRuntimeInstallSystem system, RuntimeItem item, string file, Trace trace, CancellationToken token)
+    private static async Task<RuntimeInstallResult?> Download(IRuntimeInstallSystem system, RuntimeItem item, Stream output, Trace trace, CancellationToken token)
     {
         var url = item.Url;
         var limit = item.Size ?? item.MaxSize;
@@ -340,7 +354,6 @@ public static class RuntimeInstaller
             if (response.Content.Headers.ContentLength is { } length && (item.Size is { } size ? length != size : length > limit))
                 return Integrity(item, $"o tamanho informado é {length} bytes, e o esperado é " + (item.Size is { } fixedSize ? fixedSize + " bytes" : "até " + limit + " bytes"));
             await using var source = await response.Content.ReadAsStreamAsync(token);
-            await using var output = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             var buffer = new byte[81920];
             long total = 0;
             int read;
@@ -475,16 +488,22 @@ public sealed class WindowsRuntimeSystem : IRuntimeInstallSystem
     public async Task<RuntimeSignature> Signature(string file, CancellationToken token) => ParseSignature(await SupportService.Powershell(SignatureScript(file), token));
 
     // Na mesma chamada do Get-AuthenticodeSignature (o invólucro do SupportService põe o guard da #131), a cadeia do SignerCertificate
-    // é montada com X509Chain, sem consulta de revogação (não depende de rede; o Authenticode Valid já veio do Windows). Os
-    // certificados embutidos no arquivo entram só como auxiliares; a raiz é o último elemento da cadeia.
+    // é montada com X509Chain, sem consulta de revogação (não depende de rede; o Authenticode Valid já veio do Windows) e ignorando
+    // só o prazo: a raiz de 2001 e as folhas do 2012 e do 2013 estão vencidas. Os certificados embutidos no arquivo entram só como
+    // auxiliares; a raiz é o último elemento da cadeia. O resultado do Build e cada ChainStatus vão na saída, e o ParseSignature decide.
     internal static string SignatureScript(string file) =>
-        "$s=Get-AuthenticodeSignature -LiteralPath " + WindowsTools.Quote(file) + "; $root=''"
+        "$s=Get-AuthenticodeSignature -LiteralPath " + WindowsTools.Quote(file) + "; $root=''; $built=$false; $chain=@()"
         + "; if($s.SignerCertificate){$c=New-Object System.Security.Cryptography.X509Certificates.X509Chain"
         + "; $c.ChainPolicy.RevocationMode=[System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck"
+        + "; $c.ChainPolicy.VerificationFlags=[System.Security.Cryptography.X509Certificates.X509VerificationFlags]::IgnoreNotTimeValid"
         + "; $x=New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection; try{$x.Import(" + WindowsTools.Quote(file) + ")}catch{}"
-        + "; [void]$c.ChainPolicy.ExtraStore.AddRange($x); [void]$c.Build($s.SignerCertificate)"
+        + "; [void]$c.ChainPolicy.ExtraStore.AddRange($x); $built=[bool]$c.Build($s.SignerCertificate)"
+        + "; $chain=@($c.ChainStatus | ForEach-Object { [string]$_.Status })"
         + "; if($c.ChainElements.Count -gt 0){$root=[string]$c.ChainElements[$c.ChainElements.Count-1].Certificate.Thumbprint}; $c.Reset()}"
-        + "; [pscustomobject]@{Status=[string]$s.Status;Subject=[string]$s.SignerCertificate.Subject;Root=[string]$root} | ConvertTo-Json -Compress";
+        + "; [pscustomobject]@{Status=[string]$s.Status;Subject=[string]$s.SignerCertificate.Subject;Root=[string]$root;Built=$built;Chain=$chain} | ConvertTo-Json -Compress";
+
+    // Com IgnoreNotTimeValid e NoCheck, o Build verdadeiro ainda lista o prazo vencido e, se aparecer, a revogação desconhecida.
+    private static readonly string[] ChainTolerated = ["NotTimeValid", "RevocationStatusUnknown", "OfflineRevocation"];
 
     internal static RuntimeSignature ParseSignature(string json)
     {
@@ -493,9 +512,15 @@ public sealed class WindowsRuntimeSystem : IRuntimeInstallSystem
             using var parsed = JsonDocument.Parse(json);
             var root = parsed.RootElement;
             string Text(string name) => root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? "" : "";
-            return new(Text("Status"), Text("Subject"), Text("Root").Trim());
+            var built = root.TryGetProperty("Built", out var b) && b.ValueKind == JsonValueKind.True;
+            var statuses = root.TryGetProperty("Chain", out var c) && c.ValueKind == JsonValueKind.Array
+                ? c.EnumerateArray().Select(s => s.ValueKind == JsonValueKind.String ? s.GetString() ?? "" : "?").ToArray() : null;
+            var chain = statuses == null ? "estado da cadeia não informado"
+                : !built ? "a cadeia não foi montada" + (statuses.Length > 0 ? ": " + string.Join(", ", statuses) : "")
+                : string.Join(", ", statuses.Where(s => !ChainTolerated.Contains(s, StringComparer.Ordinal)));
+            return new(Text("Status"), Text("Subject"), chain.Length == 0 ? Text("Root").Trim() : "", chain);
         }
-        catch (Exception ex) when (ex is JsonException or InvalidOperationException) { return new("", "", ""); }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException) { return new("", "", "", "saída do PowerShell ilegível"); }
     }
 
     // O instalador já iniciado não é interrompido pelo cancelamento: o Nexo espera o fim para informar o resultado.
@@ -515,7 +540,7 @@ public sealed class WindowsRuntimeSystem : IRuntimeInstallSystem
     public string WorkDirectory() => Path.Combine(Path.GetTempPath(), "Nexo", "Runtimes", Guid.NewGuid().ToString("N"));
 
     // Sem admin: o dono ainda tem o WRITE_DAC implícito e define a DACL; depois dela, o OWNER RIGHTS tira esse direito. As ACEs são
-    // herdáveis, e o Windows as propaga ao instalador já gravado (a herança antiga, do %TEMP%, sai). Nenhuma ACE para o usuário atual.
+    // herdáveis, e o Windows as propaga ao instalador já criado (a herança antiga, do %TEMP%, sai). Nenhuma ACE para o usuário atual.
     public void ProtectDirectory(string directory)
     {
         const InheritanceFlags inherit = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
