@@ -1,0 +1,406 @@
+using System.Net;
+using System.Security.Cryptography;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using Nexo.Support;
+namespace Nexo.Checks;
+
+/// <summary>
+/// #150: cartão "Componentes do Windows para jogos e programas". Registro, arquivos, download, assinatura e processo são simulados;
+/// nenhum teste toca o registro, a rede ou o UAC de verdade.
+/// </summary>
+internal static class RuntimeChecks
+{
+    internal static async Task Run(Action<bool, string> check)
+    {
+        Catalog(check);
+        Detection(check);
+        DirectX(check);
+        Informative(check);
+        ReadOnly(check);
+        await Install(check);
+        Guard(check);
+        Card(check);
+    }
+
+    private const string V14 = @"SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\";
+
+    private class FakeProbe : IRuntimeProbe
+    {
+        public bool Is64BitWindows { get; set; } = true;
+        public Dictionary<string, object> Registry { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public List<string> Names { get; } = [];
+        public HashSet<string> Files { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public string SystemFolder => @"C:\Windows\System32";
+        public string Wow64Folder => @"C:\Windows\SysWOW64";
+        public object? Value(bool wow64, string path, string name) => Registry.TryGetValue(wow64 + "|" + path + "|" + name, out var value) ? value : null;
+        public IReadOnlyList<string> ValueNames(bool wow64, string path) =>
+            Registry.Keys.Where(k => k.StartsWith(wow64 + "|" + path + "|", StringComparison.OrdinalIgnoreCase)).Select(k => k.Split('|')[2]).ToArray();
+        public IReadOnlyList<string> UninstallNames() => Names.ToArray();
+        public bool FileExists(string path) => Files.Contains(path);
+        public void SetV14(string arch, bool wow64 = true, string version = "v14.50.35710.00")
+        {
+            Registry[wow64 + "|" + V14 + arch + "|Installed"] = 1;
+            Registry[wow64 + "|" + V14 + arch + "|Version"] = version;
+        }
+        public void AllDirectX()
+        {
+            foreach (var folder in new[] { SystemFolder, Wow64Folder })
+                foreach (var file in RuntimeCatalog.DirectXFiles) Files.Add(Path.Combine(folder, file));
+        }
+    }
+
+    private sealed class FakeSystem : FakeProbe, IRuntimeInstallSystem
+    {
+        public required string Root { get; init; }
+        public Func<Uri, HttpResponseMessage> Respond { get; set; } = _ => new HttpResponseMessage(HttpStatusCode.NotFound);
+        public (string, string) Sign { get; set; } = ("Valid", RuntimeCatalog.MicrosoftSigner);
+        public Func<string, int?> Exit { get; set; } = _ => 0;
+        public Action<string>? AfterRun { get; set; }
+        public List<Uri> Requests { get; } = [];
+        public List<string> Ran { get; } = [];
+        public List<string> Arguments { get; } = [];
+        public List<string> Signed { get; } = [];
+        public List<string> Dirs { get; } = [];
+        public bool ExistedWhenRun { get; private set; } = true;
+        public bool WriteBlockedWhenRun { get; private set; } = true;
+        public string? Link { get; set; }
+        public Task<HttpResponseMessage> Send(Uri url, CancellationToken token) { Requests.Add(url); return Task.FromResult(Respond(url)); }
+        public Task<(string Status, string Subject)> Signature(string file, CancellationToken token) { Signed.Add(file); return Task.FromResult(Sign); }
+        public Task<int?> RunElevated(string file, string arguments, CancellationToken token)
+        {
+            var name = Path.GetFileName(file);
+            Ran.Add(name); Arguments.Add(arguments);
+            ExistedWhenRun &= File.Exists(file);
+            // O arquivo segue aberto pelo Nexo sem compartilhar escrita: outro processo não consegue gravar nele.
+            try { using var _ = new FileStream(file, FileMode.Open, FileAccess.Write, FileShare.ReadWrite); WriteBlockedWhenRun = false; }
+            catch (IOException) { }
+            var exit = Exit(name);
+            if (exit != null) AfterRun?.Invoke(name);
+            return Task.FromResult(exit);
+        }
+        public string WorkDirectory() { var dir = Path.Combine(Root, Guid.NewGuid().ToString("N")); Dirs.Add(dir); return dir; }
+        public string? Linked(string file) => Link;
+    }
+
+    private static HttpResponseMessage Ok(byte[] body, long? length = null)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) };
+        response.Content.Headers.ContentLength = length ?? body.Length;
+        return response;
+    }
+    private static HttpResponseMessage Redirect(string location) { var r = new HttpResponseMessage(HttpStatusCode.Found); r.Headers.Location = new Uri(location, UriKind.RelativeOrAbsolute); return r; }
+
+    private sealed class Endless(long limit) : Stream
+    {
+        public long Served { get; private set; }
+        public override int Read(byte[] buffer, int offset, int count) { var n = (int)Math.Min(count, limit - Served); Served += n; return n; }
+        public override bool CanRead => true; public override bool CanSeek => false; public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException(); public override long Position { get => Served; set => throw new NotSupportedException(); }
+        public override void Flush() { } public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException(); public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
+    private static RuntimeItem Item(string id) => RuntimeCatalog.Find(id)!;
+
+    private static void Catalog(Action<bool, string> check)
+    {
+        var items = RuntimeCatalog.Items;
+        var ids = new[] { "vc14-x64", "vc14-x86", "vc2013-x64", "vc2013-x86", "vc2012-x64", "vc2012-x86", "vc2010-x64", "vc2010-x86", "vc2008-x64", "vc2008-x86", "vc2005-x64", "vc2005-x86", "directx" };
+        check(items.Select(i => i.Id).SequenceEqual(ids) && items.All(i => RuntimeCatalog.AllowedHost(i.Url)),
+            "#150 catálogo: VC++ 2005 a v14 em x86 e x64 e o DirectX, todos em host da Microsoft por HTTPS");
+        var pinned = items.Where(i => i.Pinned).ToArray();
+        check(pinned.Length == 11 && pinned.All(i => Regex.IsMatch(i.Sha256!, "^[0-9a-f]{64}$") && i.Size > 100_000 && i.MaxSize == i.Size)
+            && !Item("vc14-x64").Pinned && !Item("vc14-x86").Pinned && Item("vc14-x64").MaxSize == RuntimeCatalog.LatestMaxSize
+            && Item("vc14-x64").Url.ToString() == "https://aka.ms/vc14/vc_redist.x64.exe" && Item("vc14-x86").Url.ToString() == "https://aka.ms/vc14/vc_redist.x86.exe",
+            "#150 catálogo: URL, tamanho e SHA-256 fixados nos instaladores imutáveis; o v14 usa o link permanente da Microsoft com teto de tamanho");
+        check(Item("directx").Sha256 == "2cf71d098c608c56e07f4655855a886c3102553f648df88458df616b26fd612f" && Item("directx").Size == 295320 && Item("directx").FileName == "dxwebsetup.exe"
+            && Item("vc2005-x86").Sha256 == "8648c5fc29c44b9112fe52f9a33f80e7fc42d10f3b5b42b2121542a13e44adfd" && Item("vc2013-x64").Size == 7200744
+            && items.All(i => !i.Url.ToString().Contains("DXSDK", StringComparison.OrdinalIgnoreCase)),
+            "#150 catálogo: hashes conferidos em 23/11/2026 (docs/runtimes.md) e o DirectX pelo instalador web, sem o DirectX SDK");
+        check(Item("vc14-x64").Arguments == "/install /passive /norestart" && Item("vc2013-x86").Arguments == "/install /passive /norestart" && Item("vc2012-x64").Arguments == "/install /passive /norestart"
+            && Item("vc2010-x64").Arguments == "/passive /norestart" && Item("vc2008-x86").Arguments == "/q" && Item("vc2005-x64").Arguments == "/q" && Item("directx").Arguments == "/Q",
+            "#150 catálogo: argumentos silenciosos documentados de cada instalador");
+        check(Item("vc14-x64").DefaultWhenMissing && Item("vc14-x86").DefaultWhenMissing && items.Where(i => i.VcYear is > 0 and < 2015).All(i => !i.DefaultWhenMissing) && !Item("directx").DefaultWhenMissing
+            && items.Where(i => i.VcYear is 2012 or 2013).All(i => i.Signer == RuntimeCatalog.MicrosoftSignerMopr) && items.Where(i => i.VcYear is not (2012 or 2013)).All(i => i.Signer == RuntimeCatalog.MicrosoftSigner),
+            "#150 catálogo: só o v14 que falta vem marcado; os antigos e o DirectX vêm desmarcados; assinante Microsoft por item");
+        string[] refusedHosts = ["http://download.microsoft.com/a.exe", "https://download.microsoft.com.evil.example/a.exe", "https://evil.example/a.exe", "https://user@aka.ms/a",
+            "https://aka.ms:8443/a", "https://microsoft.com/a.exe", "https://evilaka.ms/a", "https://download.visualstudio.microsoft.com.evil/a", "ftp://download.microsoft.com/a"];
+        check(refusedHosts.All(u => !RuntimeCatalog.AllowedHost(new Uri(u))) && RuntimeCatalog.AllowedHost(new Uri("https://download.visualstudio.microsoft.com/download/pr/x/VC_redist.x64.exe")),
+            "#150 hosts: só HTTPS na porta 443, sem usuário, com host exato da lista da Microsoft");
+    }
+
+    private static void Detection(Action<bool, string> check)
+    {
+        var present = new FakeProbe(); present.SetV14("x64"); present.SetV14("x86");
+        var scan = RuntimeInspector.Scan(present);
+        var x64 = scan.Items.First(s => s.Item.Id == "vc14-x64"); var x86 = scan.Items.First(s => s.Item.Id == "vc14-x86");
+        check(x64.State == RuntimeState.Installed && x86.State == RuntimeState.Installed && x64.Version == "14.50.35710.00", "#150 detecção: v14 com Installed=1 na chave Runtimes aparece instalado, com a versão");
+        var view64 = new FakeProbe(); view64.SetV14("x64", wow64: false);
+        check(RuntimeInspector.Detect(view64, Item("vc14-x64")).State == RuntimeState.Installed, "#150 detecção: a chave do v14 vale também na visão de 64 bits do registro");
+        var absent = RuntimeInspector.Scan(new FakeProbe());
+        check(absent.Items.Where(s => s.Item.Kind == RuntimeKind.VisualCpp).All(s => s.State == RuntimeState.Missing) && absent.Missing.Count() == 13,
+            "#150 detecção: sem chave nem nome em Aplicativos, todos os VC++ faltam");
+        var onlyX86 = new FakeProbe(); onlyX86.SetV14("x86");
+        check(RuntimeInspector.Detect(onlyX86, Item("vc14-x86")).State == RuntimeState.Installed && RuntimeInspector.Detect(onlyX86, Item("vc14-x64")).State == RuntimeState.Missing,
+            "#150 detecção: só o x86 instalado → o x64 falta");
+        var zero = new FakeProbe(); zero.Registry["True|" + V14 + "x64|Installed"] = 0;
+        check(RuntimeInspector.Detect(zero, Item("vc14-x64")).State == RuntimeState.Missing, "#150 detecção: Installed=0 não conta como instalado");
+        var names = new FakeProbe();
+        names.Names.AddRange(["Microsoft Visual C++ 2010  x86 Redistributable - 10.0.40219", "Microsoft Visual C++ 2005 Redistributable", "Microsoft Visual C++ 2008 Redistributable - x64 9.0.30729.6161",
+            "Microsoft Visual C++ 2013 Redistributable (x64) - 12.0.40664", "Microsoft Visual C++ 2015-2022 Redistributable (x86) - 14.44.35211", "Microsoft Visual C++ 2012 Redistributable (ARM64)"]);
+        var byName = RuntimeInspector.Scan(names).Items.ToDictionary(s => s.Item.Id, s => s.State);
+        check(byName["vc2010-x86"] == RuntimeState.Installed && byName["vc2010-x64"] == RuntimeState.Missing && byName["vc2005-x86"] == RuntimeState.Installed && byName["vc2005-x64"] == RuntimeState.Missing
+            && byName["vc2008-x64"] == RuntimeState.Installed && byName["vc2008-x86"] == RuntimeState.Missing && byName["vc2013-x64"] == RuntimeState.Installed && byName["vc14-x86"] == RuntimeState.Installed
+            && byName["vc14-x64"] == RuntimeState.Missing && byName["vc2012-x86"] == RuntimeState.Missing && byName["vc2012-x64"] == RuntimeState.Missing,
+            "#150 detecção: VC++ antigos e o v14 pelo nome em Aplicativos, por ano e arquitetura (2005 sem arquitetura é o x86; ARM64 não conta)");
+        var minimum = new FakeProbe(); minimum.Names.Add("Microsoft Visual C++ 2012 x64 Minimum Runtime - 11.0.61030"); minimum.Names.Add("Microsoft Visual C++ v14 Redistributable (x64) - 14.50.35710");
+        minimum.Registry[@"True|SOFTWARE\Microsoft\VisualStudio\12.0\VC\Runtimes\x86|Installed"] = 1;
+        check(RuntimeInspector.Detect(minimum, Item("vc2012-x64")).State == RuntimeState.Installed && RuntimeInspector.Detect(minimum, Item("vc14-x64")).State == RuntimeState.Installed
+            && RuntimeInspector.Detect(minimum, Item("vc2013-x86")).State == RuntimeState.Installed,
+            "#150 detecção: a busca é aproximada para o lado do instalado (Minimum Runtime, nome v14 e a chave Runtimes do 2012/2013), sem falso \"falta\"");
+        var x32 = new FakeProbe { Is64BitWindows = false };
+        var scan32 = RuntimeInspector.Scan(x32);
+        check(scan32.Items.Where(s => s.Item.Arch == RuntimeArch.X64).All(s => s.State == RuntimeState.NotApplicable) && scan32.Missing.All(s => s.Item.Arch != RuntimeArch.X64),
+            "#150 detecção: no Windows de 32 bits os itens x64 não se aplicam e não são oferecidos");
+        var defaults = absent.Missing.Where(RuntimeCatalog.DefaultSelected).Select(s => s.Item.Id).ToArray();
+        check(defaults.SequenceEqual(["vc14-x64", "vc14-x86"]) && !RuntimeCatalog.DefaultSelected(x64),
+            "#150 seleção: os itens antigos e o DirectX que faltam vêm desmarcados; só o v14 que falta vem marcado; o instalado não tem caixa marcada");
+    }
+
+    private static void DirectX(Action<bool, string> check)
+    {
+        var full = new FakeProbe(); full.AllDirectX();
+        check(RuntimeInspector.Detect(full, Item("directx")).State == RuntimeState.Installed, "#150 DirectX: todas as DLLs de junho de 2010 em System32 e SysWOW64 → instalado");
+        var gap = new FakeProbe(); gap.AllDirectX(); gap.Files.Remove(Path.Combine(gap.Wow64Folder, "d3dx9_43.dll")); gap.Files.Remove(Path.Combine(gap.SystemFolder, "xinput1_3.dll"));
+        var status = RuntimeInspector.Detect(gap, Item("directx"));
+        check(status.State == RuntimeState.Missing && status.Detail.Contains(@"SysWOW64\d3dx9_43.dll") && status.Detail.Contains(@"System32\xinput1_3.dll") && !status.Detail.Contains("d3dx11"),
+            "#150 DirectX: DLL faltando em System32 ou SysWOW64 → falta, com os arquivos no detalhe");
+        var x32 = new FakeProbe { Is64BitWindows = false };
+        foreach (var file in RuntimeCatalog.DirectXFiles) x32.Files.Add(Path.Combine(x32.SystemFolder, file));
+        check(RuntimeInspector.Detect(x32, Item("directx")).State == RuntimeState.Installed && RuntimeCatalog.DirectXFiles.Contains("XAudio2_7.dll") && RuntimeCatalog.DirectXFiles.Contains("d3dx10_43.dll"),
+            "#150 DirectX: no Windows de 32 bits só System32 conta; D3DX9/10/11, XInput 1.3, XAudio 2.7 e XACT conferidos");
+    }
+
+    private static void Informative(Action<bool, string> check)
+    {
+        var probe = new FakeProbe();
+        probe.Registry[@"False|SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full|Release"] = 533320;
+        probe.Registry[@"True|SOFTWARE\dotnet\Setup\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App|8.0.11"] = 1;
+        probe.Registry[@"True|SOFTWARE\dotnet\Setup\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App|6.0.36"] = 1;
+        var scan = RuntimeInspector.Scan(probe);
+        var old = new FakeProbe(); old.Registry[@"False|SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full|Release"] = 528040;
+        check(scan.DotNetFramework.StartsWith("4.8.1") && RuntimeInspector.DotNetFramework(old).StartsWith("4.8 ") && RuntimeInspector.DotNetFramework(new FakeProbe()) == "não encontrado"
+            && scan.DesktopRuntimes.SequenceEqual(["6.0.36 (x64)", "8.0.11 (x64)"]) && scan.Items.All(s => s.Item.Id != "netfx"),
+            "#150 .NET: Framework pelo Release de NDP\\v4\\Full e Desktop Runtime pelas chaves do instalador, só informativos (não entram na instalação)");
+        var text = RuntimePresentation.ScanText(scan);
+        check(text.Contains("4.8.1") && text.Contains("8.0.11") && text.Contains("informativo"), "#150 .NET: a verificação mostra as versões como informação");
+    }
+
+    // Verificar não altera nada: a interface da leitura só tem leituras, e o leitor do Windows abre o registro só para leitura.
+    private static void ReadOnly(Action<bool, string> check)
+    {
+        var methods = typeof(IRuntimeProbe).GetMethods().Select(m => m.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
+        var source = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Code", "RuntimeSetup.cs"));
+        var reader = Regex.Match(source, @"public sealed class WindowsRuntimeSystem.*?public Task<HttpResponseMessage> Send", RegexOptions.Singleline).Value;
+        check(methods.SequenceEqual(["FileExists", "UninstallNames", "Value", "ValueNames", "get_Is64BitWindows", "get_SystemFolder", "get_Wow64Folder"])
+            && reader.Length > 0 && Regex.Matches(reader, @"OpenSubKey\([^)]*, false\)").Count == 4 && !Regex.IsMatch(source, @"CreateSubKey|SetValue|DeleteValue|DeleteSubKey|File\.(?:Write|Delete|Move|Copy)[^;]*SystemFolder"),
+            "#150 verificação só de leitura: a interface tem só leituras e o registro é aberto sem escrita");
+        var probe = new FakeProbe(); probe.SetV14("x64"); probe.AllDirectX(); probe.Names.Add("Microsoft Visual C++ 2010  x86 Redistributable - 10.0.40219");
+        var before = JsonSerializer.Serialize(new { probe.Registry, probe.Names, probe.Files });
+        RuntimeInspector.Scan(probe); RuntimeInspector.Scan(probe);
+        check(JsonSerializer.Serialize(new { probe.Registry, probe.Names, probe.Files }) == before, "#150 verificação só de leitura: registro e arquivos iguais antes e depois de verificar");
+    }
+
+    private static async Task Install(Action<bool, string> check)
+    {
+        var temp = Path.Combine(Path.GetTempPath(), "NexoRuntimes-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        bool Clean() => !Directory.EnumerateFileSystemEntries(temp).Any();
+        var dx = Item("directx"); var v14 = Item("vc14-x64"); var v14x86 = Item("vc14-x86"); var vc2013 = Item("vc2013-x64");
+        var dxBody = new byte[dx.Size!.Value]; new Random(150).NextBytes(dxBody);
+        var dxHash = Convert.ToHexString(SHA256.HashData(dxBody)).ToLowerInvariant();
+        var v14Body = new byte[2_000_000]; new Random(14).NextBytes(v14Body);
+        var audits = new List<RuntimeAudit>();
+        Func<RuntimeItem, string?> fake = item => item.Id == "directx" ? dxHash : item.Sha256;
+
+        // Hash fixado diferente: o SHA-256 do catálogo não é o dos bytes simulados.
+        var wrongHash = new FakeSystem { Root = temp, Respond = _ => Ok(dxBody) };
+        var results = await RuntimeInstaller.InstallAsync(wrongHash, [dx], null, audits.Add, CancellationToken.None);
+        check(dxHash != dx.Sha256 && results[0].Outcome == RuntimeOutcome.Integrity && results[0].Message.Contains("SHA-256") && wrongHash.Signed.Count == 0 && wrongHash.Ran.Count == 0 && Clean()
+            && audits.Count == 1 && audits[0].Outcome == "Integrity" && audits[0].Sha256 == dxHash,
+            "#150 instalação: SHA-256 diferente do fixado para antes da assinatura e do UAC, apaga o arquivo e registra na auditoria");
+        var shorter = new FakeSystem { Root = temp, Respond = _ => Ok(dxBody[..^1]) };
+        results = await RuntimeInstaller.InstallAsync(shorter, [dx], null, null, CancellationToken.None);
+        check(results[0].Outcome == RuntimeOutcome.Integrity && shorter.Ran.Count == 0 && Clean(), "#150 instalação: tamanho informado diferente do fixado para sem executar");
+        var endless = new Endless(RuntimeCatalog.LatestMaxSize * 2);
+        var flood = new FakeSystem { Root = temp, Respond = _ => { var r = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(endless) }; r.Content.Headers.ContentLength = null; return r; } };
+        results = await RuntimeInstaller.InstallAsync(flood, [v14], null, null, CancellationToken.None);
+        check(results[0].Outcome == RuntimeOutcome.Integrity && endless.Served <= RuntimeCatalog.LatestMaxSize + 81920 && flood.Ran.Count == 0 && Clean(),
+            "#150 instalação: o v14 sem tamanho fixado para no teto durante o download (" + endless.Served + " bytes lidos)");
+        var big = new FakeSystem { Root = temp, Respond = _ => Ok([1, 2], RuntimeCatalog.LatestMaxSize + 1) };
+        results = await RuntimeInstaller.InstallAsync(big, [v14], null, null, CancellationToken.None);
+        check(results[0].Outcome == RuntimeOutcome.Integrity && big.Ran.Count == 0, "#150 instalação: Content-Length acima do teto é recusado antes de gravar");
+
+        // Host fora da lista, em qualquer salto.
+        foreach (var target in new[] { "https://evil.example/vc_redist.x64.exe", "http://download.visualstudio.microsoft.com/a.exe", "https://download.microsoft.com.evil.example/a", "https://aka.ms:444/a", "https://u@download.microsoft.com/a" })
+        {
+            var hop = new FakeSystem { Root = temp, Respond = url => url == v14.Url ? Redirect(target) : Ok(v14Body) };
+            results = await RuntimeInstaller.InstallAsync(hop, [v14], null, null, CancellationToken.None);
+            check(results[0].Outcome == RuntimeOutcome.Host && hop.Requests.Count == 1 && hop.Ran.Count == 0 && hop.Signed.Count == 0, "#150 instalação: redirecionamento recusado antes de pedir " + target);
+        }
+        var loop = new FakeSystem { Root = temp, Respond = _ => Redirect("https://aka.ms/loop") };
+        results = await RuntimeInstaller.InstallAsync(loop, [v14], null, null, CancellationToken.None);
+        check(results[0].Outcome == RuntimeOutcome.Network && loop.Requests.Count == RuntimeCatalog.MaxRedirects + 1 && loop.Ran.Count == 0, "#150 instalação: redirecionamentos em laço param no limite");
+
+        // Assinatura: assinante diferente da Microsoft, estado inválido, MOPR fora do 2012/2013.
+        HttpResponseMessage Chain(Uri url) => url.Host == "aka.ms" ? Redirect("https://download.visualstudio.microsoft.com/download/pr/x/VC_redist.x64.exe") : Ok(v14Body);
+        var contoso = new FakeSystem { Root = temp, Respond = Chain, Sign = ("Valid", "CN=Contoso Ltd, O=Contoso Ltd, L=Redmond, S=Washington, C=US") };
+        results = await RuntimeInstaller.InstallAsync(contoso, [v14], null, null, CancellationToken.None);
+        check(results[0].Outcome == RuntimeOutcome.Signature && results[0].Message.Contains("Contoso") && contoso.Signed.Count == 1 && contoso.Ran.Count == 0 && Clean(),
+            "#150 instalação: assinatura Valid de outro assinante é recusada antes do UAC e o arquivo é apagado");
+        var lookalike = new FakeSystem { Root = temp, Respond = Chain, Sign = ("Valid", "CN=Microsoft Corporation, O=Microsoft Corporation Fake, L=Redmond, S=Washington, C=US") };
+        results = await RuntimeInstaller.InstallAsync(lookalike, [v14], null, null, CancellationToken.None);
+        var mopr = new FakeSystem { Root = temp, Respond = Chain, Sign = ("Valid", RuntimeCatalog.MicrosoftSignerMopr) };
+        var moprResult = await RuntimeInstaller.InstallAsync(mopr, [v14], null, null, CancellationToken.None);
+        var unsigned = new FakeSystem { Root = temp, Respond = Chain, Sign = ("NotSigned", "") };
+        var unsignedResult = await RuntimeInstaller.InstallAsync(unsigned, [v14], null, null, CancellationToken.None);
+        var hashMismatch = new FakeSystem { Root = temp, Respond = Chain, Sign = ("HashMismatch", RuntimeCatalog.MicrosoftSigner) };
+        var mismatchResult = await RuntimeInstaller.InstallAsync(hashMismatch, [v14], null, null, CancellationToken.None);
+        check(results[0].Outcome == RuntimeOutcome.Signature && moprResult[0].Outcome == RuntimeOutcome.Signature && unsignedResult[0].Outcome == RuntimeOutcome.Signature
+            && mismatchResult[0].Outcome == RuntimeOutcome.Signature && mismatchResult[0].Message.Contains("HashMismatch")
+            && lookalike.Ran.Count + mopr.Ran.Count + unsigned.Ran.Count + hashMismatch.Ran.Count == 0 && Clean(),
+            "#150 instalação: assinante parecido, assinatura sem estado Valid e o certificado MOPR no v14 são recusados");
+        var junction = new FakeSystem { Root = temp, Respond = Chain, Link = @"C:\Users\u\AppData\Local\Temp\Nexo" };
+        results = await RuntimeInstaller.InstallAsync(junction, [v14], null, null, CancellationToken.None);
+        check(results[0].Outcome == RuntimeOutcome.Link && junction.Signed.Count == 0 && junction.Ran.Count == 0 && Clean(), "#150 instalação: link ou junção no caminho para antes da assinatura e do UAC");
+
+        // Sucesso, reinício pendente, versão mais nova, falha com código e sem confirmação depois do instalador.
+        var ok = new FakeSystem { Root = temp, Respond = Chain, AfterRun = _ => { } };
+        ok.AfterRun = _ => ok.SetV14("x64");
+        var progress = new List<string>();
+        results = await RuntimeInstaller.InstallAsync(ok, [v14], new SyncProgress(progress.Add), null, CancellationToken.None);
+        check(results[0].Outcome == RuntimeOutcome.Ok && results[0].Signer == RuntimeCatalog.MicrosoftSigner && results[0].Message.Contains("14.50") && ok.Arguments.SequenceEqual(["/install /passive /norestart"])
+            && ok.ExistedWhenRun && (!OperatingSystem.IsWindows() || ok.WriteBlockedWhenRun) && ok.Requests.Select(u => u.Host).SequenceEqual(["aka.ms", "download.visualstudio.microsoft.com"]) && Clean()
+            && progress.Any(p => p.Contains("UAC")),
+            "#150 instalação: v14 pelo link permanente, assinatura Microsoft, UAC com /install /passive /norestart, arquivo sem escrita de terceiros e conferido depois");
+        var reboot = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 3010 };
+        var newer = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 1638 };
+        var failed = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 1603 };
+        var silent = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 0 };
+        var rebootResult = (await RuntimeInstaller.InstallAsync(reboot, [v14], null, null, CancellationToken.None))[0];
+        var newerResult = (await RuntimeInstaller.InstallAsync(newer, [v14], null, null, CancellationToken.None))[0];
+        var failedResult = (await RuntimeInstaller.InstallAsync(failed, [v14], null, null, CancellationToken.None))[0];
+        var silentResult = (await RuntimeInstaller.InstallAsync(silent, [v14], null, null, CancellationToken.None))[0];
+        check(rebootResult.Outcome == RuntimeOutcome.RebootPending && rebootResult.ExitCode == 3010 && rebootResult.Message.Contains("não reinicia")
+            && RuntimePresentation.Result([rebootResult]).Contains("Reinicie o PC quando puder"), "#150 instalação: código 3010 → reinício pendente, sem reinício automático");
+        check(newerResult.Outcome == RuntimeOutcome.AlreadyInstalled && newerResult.ExitCode == 1638 && newerResult.Label == "Já instalado", "#150 instalação: código 1638 → já instalado");
+        check(failedResult.Outcome == RuntimeOutcome.Failed && failedResult.ExitCode == 1603 && failedResult.Message.Contains("1603")
+            && silentResult.Outcome == RuntimeOutcome.Failed && silentResult.Message.Contains("não aparece como instalado"),
+            "#150 instalação: código de erro mostra o código; saída 0 sem o componente na verificação não é dada como instalada");
+
+        // DirectX fixado (hash dos bytes simulados pela sobrecarga interna), com /Q e as DLLs conferidas depois.
+        var dxOk = new FakeSystem { Root = temp, Respond = _ => Ok(dxBody) };
+        dxOk.AfterRun = _ => dxOk.AllDirectX();
+        results = await RuntimeInstaller.InstallAsync(dxOk, [dx], null, null, CancellationToken.None, fake);
+        check(results[0].Outcome == RuntimeOutcome.Ok && dxOk.Arguments.SequenceEqual(["/Q"]) && dxOk.Ran.SequenceEqual(["dxwebsetup.exe"]) && results[0].Sha256 == dxHash && Clean(),
+            "#150 instalação: DirectX pelo dxwebsetup.exe fixado, com /Q, e as DLLs conferidas depois");
+        var vc2013Body = new byte[vc2013.Size!.Value]; new Random(2013).NextBytes(vc2013Body);
+        var vc2013Hash = Convert.ToHexString(SHA256.HashData(vc2013Body)).ToLowerInvariant();
+        var old = new FakeSystem { Root = temp, Respond = _ => Ok(vc2013Body), Sign = ("Valid", RuntimeCatalog.MicrosoftSignerMopr) };
+        old.AfterRun = _ => old.Names.Add("Microsoft Visual C++ 2013 Redistributable (x64) - 12.0.40664");
+        results = await RuntimeInstaller.InstallAsync(old, [vc2013], null, null, CancellationToken.None, item => item.Id == "vc2013-x64" ? vc2013Hash : item.Sha256);
+        check(results[0].Outcome == RuntimeOutcome.Ok && old.Requests.Count == 1 && old.Requests[0].Host == "download.visualstudio.microsoft.com",
+            "#150 instalação: VC++ 2013 fixado pela URL direta, com o assinante MOPR da Microsoft");
+
+        // UAC cancelado: estado claro e os itens seguintes não começam.
+        var cancel = new FakeSystem { Root = temp, Respond = url => url.Host == "aka.ms" ? Redirect("https://download.visualstudio.microsoft.com/x/" + url.Segments[^1]) : Ok(v14Body), Exit = name => name == "vc_redist.x64.exe" ? null : 0 };
+        audits.Clear();
+        results = await RuntimeInstaller.InstallAsync(cancel, [v14, v14x86, dx], null, audits.Add, CancellationToken.None);
+        check(results.Select(r => r.Outcome).SequenceEqual([RuntimeOutcome.UacCanceled, RuntimeOutcome.NotStarted, RuntimeOutcome.NotStarted]) && results[0].ExitCode == null
+            && results[0].Message.Contains("autorização de administrador foi cancelada") && results[1].Message.Contains("cancelada") && cancel.Requests.Count == 2 && cancel.Ran.Count == 1
+            && RuntimeInstaller.State(results) == "cancelada" && audits.Select(a => a.Outcome).SequenceEqual(["UacCanceled", "NotStarted", "NotStarted"]) && Clean(),
+            "#150 instalação: UAC cancelado vira estado claro, os itens seguintes ficam não iniciados e tudo vai à auditoria");
+
+        // Um item por vez, só os marcados; o que já está instalado não baixa nada; resultado parcial.
+        var mixed = new FakeSystem { Root = temp, Respond = url => url.Host == "aka.ms" ? Redirect("https://download.visualstudio.microsoft.com/x/" + url.Segments[^1]) : Ok(v14Body), Exit = name => name == "vc_redist.x86.exe" ? 1603 : 0 };
+        mixed.AfterRun = name => { if (name == "vc_redist.x64.exe") mixed.SetV14("x64"); };
+        mixed.Names.Add("Microsoft Visual C++ 2010  x86 Redistributable - 10.0.40219");
+        audits.Clear();
+        results = await RuntimeInstaller.InstallAsync(mixed, [v14, Item("vc2010-x86"), v14x86], null, audits.Add, CancellationToken.None);
+        check(results.Select(r => r.Outcome).SequenceEqual([RuntimeOutcome.Ok, RuntimeOutcome.AlreadyInstalled, RuntimeOutcome.Failed]) && mixed.Ran.SequenceEqual(["vc_redist.x64.exe", "vc_redist.x86.exe"])
+            && mixed.Requests.All(u => !u.ToString().Contains("165255E7")) && RuntimeInstaller.State(results) == "parcial" && audits.Count == 3 && audits[0].FinalUrl.StartsWith("https://download.visualstudio.microsoft.com/")
+            && audits[0].Signer == RuntimeCatalog.MicrosoftSigner && !audits[0].Pinned && audits[1].Bytes == 0 && RuntimeInstaller.Summary(results) == "1 ok, 1 já instalado, 1 falha",
+            "#150 instalação: um item de cada vez, só os escolhidos; já instalado não baixa; resultado parcial com auditoria por item");
+        var offline = new FakeSystem { Root = temp, Respond = _ => throw new HttpRequestException("Nenhuma conexão") };
+        results = await RuntimeInstaller.InstallAsync(offline, [v14], null, null, CancellationToken.None);
+        using var canceled = new CancellationTokenSource(); canceled.Cancel();
+        var stopped = new FakeSystem { Root = temp, Respond = Chain };
+        var stoppedResult = await RuntimeInstaller.InstallAsync(stopped, [v14, v14x86], null, null, canceled.Token);
+        check(results[0].Outcome == RuntimeOutcome.Network && results[0].Message.Contains("Sem conexão") && stoppedResult.All(r => r.Outcome == RuntimeOutcome.NotStarted) && stopped.Requests.Count == 0,
+            "#150 instalação: sem rede e cancelamento antes do início viram estado claro, sem executar");
+        var question = RuntimePresentation.ConfirmQuestion([v14, dx]);
+        check(question.Contains("• " + v14.Title) && question.Contains("• " + dx.Title) && question.Contains("aka.ms") && question.Contains("SHA-256 fixado") && question.Contains("UAC") && question.Contains("não reinicia"),
+            "#150 confirmação: lista item a item o que vai ser instalado, a origem, a assinatura e o UAC");
+        try { Directory.Delete(temp, true); } catch (IOException) { }
+    }
+
+    private sealed class SyncProgress(Action<string> report) : IProgress<string> { public void Report(string value) => report(value); }
+
+    private static void Guard(Action<bool, string> check)
+    {
+        string? Validate(string text) => AgentProtocol.Validate("finish_support", JsonSerializer.SerializeToElement(new { }), text);
+        string[] refused =
+        [
+            "Posso instalar o Visual C++ Redistributable para você.",
+            "Quer que eu baixe o DirectX?",
+            "Vou instalar o DirectX End-User Runtime agora.",
+            "Deseja que eu atualize o .NET Framework?",
+            "Posso reinstalar o VC++ 2015-2022 se quiser.",
+            "Se preferir, posso baixar e instalar os redistribuíveis do Visual C++.",
+            "Posso instalar o d3dx9_43.dll que está faltando.",
+            "Eu te ajudo a instalar o vcredist agora mesmo.",
+            "O jogo pede o xinput1_3.dll. Posso baixar o xinput para você.",
+            "Gostaria que eu reparasse o C++ deste PC?",
+        ];
+        string[] accepted =
+        [
+            "Não posso instalar o DirectX pelo chat.",
+            "Posso explicar como instalar o Visual C++ pelo cartão Componentes do Windows para jogos e programas, em Ferramentas.",
+            "Posso indicar onde instalar o DirectX: no cartão Componentes do Windows para jogos e programas, no menu Ferramentas.",
+            "Você pode instalar o VC++ pelo cartão Componentes do Windows para jogos e programas, em Ferramentas.",
+            "Posso instalar o driver da placa de vídeo com a sua autorização.",
+            "Vou reinstalar o driver de vídeo.",
+            "Posso verificar a versão do DirectX no relatório.",
+            "O .NET Framework 4.8 já vem com o Windows.",
+            "Posso consultar os eventos do jogo que não abre.",
+            "Posso desinstalar a versão anterior do driver NVIDIA.",
+        ];
+        var wrongRefused = refused.Where(text => Validate(text) != AgentProtocol.RuntimeInstallReason).Select(text => text + " → " + Validate(text)).ToArray();
+        var wrongAccepted = accepted.Where(text => Validate(text) == AgentProtocol.RuntimeInstallReason || AgentProtocol.OffersRuntimeInstall(AgentProtocol.Normalize(text))).ToArray();
+        check(wrongRefused.Length == 0 && wrongAccepted.Length == 0,
+            "#150 trava do modelo: a oferta de instalar o VC++, o DirectX ou o .NET pelo chat é recusada; negação, orientação ao cartão e drivers passam"
+            + (wrongRefused.Length > 0 ? " · deviam ser recusadas: " + string.Join(" | ", wrongRefused) : "") + (wrongAccepted.Length > 0 ? " · deviam passar: " + string.Join(" | ", wrongAccepted) : ""));
+        var prompt = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Code", "AgentService.cs"));
+        check(AgentProtocol.RuntimeInstallReason.Contains("“" + RuntimePresentation.CardTitle + "”") && AgentProtocol.RuntimeInstallReason.Contains("Ferramentas")
+            && AgentProtocol.RuntimeCard == RuntimePresentation.CardTitle && prompt.Contains("O Nexo não instala o Visual C++ Redistributable, o DirectX nem o .NET pelo chat")
+            && prompt.Contains("“" + RuntimePresentation.CardTitle + "”, no menu Ferramentas"),
+            "#150 trava do modelo: o motivo e o prompt indicam o cartão de Ferramentas pelo nome exato");
+    }
+
+    private static void Card(Action<bool, string> check)
+    {
+        var code = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "MainWindow.xaml.cs"));
+        var install = Regex.Match(code, @"private async Task InstallRuntimes\(\).*?\n    \}", RegexOptions.Singleline).Value;
+        var render = Regex.Match(code, @"private void RenderRuntimeList\(\).*?\n    \}", RegexOptions.Singleline).Value;
+        check(code.Contains("ToolCard(4, \"Jogos · programas\", RuntimePresentation.CardTitle") && code.Contains("Action(\"Verificar este PC\", async (_, _) => await GuardAsync(ScanRuntimes), icon: \"search\")")
+            && code.Contains("Action(\"Instalar selecionados\", async (_, _) => await GuardAsync(InstallRuntimes), true)") && code.Contains("officeRunning || optimizationRunning || debloatRunning || runtimeRunning"),
+            "#150 cartão: 04 em Ferramentas, Verificar (secundário) e Instalar selecionados (primário), e o Nexo não fecha no meio da instalação");
+        check(install.IndexOf("ConfirmQuestion", StringComparison.Ordinal) is > 0 and var confirm && install.IndexOf("RuntimeInstaller.InstallAsync", StringComparison.Ordinal) > confirm
+            && install.Contains("check.IsChecked == true") && install.Contains("runtimes-audit.ndjson") && code.Contains("healthStore.SaveIntervention(new InterventionRecord")
+            && render.Contains("RuntimeCatalog.DefaultSelected(status)") && render.Contains("status.State == RuntimeState.Missing"),
+            "#150 cartão: caixa só nos itens que faltam, marcada pela regra do catálogo; confirmação com a lista antes de instalar; auditoria e operations.db");
+        check(RuntimePresentation.CardNotice.Contains("não mexe em antivírus, anticheat nem serviços") && RuntimePresentation.CardNotice.Contains("instalador oficial da Microsoft"),
+            "#150 cartão: aviso de que o Nexo não mexe em antivírus, anticheat nem serviços");
+    }
+}
