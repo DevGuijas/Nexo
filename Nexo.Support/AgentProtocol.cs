@@ -170,6 +170,23 @@ public static class AgentProtocol
         AppRemoval.IsMatch(sentence) && !RemovalPath.IsMatch(sentence) && !RemovalExplanation.IsMatch(sentence)
         && RemovalOffer.Matches(sentence).Any(offer => !Regex.IsMatch(sentence[..offer.Index], @"\b(?:nao|nem|nunca)\s+(?:\w+\s+){0,2}$")));
 
+    // Componentes do Windows (#150): o Visual C++ Redistributable, o DirectX e o .NET são instalados só pelo cartão
+    // "Componentes do Windows para jogos e programas", no menu Ferramentas, com os instaladores oficiais da Microsoft, a
+    // assinatura conferida e o UAC. O modelo não oferece nem executa essa instalação pelo chat, como na remoção de apps (#127)
+    // e no driver do sensor (#135). É recusada a oferta em 1ª pessoa de instalar, reinstalar, baixar, atualizar ou reparar um
+    // desses componentes, com ele a até quatro palavras do verbo. Passam a negação antes da oferta ("não posso instalar o
+    // DirectX pelo chat"), a orientação ("posso explicar como…", "posso indicar onde…") e a frase sem oferta ("você pode
+    // instalar o DirectX pelo cartão…"). Driver, impressora e Office não são componentes do cartão.
+    internal const string RuntimeInstallReason = "A resposta oferece instalar, baixar ou atualizar o Visual C++ Redistributable, o DirectX ou o .NET, e o Nexo não faz isso pelo chat. Tire essa oferta e mantenha o resto da resposta. Se o usuário quiser instalar esses componentes, indique o cartão “" + RuntimeCard + "”, no menu Ferramentas, onde “Verificar este PC” mostra o que falta neste PC e só os instaladores oficiais da Microsoft são usados.";
+    internal const string RuntimeCard = "Componentes do Windows para jogos e programas";
+    private const string RuntimeObject = @"(?:(?:visual )?c\+\+|vc\+\+|vc_?redist\w*|redistribu\w*|directx|dxsetup|dxwebsetup|d3dx\w*|xinput\w*|xaudio\w*|\.net\b|dotnet\b|net framework\b|bibliotecas? (?:do|de) (?:visual|runtime|jogos?)\b)";
+    private static readonly Regex RuntimeOffer = new(@"(?<head>\b(?:posso|podemos|poderia|poderiamos|consigo|vou|vamos|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo)\b)(?<lead>[^;:!?\n]*?)"
+        + @"\b(?:instal|reinstal|baix|atualiz|repar)\w*(?:-(?:lo|la|los|las))?\s+(?:[^\s.;:!?]+\s+){0,4}?" + RuntimeObject);
+    private static readonly Regex RuntimeOrientation = new(@"\b(?:explic|orient|ensin|indic|mostr)\w*|\b(?:dizer|falar) (?:como|onde)\b");
+    public static bool OffersRuntimeInstall(string normalized) => RuntimeOffer.Matches(normalized).Any(offer =>
+        !Regex.IsMatch(normalized[..offer.Index], @"\b(?:nao|nem|nunca)\s+(?:\w+\s+){0,2}$") && !RuntimeOrientation.IsMatch(offer.Groups["lead"].Value)
+        && !Regex.IsMatch(offer.Groups["lead"].Value, @"(?:^|\s)(?:nao|nem|nunca)\s*$") && !Regex.IsMatch(offer.Groups["lead"].Value, @"[.]\s"));
+
     // Instrução que acompanha a recusa: o motivo fixo e, para a ação anunciada, o trecho e a saída quando não há ferramenta.
     public static string Guidance(string reason, string message) => reason == PendingActionReason && PendingActionPhrase(message) is { } phrase
         ? reason + " Trecho recusado: “" + phrase + "”. " + (Cleanup(Normalize(message)) ? NoCleanupTool
@@ -182,6 +199,8 @@ public static class AgentProtocol
         var text = Normalize(message);
         // Antes das regras gerais: com elas, a oferta de remover apps recebia "Use a ferramenta…", e não existe ferramenta (#127).
         if (OffersAppRemoval(text) || WritesAppRemovalSteps(text)) return AppRemovalReason;
+        // Antes da ação anunciada e do "posso instalar…" genérico: não existe ferramenta que instale esses componentes (#150).
+        if (OffersRuntimeInstall(text)) return RuntimeInstallReason;
         if (Regex.IsMatch(text, @"\b(posso|podemos|devo)\b[^?.]{0,80}\b(permissao|autorizacao)\b"))
             return "Não solicite permissão no chat para uma ferramenta. Consulte o estado e use a ferramenta adequada; ela apresenta a autorização concreta.";
         if (message.Contains('?') && Regex.IsMatch(text, @"\b(posso confirmar se|voce esta|esta|se sente)\b[^?]{0,90}\b(confortavel|de acordo)\b|\btudo bem se\b[^?]{0,70}\b(reinici|ativ|habilit|alter|limp|instal|configur)"))
