@@ -14,7 +14,7 @@ O monitor mostra separadamente a interface local, o gateway, a resolução DNS e
 
 Em **Ferramentas**, o botão **Otimizar PC** remove arquivos com mais de sete dias apenas das pastas temporárias do perfil e do Windows, depois pede ao Windows a manutenção nativa de discos elegíveis. Discos virtuais são ignorados. A tela mostra quantidades, tempo, erros e resultado por etapa; acesso negado aparece como resultado parcial. O Nexo não mede nem promete ganho de desempenho. O cancelamento não reverte arquivos já removidos.
 
-Em **Ferramentas**, o cartão **Componentes do Windows para jogos e programas** (#150, 1.8.0) verifica, só lendo, os Visual C++ Redistributable de 2005 a 2015–2022 (x86 e x64), as DLLs do DirectX de junho de 2010 e a versão do .NET Framework. Ele instala só o que você marcar, pelos instaladores oficiais da Microsoft, com host restrito, assinatura conferida antes do UAC e resultado por item no histórico; o assistente não oferece essa instalação pelo chat. Fontes, hashes e como atualizar: [docs/runtimes.md](docs/runtimes.md).
+Em **Ferramentas**, o cartão **Componentes do Windows para jogos e programas** (#150, 1.7.0) verifica, só lendo, os Visual C++ Redistributable de 2005 a 2015–2022 (x86 e x64), as DLLs do DirectX de junho de 2010 e a versão do .NET Framework. Ele instala só o que você marcar, pelos instaladores oficiais da Microsoft, com host restrito, assinatura conferida antes do UAC e resultado por item no histórico; o assistente não oferece essa instalação pelo chat. Fontes, hashes e como atualizar: [docs/runtimes.md](docs/runtimes.md).
 
 ## Abrir
 
