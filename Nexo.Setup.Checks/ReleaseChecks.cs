@@ -36,6 +36,13 @@ internal static class ReleaseChecks
             && Read("Nexo.Setup", "Program.cs").Contains("\"https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/latest.json\""),
             "A trava confere a assinatura do latest.json publicado, exige versão maior e recusa versão já publicada, na mesma origem do instalador");
         check(script.Contains("GetEntry('Nexo.exe')") && script.Contains("SHA256SUMS.txt"), "O script de publicação registra o SHA-256 do Nexo.exe publicado");
+        // #142, B1: sem extração no Nexo.exe publicado, como o comando do README; as nativas do WPF vão ao lado dele no ZIP.
+        var readme = Read("README.md");
+        var flags = Regex.Match(readme, @"^dotnet publish Nexo\.Support/Nexo\.Support\.csproj (?<flags>.+) -o artifacts/Nexo-", RegexOptions.Multiline).Groups["flags"].Value;
+        check(!script.Contains("IncludeNativeLibrariesForSelfExtract=true", StringComparison.OrdinalIgnoreCase) && flags.Length > 0 && !flags.Contains("SelfExtract", StringComparison.OrdinalIgnoreCase)
+            && script.Contains("dotnet publish $project " + flags + " -o $appStage") && script.Contains("$nativeBesideExe = @('wpfgfx_cor3.dll', 'PresentationNative_cor3.dll')")
+            && script.Contains("if (-not $archiveToCheck.GetEntry($native)) { throw"),
+            "O pacote do aplicativo é publicado sem extração, com as opções do README, e só segue com as DLLs nativas do WPF ao lado do Nexo.exe");
         check(publish > 0 && script.IndexOf("marcada como não publicada", StringComparison.Ordinal) is var date && date >= 0 && date < publish
             && script.IndexOf("Assert-NexoNewRelease -Version", StringComparison.Ordinal) is var assert && assert >= 0 && assert < publish,
             "As recusas acontecem antes de compilar ou empacotar");

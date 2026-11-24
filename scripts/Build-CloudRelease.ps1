@@ -42,9 +42,21 @@ $appStage = Join-Path $releaseRoot 'app-stage'
 New-Item -ItemType Directory -Force -Path $releaseDirectory, $appStage | Out-Null
 $appArchive = Join-Path $releaseDirectory 'nexo-app.zip'
 $modelArchive = Join-Path $releaseDirectory 'qwen3-8b-model.zip'
+# DLLs nativas do WPF que o single-file sem extração deixa ao lado do Nexo.exe (#142, B1).
+$nativeBesideExe = @('wpfgfx_cor3.dll', 'PresentationNative_cor3.dll')
 if (-not $ReuseArchives) {
-dotnet publish $project -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o $appStage
+# A pasta de preparo começa vazia: o ZIP leva a pasta inteira, e nada de uma publicação anterior pode entrar nele.
+if (Test-Path -LiteralPath $appStage) { Remove-Item -LiteralPath $appStage -Recurse -Force }
+New-Item -ItemType Directory -Path $appStage | Out-Null
+# Single-file sem IncludeNativeLibrariesForSelfExtract, como o comando do README (#142, B1): nada é extraído ao abrir. Com a
+# extração, o host gravaria as DLLs nativas no %TEMP% antes do Main (para a tarefa SYSTEM do leitor de sensores, em
+# C:\Windows\Temp\.net, uma pasta que o usuário controla), e o --sensor-loop recusaria esse Nexo.exe com o código 2.
+dotnet publish $project -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o $appStage
 if ($LASTEXITCODE -ne 0) { throw 'Falha ao publicar o aplicativo.' }
+foreach ($native in $nativeBesideExe) {
+    if (!(Test-Path -LiteralPath (Join-Path $appStage $native) -PathType Leaf)) { throw "A publicação não deixou $native ao lado do Nexo.exe; o pacote não seria aceito pelo leitor de sensores." }
+}
+# Só o Nexo.exe recebe a assinatura da equipe. As DLLs nativas ao lado dele vêm do runtime da Microsoft, já assinadas por ela.
 & (Join-Path $PSScriptRoot 'Sign-NexoArtifacts.ps1') -Paths (Join-Path $appStage 'Nexo.exe') -Thumbprint $CodeSigningThumbprint -TimestampServer $TimestampServer
 if (Test-Path -LiteralPath $appArchive) { Remove-Item -LiteralPath $appArchive -Force }
 [System.IO.Compression.ZipFile]::CreateFromDirectory($appStage, $appArchive, [System.IO.Compression.CompressionLevel]::Optimal, $false)
@@ -87,6 +99,10 @@ try {
     try {
         $entryToCheck = $archiveToCheck.GetEntry('Nexo.exe')
         if (-not $entryToCheck) { throw 'O pacote do aplicativo não contém Nexo.exe.' }
+        # Um ZIP reaproveitado de uma publicação com extração não tem as nativas ao lado do Nexo.exe (#142, B1).
+        foreach ($native in $nativeBesideExe) {
+            if (-not $archiveToCheck.GetEntry($native)) { throw "O pacote do aplicativo não contém $native ao lado do Nexo.exe; gere-o de novo sem extração (sem -ReuseArchives)." }
+        }
         $executableToCheck = Join-Path $signatureCheck 'Nexo.exe'
         [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entryToCheck, $executableToCheck)
         & (Join-Path $PSScriptRoot 'Sign-NexoArtifacts.ps1') -Paths $executableToCheck -Thumbprint $CodeSigningThumbprint -VerifyOnly
@@ -121,6 +137,9 @@ try {
     $signature = $rsa.SignData([System.IO.File]::ReadAllBytes($latestPath), [System.Security.Cryptography.HashAlgorithmName]::SHA256, [System.Security.Cryptography.RSASignaturePadding]::Pkcs1)
     [System.IO.File]::WriteAllText((Join-Path $releaseRoot 'latest.sig'), [Convert]::ToBase64String($signature))
 } finally { $rsa.Dispose() }
+# SHA256SUMS.txt: o Nexo.exe primeiro, depois cada outro arquivo do ZIP (as DLLs nativas ao lado dele, ThirdParty…) pelo caminho
+# dentro do pacote, e por último o próprio ZIP.
+$sums = [System.Collections.Generic.List[string]]::new()
 $archive = [System.IO.Compression.ZipFile]::OpenRead($appArchive)
 try {
     $executable = $archive.GetEntry('Nexo.exe')
@@ -128,10 +147,16 @@ try {
     $stream = $executable.Open()
     try { $executableHash = [Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($stream)) } finally { $stream.Dispose() }
     $executableBytes = $executable.Length
+    $sums.Add("$executableHash  Nexo.exe")
+    foreach ($entry in @($archive.Entries | Where-Object { $_.FullName -ne 'Nexo.exe' -and -not $_.FullName.EndsWith('/') } | Sort-Object FullName)) {
+        $stream = $entry.Open()
+        try { $sums.Add([Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($stream)) + '  ' + $entry.FullName) } finally { $stream.Dispose() }
+    }
 } finally { $archive.Dispose() }
 $appHash = (Get-FileHash -LiteralPath $appArchive -Algorithm SHA256).Hash
 $appBytes = (Get-Item -LiteralPath $appArchive).Length
-Set-Content -LiteralPath (Join-Path $releaseDirectory 'SHA256SUMS.txt') -Value @("$executableHash  Nexo.exe", "$appHash  nexo-app.zip") -Encoding ascii
+$sums.Add("$appHash  nexo-app.zip")
+Set-Content -LiteralPath (Join-Path $releaseDirectory 'SHA256SUMS.txt') -Value $sums -Encoding ascii
 Write-Host "Versão pronta: $latestPath"
 Write-Host "Registre no CHANGELOG.md: Nexo.exe $executableBytes bytes, SHA-256 $executableHash; releases/$version/nexo-app.zip $appBytes bytes, SHA-256 $appHash; commit $(git -C $projectRoot rev-parse --short HEAD)."
 Write-Host 'Envie a pasta releases, latest.sig e depois latest.json ao armazenamento HTTPS da Oracle; publicar latest.json por último ativa a nova versão.'

@@ -21,6 +21,7 @@ internal static class LiveSensorChecks
         Screens(check);
         Report(check);
         Refusal(check);
+        Release(check);
         await Scripts(check);
         await Apply(check);
     }
@@ -292,6 +293,42 @@ internal static class LiveSensorChecks
     }
 
     // ---------- scripts elevados ----------
+
+    /// <summary>
+    /// #142, B1: o build oficial (scripts/Build-CloudRelease.ps1, o nexo-app.zip do NexoSetup) publica como o README, single-file
+    /// sem extração, para o --sensor-loop aceitar o Nexo.exe instalado e o host nunca extrair no %TEMP% do SYSTEM.
+    /// </summary>
+    private static void Release(Action<bool, string> check)
+    {
+        var folder = Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Release");
+        var script = File.ReadAllText(Path.Combine(folder, "Build-CloudRelease.ps1")).ReplaceLineEndings("\n");
+        var readme = File.ReadAllText(Path.Combine(folder, "README.md")).ReplaceLineEndings("\n");
+        var project = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Project", "Nexo.Support.csproj"));
+        var code = script.Split('\n').Where(line => !line.TrimStart().StartsWith('#')).ToArray();
+        string[] extraction = ["IncludeNativeLibrariesForSelfExtract", "IncludeAllContentForSelfExtract"];
+        check(!script.Contains("IncludeNativeLibrariesForSelfExtract=true", StringComparison.OrdinalIgnoreCase)
+            && !code.Any(line => extraction.Any(name => line.Contains(name, StringComparison.OrdinalIgnoreCase))) && !extraction.Any(name => project.Contains(name, StringComparison.OrdinalIgnoreCase)),
+            "#142 B1: o Build-CloudRelease.ps1 e o Nexo.Support.csproj não publicam com IncludeNativeLibrariesForSelfExtract nem IncludeAllContentForSelfExtract");
+        var official = code.Select(line => Regex.Match(line, @"^dotnet publish \$project (?<flags>.+) -o \$appStage$")).Where(match => match.Success).Select(match => match.Groups["flags"].Value).ToArray();
+        var documented = Regex.Match(readme, @"^dotnet publish Nexo\.Support/Nexo\.Support\.csproj (?<flags>.+) -o artifacts/Nexo-\d+\.\d+\.\d+$", RegexOptions.Multiline).Groups["flags"].Value;
+        check(official.Length == 1 && code.Count(line => line.Contains("dotnet publish", StringComparison.Ordinal)) == 1 && official[0] == documented
+            && documented == "-c Release -r win-x64 --self-contained true -p:PublishSingleFile=true",
+            "#142 B1: o build oficial publica com as mesmas opções do comando do README (single-file, self-contained, sem extração): " + string.Join(" | ", official) + " = " + documented);
+        int At(string text) => script.IndexOf(text, StringComparison.Ordinal);
+        var publish = At("dotnet publish $project");
+        var sign = At("& (Join-Path $PSScriptRoot 'Sign-NexoArtifacts.ps1') -Paths (Join-Path $appStage 'Nexo.exe')");
+        var beside = At("if (!(Test-Path -LiteralPath (Join-Path $appStage $native) -PathType Leaf)) { throw");
+        var clean = At("if (Test-Path -LiteralPath $appStage) { Remove-Item -LiteralPath $appStage -Recurse -Force }");
+        var zip = At("[System.IO.Compression.ZipFile]::CreateFromDirectory($appStage, $appArchive");
+        check(script.Contains("$nativeBesideExe = @('wpfgfx_cor3.dll', 'PresentationNative_cor3.dll')") && clean > 0 && clean < publish && publish < beside && beside < sign && sign < zip
+            && script.Contains("if (-not $archiveToCheck.GetEntry($native)) { throw"),
+            "#142 B1: a pasta de preparo começa vazia, e o pacote (novo ou reaproveitado) só segue com wpfgfx_cor3.dll e PresentationNative_cor3.dll ao lado do Nexo.exe");
+        var sums = At("$sums.Add(\"$executableHash  Nexo.exe\")");
+        var others = At("foreach ($entry in @($archive.Entries | Where-Object { $_.FullName -ne 'Nexo.exe' -and -not $_.FullName.EndsWith('/') } | Sort-Object FullName))");
+        var app = At("$sums.Add(\"$appHash  nexo-app.zip\")");
+        check(sums > 0 && others > sums && app > others && script.Contains("'SHA256SUMS.txt') -Value $sums -Encoding ascii"),
+            "#142 B1: o SHA256SUMS.txt lista o Nexo.exe, cada outro arquivo do ZIP (as DLLs nativas ao lado dele) e o próprio ZIP");
+    }
 
     private static async Task Scripts(Action<bool, string> check)
     {
