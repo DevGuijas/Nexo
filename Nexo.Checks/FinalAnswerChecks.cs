@@ -299,7 +299,7 @@ internal static class FinalAnswerChecks
                     found.Add(new HealthFinding { Id = "service-stopped:" + service + ":s0", Time = now.AddHours(-2), Category = "service", Severity = "warning",
                         Problem = "Serviço automático interrompido", Evidence = service + " parado em 2 leituras" });
                 db.SaveFindings(found);
-                report = HealthReportPresentation.FromStore(db);
+                report = HealthReportPresentation.FromStore(db, MachineSensors.Off);
             }
             var evidence = new InvestigationEvidence();
             evidence.Observe("get_health_report", "h", none, WindowsTools.Ok(report));
@@ -383,7 +383,7 @@ internal static class FinalAnswerChecks
                 var found = HealthRules.Evaluate(samples, new HealthThresholds());
                 foreach (var finding in found) finding.Id += ":s2";
                 db.SaveFindings(found);
-                return HealthReportPresentation.FromStore(db);
+                return HealthReportPresentation.FromStore(db, MachineSensors.Off);
             }
             finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
         }
@@ -461,7 +461,7 @@ internal static class FinalAnswerChecks
                 var found = HealthRules.Evaluate(samples, new HealthThresholds());
                 foreach (var finding in found) { finding.Id += ":s2"; finding.Time = old; }
                 db.SaveFindings(found);
-                report = HealthReportPresentation.FromStore(db);
+                report = HealthReportPresentation.FromStore(db, MachineSensors.Off);
             }
             var evidence = new InvestigationEvidence();
             evidence.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(report));
@@ -1263,7 +1263,7 @@ internal static class FinalAnswerChecks
             if (withHistoricalCpu)
                 found.Add(new HealthFinding { Id = "cpu-high:s0", Time = now.AddHours(-2), Category = "cpu", Severity = "warning", Problem = "Uso persistente de CPU", Evidence = "Leituras antigas", Cause = "Carga antiga", Recommendation = "Feche os programas pesados" });
             db.SaveFindings(found);
-            return HealthReportPresentation.FromStore(db);
+            return HealthReportPresentation.FromStore(db, MachineSensors.Off);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }

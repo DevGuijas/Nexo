@@ -14,6 +14,8 @@ namespace Nexo.Support;
 public partial class MainWindow : Window
 {
     private readonly Store store;
+    // #142: leitor de sensores, PawnIO e leitura elevada; o App passa o real e, na prévia, a fonte desligada.
+    private readonly MachineSensors sensors;
     private readonly SupportService support;
     private Account user = null!;
     private Conversation? conversation;
@@ -56,6 +58,16 @@ public partial class MainWindow : Window
     private bool debloatRunning;
     private bool debloatCanUndo;
     private string debloatStatus = "Nenhuma verificação iniciada nesta sessão.";
+    // PawnIO e leitura com administrador (#142): só por clique; a leitura elevada vale para a tela de Saúde aberta.
+    private bool pawnIoRunning;
+    private string? pawnIoStatus;
+    private bool elevatedReadRunning;
+    private ElevatedReadResult? elevatedRead;
+    // Leitor de sensores do sistema (#142, opção 2): ativar, atualizar e desativar só por clique, um UAC cada.
+    private bool liveReaderRunning;
+    private string? liveReaderStatus;
+    private string? liveTemperatureState;
+    private readonly List<TextBlock> liveTemperatureViews = new();
     private DebloatPreview? debloatPreview;
     private readonly Dictionary<string, CheckBox> debloatChecks = new();
     private CheckBox? debloatRiskView;
@@ -66,9 +78,21 @@ public partial class MainWindow : Window
     private Button? debloatUndoView;
     private Button? debloatCancelView;
     private readonly object debloatAuditSync = new();
-    public MainWindow(Store store)
+    // Componentes do Windows para programas (#150).
+    private CancellationTokenSource? runtimeCancellation;
+    private bool runtimeRunning;
+    private string runtimeStatus = "Nenhuma verificação iniciada nesta sessão.";
+    private RuntimeScan? runtimeScan;
+    private readonly Dictionary<string, CheckBox> runtimeChecks = new();
+    private StackPanel? runtimeListView;
+    private TextBlock? runtimeProgressView;
+    private Button? runtimeScanView;
+    private Button? runtimeInstallView;
+    private Button? runtimeCancelView;
+    private readonly object runtimeAuditSync = new();
+    public MainWindow(Store store, MachineSensors sensors)
     {
-        InitializeComponent(); Title = "Nexo " + AppVersion.Current + " • Suporte inteligente"; this.store = store; support = new SupportService(store);
+        InitializeComponent(); Title = "Nexo " + AppVersion.Current + " • Suporte inteligente"; this.store = store; this.sensors = sensors; support = new SupportService(store);
         ApplyNavigationIcons();
         InitializeShell();
         user = store.GetLocalSession();
@@ -100,7 +124,7 @@ public partial class MainWindow : Window
                 pending.Close();
                 return;
             }
-            if (officeRunning || optimizationRunning || debloatRunning)
+            if (officeRunning || optimizationRunning || debloatRunning || runtimeRunning)
             {
                 e.Cancel = true;
                 exitRequested = false;
@@ -221,7 +245,7 @@ public partial class MainWindow : Window
     }
     private string OfflineHealthReport()
     {
-        try { using var local = new OperationalStore(store.Root); return HealthReportPresentation.FromStore(local, healthSettings.Thresholds()); }
+        try { using var local = new OperationalStore(store.Root); return HealthReportPresentation.FromStore(local, sensors, healthSettings.Thresholds()); }
         catch (Exception ex) { return "O relatório de saúde local também está indisponível: " + ex.Message + ". O histórico de conversas permanece separado."; }
     }
     private string? interruptedFacts;
@@ -359,6 +383,7 @@ public partial class MainWindow : Window
     {
         if (busy) return;
         if (target == "users") store.Require(user, a => a.Admin);
+        if (target != "health") elevatedRead = null;
         page = target;
         ChatView.Visibility = target == "chat" ? Visibility.Visible : Visibility.Collapsed;
         PageScroll.Visibility = target == "chat" ? Visibility.Collapsed : Visibility.Visible;
@@ -371,6 +396,7 @@ public partial class MainWindow : Window
         }
         if (target == "chat") return;
         PageContent.Children.Clear();
+        liveTemperatureViews.Clear();
         switch (target) { case "home": Home(); break; case "profile": Profile(); break; case "users": Users(); break; case "history": History(); break; case "tickets": Tickets(); break; case "health": Health(); break; case "tools": Tools(); break; case "settings": Settings(); break; case "audit": Audits(); break; }
         PageScroll.ScrollToTop();
     }
@@ -422,7 +448,7 @@ public partial class MainWindow : Window
     }
     private void LiveMetricsSection()
     {
-        liveMetrics ??= new LiveMetricsPanel();
+        if (liveMetrics == null) { liveMetrics = new LiveMetricsPanel(sensors); liveMetrics.TemperatureUpdated += OnLiveTemperature; }
         if (liveMetrics.Parent is Panel previous) previous.Children.Remove(liveMetrics);
         PageContent.Children.Add(liveMetrics);
     }
@@ -463,18 +489,36 @@ public partial class MainWindow : Window
                 overview.Children.Add(metrics);
 
                 // Temperatura (#142): sem o driver PawnIO (ou sem sensor), a leitura fica indisponível e a tela diz por quê, sem tom de erro;
-                // erro ou valor descartado aparece como atenção.
+                // erro ou valor descartado aparece como atenção. Com o PawnIO instalado e o sensor em zero, falta permissão: texto neutro.
+                // Com o leitor de sensores do sistema, vale o live.json lido agora, na montagem da tela.
                 overview.Children.Add(PageKit.Group("Sensores"));
+                var pawnIoInstalled = sensors.PawnIoInstalled();
+                var live = sensors.Live();
+                liveTemperatureState = live.State;
                 var temperatureText = "Temperatura da CPU: " + HealthReportPresentation.DescribeTemperature(latest);
-                if (latest.CpuTemperature is { State: "read", Celsius: not null } || latest.CpuTemperature == null && latest.CpuTemperatureC.HasValue)
+                if (SystemSensorReader.Line(live) is { } liveLine)
+                {
+                    var liveView = StatusLine(liveLine.Text, liveLine.Tone);
+                    liveTemperatureViews.Add(liveView.Children.OfType<TextBlock>().First());
+                    overview.Children.Add(liveView);
+                    overview.Children.Add(LiveReaderPanel(live));
+                }
+                else if (latest.CpuTemperature is { State: "read", Celsius: not null } || latest.CpuTemperature == null && latest.CpuTemperatureC.HasValue)
                     overview.Children.Add(StatusLine(temperatureText, "Success"));
                 else
                 {
-                    var failed = latest.CpuTemperature?.State is "error" or "invalid";
-                    // "invalid" é valor descartado; "error" é falha de leitura (o sensor não respondeu), não descarte.
-                    var title = latest.CpuTemperature?.State == "invalid" ? "Leitura de temperatura descartada" : failed ? "Falha na leitura de temperatura" : "Temperatura indisponível neste computador";
-                    var unavailable = PageKit.Notice("health", title, temperatureText, failed ? "Warning" : "Neutral");
+                    Border unavailable;
+                    if (SystemSensorReader.NeedsAdministrator(latest.CpuTemperature, pawnIoInstalled))
+                        unavailable = PageKit.Notice("health", SystemSensorReader.AdminNeededTitle, SystemSensorReader.AdminNeededDetail, "Neutral");
+                    else
+                    {
+                        var failed = latest.CpuTemperature?.State is "error" or "invalid";
+                        // "invalid" é valor descartado; "error" é falha de leitura (o sensor não respondeu), não descarte.
+                        var title = latest.CpuTemperature?.State == "invalid" ? "Leitura de temperatura descartada" : failed ? "Falha na leitura de temperatura" : "Temperatura indisponível neste computador";
+                        unavailable = PageKit.Notice("health", title, temperatureText, failed ? "Warning" : "Neutral");
+                    }
                     unavailable.Margin = new Thickness(0, 8, 0, 0); overview.Children.Add(unavailable);
+                    overview.Children.Add(TemperatureActions());
                 }
 
                 overview.Children.Add(PageKit.Group("Armazenamento"));
@@ -807,7 +851,7 @@ public partial class MainWindow : Window
                     }
                 }
                 var events = new Progress<string>(UpdateProgress);
-                var executor = conversationTools ??= new WindowsTools(store, user, ConfirmChange, events, text => AddEntry("assistant", text)) { ConversationId = conversation!.Id };
+                var executor = conversationTools ??= new WindowsTools(store, user, ConfirmChange, events, text => AddEntry("assistant", text)) { ConversationId = conversation!.Id, Sensors = sensors };
                 var agent = new AgentService(store, executor);
                 string answer;
                 try { answer = await agent.Run(user, conversation!, events, (label, result) => AddEntry("tool", label + "\n" + result), token); }
@@ -1083,6 +1127,11 @@ public partial class MainWindow : Window
         if (debloatCancelView != null) debloatCancelView.IsEnabled = debloatRunning;
         foreach (var check in debloatChecks.Values) check.IsEnabled = !debloatRunning && check.Tag is not DebloatAvailability.AlreadyApplied;
         if (debloatRiskView != null) debloatRiskView.IsEnabled = !debloatRunning;
+        if (runtimeProgressView != null) runtimeProgressView.Text = runtimeStatus;
+        if (runtimeScanView != null) runtimeScanView.IsEnabled = !runtimeRunning;
+        if (runtimeInstallView != null) runtimeInstallView.IsEnabled = !runtimeRunning && runtimeChecks.Count > 0;
+        if (runtimeCancelView != null) runtimeCancelView.IsEnabled = runtimeRunning;
+        foreach (var check in runtimeChecks.Values) check.IsEnabled = !runtimeRunning;
     }
     private void Tools()
     {
@@ -1160,9 +1209,13 @@ public partial class MainWindow : Window
         optimizePanel.Children.Add(Text("Se a etapa de disco já começou, o Nexo aguarda seu término para informar o resultado. A manutenção executada não é revertida pelo cancelamento.", 11, "Subtle"));
         var optimizeCard = Card(optimizePanel); PageContent.Children.Add(optimizeCard);
         var debloatCard = Card(DebloatCard()); PageContent.Children.Add(debloatCard);
+        var runtimeCard = Card(RuntimeCard()); PageContent.Children.Add(runtimeCard);
+        var pawnIoCard = Card(PawnIoPanel()); PageContent.Children.Add(pawnIoCard);
         overview.Children.Add(ToolCard(1, "Instalação", "Instalar Office", "Office LTSC 2024 com o aviso de licença por volume.", "Microsoft · Office LTSC 2024", officeCard));
         overview.Children.Add(ToolCard(2, "Manutenção", "Otimizar PC", "Temporários antigos e manutenção nativa dos discos.", "Temporários · disco", optimizeCard));
         overview.Children.Add(ToolCard(3, "Privacidade · aparência", "Apps pré-instalados e ajustes do Windows", "Apps que vêm com o Windows e ajustes, aplicados só depois da sua confirmação.", "Apps · serviços · ajustes", debloatCard));
+        overview.Children.Add(ToolCard(4, "Programas · bibliotecas", RuntimePresentation.CardTitle, "Visual C++, DirectX e .NET: o que falta neste PC, instalado só pelos instaladores oficiais da Microsoft.", "VC++ · DirectX · .NET", runtimeCard));
+        overview.Children.Add(ToolCard(5, "Sensores · driver de terceiros", "Instalar PawnIO (driver oficial)", "Driver da leitura de temperatura da CPU, instalado pelo assistente oficial depois da sua confirmação.", "namazso · GPL-2.0 · " + PawnIoSetup.Version, pawnIoCard));
         UpdateToolsView();
     }
     // Situação da ferramenta numa faixa própria, com o rótulo em mono.
@@ -1205,6 +1258,175 @@ public partial class MainWindow : Window
         AutomationProperties.SetName(card, number.ToString("00") + ", " + title + ": " + description);
         card.Click += (_, _) => section.BringIntoView();
         return card;
+    }
+
+    // PawnIO (#142): driver de terceiros, só por clique e depois da confirmação. O modelo não oferece nada disso (#135).
+    private StackPanel PawnIoPanel()
+    {
+        var panel = new StackPanel();
+        panel.Children.Add(SectionHeading("health", "Driver PawnIO para a temperatura da CPU"));
+        panel.Children.Add(Text("A temperatura da CPU passa por um driver de kernel. O Nexo não embute o PawnIO: baixa o instalador oficial " + PawnIoSetup.Version + " do GitHub, confere o hash e a assinatura e abre o assistente dele com a autorização de administrador.", 13, "Secondary"));
+        panel.Children.Add(Text("Para desinstalar depois: " + PawnIoSetup.Uninstall + ".", 12, "Secondary"));
+        var installed = sensors.PawnIoInstalled();
+        panel.Children.Add(ToolStatus(Text(pawnIoStatus ?? (installed ? "O PawnIO está instalado neste computador." : "O PawnIO não está instalado neste computador."), 13, "Ink")));
+        var install = Action("Instalar PawnIO (driver oficial)", async (_, _) => await GuardAsync(InstallPawnIo), true);
+        install.Tag = "pawnio-install-tools"; install.IsEnabled = !pawnIoRunning && !installed;
+        panel.Children.Add(install);
+        return panel;
+    }
+
+    // Saúde do PC (#142): sem o driver, o botão de instalar; com o driver e sem leitura no Nexo, um UAC por clique para ler.
+    private StackPanel TemperatureActions()
+    {
+        var panel = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+        var installed = sensors.PawnIoInstalled();
+        if (elevatedRead is { } result) panel.Children.Add(StatusLine("Temperatura da CPU: " + result.Message, result.State switch { "read" => "Success", "running" => "Neutral", _ => "Warning" }));
+        if (pawnIoStatus != null && !installed) panel.Children.Add(StatusLine(pawnIoStatus, "Neutral"));
+        var actions = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };
+        if (!installed)
+        {
+            var install = Action("Instalar PawnIO (driver oficial)", async (_, _) => await GuardAsync(InstallPawnIo), true);
+            install.Tag = "pawnio-install"; install.IsEnabled = !pawnIoRunning; actions.Children.Add(install);
+        }
+        else
+        {
+            var activate = Action(SystemSensorReader.ActivateLabel, async (_, _) => await GuardAsync(() => ChangeLiveReader("install")), true);
+            activate.Tag = "temperature-live-activate"; activate.IsEnabled = !liveReaderRunning; actions.Children.Add(activate);
+            var read = Action("Ler temperatura (pede administrador)", async (_, _) => await GuardAsync(ReadTemperatureElevated));
+            read.Tag = "temperature-elevated"; read.IsEnabled = !elevatedReadRunning; actions.Children.Add(read);
+        }
+        if (liveReaderStatus != null) panel.Children.Add(StatusLine(liveReaderStatus, "Neutral"));
+        panel.Children.Add(actions);
+        panel.Children.Add(Text(installed ? "A temperatura ao vivo instala um leitor mínimo como tarefa do sistema (um UAC, uma vez). A leitura única roda num processo separado com administrador e vale para esta tela. O Nexo não pede o UAC sozinho."
+            : "Driver de kernel de terceiros (namazso, GPL-2.0). Nada é baixado antes da sua confirmação.", 11, "Subtle"));
+        return panel;
+    }
+
+    // Leitor de sensores do sistema instalado (#142): versão, Desativar e, com versão diferente da do app, Atualizar leitor.
+    private StackPanel LiveReaderPanel(LiveTemperature live)
+    {
+        var panel = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+        var installedVersion = sensors.ReaderVersion() ?? (live.Version.Length > 0 ? live.Version : "desconhecida");
+        var outdated = SystemSensorReader.Outdated(installedVersion, sensors.ReaderBuild(), AppVersion.Current, WindowsLiveSensorSystem.CurrentBuild());
+        panel.Children.Add(Text("Leitor de sensores do sistema (tarefa \"" + SystemSensorReader.TaskName + "\", SYSTEM) · versão " + installedVersion
+            + (outdated ? (installedVersion == AppVersion.Current ? " · este Nexo é outra compilação da " : " · este Nexo é a ") + AppVersion.Current : ""), 12, "Secondary"));
+        if (liveReaderStatus != null) panel.Children.Add(StatusLine(liveReaderStatus, "Neutral"));
+        var actions = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };
+        if (outdated)
+        {
+            var update = Action(SystemSensorReader.UpdateLabel, async (_, _) => await GuardAsync(() => ChangeLiveReader("update", installedVersion)), true);
+            update.Tag = "temperature-live-update"; update.IsEnabled = !liveReaderRunning; actions.Children.Add(update);
+        }
+        var deactivate = Action(SystemSensorReader.DeactivateLabel, async (_, _) => await GuardAsync(() => ChangeLiveReader("remove")));
+        deactivate.Tag = "temperature-live-deactivate"; deactivate.IsEnabled = !liveReaderRunning; actions.Children.Add(deactivate);
+        panel.Children.Add(actions);
+        panel.Children.Add(Text("Desativar remove a tarefa e a pasta " + SystemSensorReader.FolderLabel + " (um UAC). O PawnIO continua instalado.", 11, "Subtle"));
+        return panel;
+    }
+
+    // A cada tique do cartão "Agora" (só com a tela visível): mesmo estado, só o texto muda; estado novo (aguardando → ao vivo,
+    // ao vivo → sem resposta), a tela é remontada.
+    private void OnLiveTemperature(LiveTemperature live)
+    {
+        if (page is not ("home" or "health")) return;
+        if (liveTemperatureState != null && live.State != liveTemperatureState) { liveTemperatureState = live.State; RefreshMonitoredPage(); return; }
+        liveTemperatureState = live.State;
+        if (SystemSensorReader.Line(live) is { } line) foreach (var view in liveTemperatureViews) view.Text = line.Text;
+    }
+
+    private async Task ChangeLiveReader(string action, string installedVersion = "")
+    {
+        if (liveReaderRunning) return;
+        // #142, B1: um Nexo aberto com extração do single-file não ativa nem atualiza; a tarefa registrada sairia sempre com 2.
+        if (SystemSensorReader.CopyRefusal(action) is { } refusal) { liveReaderStatus = refusal; RefreshMonitoredPage(); return; }
+        var (title, details) = action switch
+        {
+            "remove" => (SystemSensorReader.DeactivateTitle, SystemSensorReader.DeactivateDetails),
+            "update" => (SystemSensorReader.UpdateTitle, SystemSensorReader.UpdateDetails(installedVersion)),
+            _ => (SystemSensorReader.ConfirmationTitle, SystemSensorReader.ConfirmationDetails)
+        };
+        if (!await ConfirmChange(new ChangeRequest(title, details))) return;
+        liveReaderRunning = true; liveReaderStatus = "Aguardando a autorização de administrador (UAC)..."; RefreshMonitoredPage();
+        SensorReaderResult result;
+        try
+        {
+            string script;
+            if (action == "remove") script = SystemSensorReader.RemoveScript(ProtectedFolderScript.Text);
+            else { var (source, files) = WindowsLiveSensorSystem.Sources(); script = SystemSensorReader.InstallScript(source, files, ProtectedFolderScript.Text); }
+            result = await SystemSensorReader.ApplyAsync(WindowsLiveSensorSystem.RunElevatedAsync, action, script, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException or ArgumentException)
+        { result = new("failed", "Não foi possível preparar o leitor de sensores: " + ex.Message); }
+        finally { liveReaderRunning = false; }
+        liveReaderStatus = result.Message;
+        var name = action switch { "remove" => SystemSensorReader.DeactivateLabel, "update" => SystemSensorReader.UpdateLabel + " de sensores", _ => SystemSensorReader.ActivateLabel };
+        try { store.Log(user, name + ": " + result.State); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        if (healthStore != null)
+        {
+            try
+            {
+                healthStore.SaveIntervention(new InterventionRecord
+                {
+                    Action = name, Target = SystemSensorReader.InstallFolder + " · tarefa " + SystemSensorReader.TaskName, Authorized = true, Risk = "médio",
+                    State = result.State switch { "done" => "concluída", "canceled" => "cancelada", _ => "falhou" },
+                    After = JsonSerializer.Serialize(result), Summary = result.Message,
+                });
+            }
+            catch (OperationalStoreException ex) { liveReaderStatus += "\nO registro no histórico operacional falhou: " + ex.Message; }
+        }
+        liveTemperatureState = null;
+        RefreshMonitoredPage();
+    }
+
+    private void RefreshPawnIoViews()
+    {
+        if (page == "health") RefreshMonitoredPage();
+        else if (page == "tools") { var position = PageScroll.VerticalOffset; ShowPage("tools"); PageScroll.ScrollToVerticalOffset(position); }
+    }
+
+    private async Task InstallPawnIo()
+    {
+        if (pawnIoRunning || sensors.PawnIoInstalled()) return;
+        if (!await ConfirmChange(new ChangeRequest(PawnIoSetup.ConfirmationTitle, PawnIoSetup.ConfirmationDetails))) return;
+        pawnIoRunning = true; pawnIoStatus = "Iniciando o download do instalador oficial..."; RefreshPawnIoViews();
+        PawnIoInstallResult result;
+        try
+        {
+            var progress = new Progress<string>(message => { pawnIoStatus = message; RefreshPawnIoViews(); });
+            result = await PawnIoSetup.InstallAsync(new WindowsPawnIoInstallSystem(), progress, CancellationToken.None);
+        }
+        finally { pawnIoRunning = false; }
+        pawnIoStatus = result.Message;
+        var summary = "Instalar PawnIO " + PawnIoSetup.Version + ": " + result.State + (result.ExitCode.HasValue ? " (código " + result.ExitCode + ")" : "") + (result.Signer.Length > 0 ? "; assinante " + result.Signer : "");
+        try { store.Log(user, summary); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        if (healthStore != null)
+        {
+            try
+            {
+                healthStore.SaveIntervention(new InterventionRecord
+                {
+                    Action = "Instalar PawnIO (driver oficial)", Target = PawnIoSetup.Url.ToString(), Authorized = true, Risk = "médio",
+                    State = result.State switch { "installed" => "concluída", "canceled" => "cancelada", _ => "falhou" },
+                    After = JsonSerializer.Serialize(result), Summary = result.Message,
+                });
+            }
+            catch (OperationalStoreException ex) { pawnIoStatus += "\nO registro no histórico operacional falhou: " + ex.Message; }
+        }
+        RefreshPawnIoViews();
+    }
+
+    private async Task ReadTemperatureElevated()
+    {
+        if (elevatedReadRunning) return;
+        elevatedReadRunning = true; elevatedRead = new ElevatedReadResult("running", "aguardando a autorização de administrador e a leitura (até " + ElevatedSensorReader.TimeoutSeconds + " s)."); RefreshMonitoredPage();
+        ElevatedReadResult result;
+        try { result = await ElevatedSensorReader.ReadAsync(new WindowsElevatedSensorSystem(), ElevatedSensorReader.Root, () => DateTimeOffset.UtcNow, CancellationToken.None); }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or System.ComponentModel.Win32Exception) { result = new("failed", "A leitura com administrador não começou: " + ex.Message); }
+        finally { elevatedReadRunning = false; }
+        try { store.Log(user, "Leitura de temperatura com administrador: " + result.State); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        // Só a tela de Saúde aberta mostra o resultado; ao sair dela, ele é descartado.
+        if (page == "health") elevatedRead = result;
+        RefreshMonitoredPage();
     }
 
     // Remoção de apps e ajustes (#127): só pelo menu, nunca pelo modelo. Verificar não altera nada; Aplicar pede confirmação.
@@ -1344,6 +1566,107 @@ public partial class MainWindow : Window
             });
         }
         catch (OperationalStoreException ex) { debloatStatus += "\nO registro no histórico operacional falhou: " + ex.Message; }
+    }
+    // Componentes do Windows (#150): só pelo menu, nunca pelo modelo. Verificar só lê o registro e os arquivos; Instalar pede
+    // confirmação com a lista e um UAC por item.
+    private StackPanel RuntimeCard()
+    {
+        var panel = new StackPanel();
+        panel.Children.Add(SectionHeading("tools", RuntimePresentation.CardTitle));
+        panel.Children.Add(Text("Muitos programas não abrem quando falta um Visual C++ Redistributable ou uma DLL do DirectX antigo (d3dx9_43.dll, xinput1_3.dll). Primeiro o Nexo verifica o que existe neste PC, sem alterar nada; depois instala só o que você marcar.", 13, "Secondary"));
+        panel.Children.Add(Text(RuntimePresentation.CardNotice, 12, "Secondary"));
+        runtimeProgressView = Text(runtimeStatus, 13, "Ink");
+        panel.Children.Add(ToolStatus(runtimeProgressView));
+        runtimeListView = new StackPanel();
+        panel.Children.Add(runtimeListView);
+        RenderRuntimeList();
+        var actions = new WrapPanel();
+        runtimeScanView = Action("Verificar este PC", async (_, _) => await GuardAsync(ScanRuntimes), icon: "search");
+        runtimeInstallView = Action("Instalar selecionados", async (_, _) => await GuardAsync(InstallRuntimes), true);
+        runtimeCancelView = Action("Cancelar próximas etapas", (_, _) => runtimeCancellation?.Cancel());
+        actions.Children.Add(runtimeScanView); actions.Children.Add(runtimeInstallView); actions.Children.Add(runtimeCancelView);
+        panel.Children.Add(actions);
+        panel.Children.Add(Text("Um instalador já iniciado termina antes de o cancelamento valer. Se algum pedir reinício, o Nexo avisa e não reinicia o PC.", 11, "Subtle"));
+        return panel;
+    }
+
+    private void RenderRuntimeList()
+    {
+        if (runtimeListView == null) return;
+        runtimeListView.Children.Clear(); runtimeChecks.Clear();
+        if (runtimeScan == null) return;
+        foreach (var group in runtimeScan.Items.Where(s => s.State != RuntimeState.NotApplicable).GroupBy(s => s.Item.Kind))
+        {
+            var heading = Text(group.Key == RuntimeKind.DirectX ? "DirectX" : "Visual C++ Redistributable", 13); heading.FontWeight = FontWeights.SemiBold; heading.Margin = new Thickness(0, 10, 0, 4);
+            runtimeListView.Children.Add(heading);
+            foreach (var status in group)
+            {
+                var line = RuntimePresentation.StatusLine(status);
+                if (status.State == RuntimeState.Missing)
+                {
+                    var check = new CheckBox { Content = line, IsChecked = RuntimeCatalog.DefaultSelected(status), Margin = new Thickness(0, 4, 0, 0) };
+                    AutomationProperties.SetName(check, line);
+                    runtimeChecks[status.Item.Id] = check;
+                    runtimeListView.Children.Add(check);
+                }
+                else { var installed = Text(line, 12, "Secondary"); installed.Margin = new Thickness(22, 4, 0, 0); runtimeListView.Children.Add(installed); }
+                var detail = Text(status.Detail, 11, "Subtle"); detail.Margin = new Thickness(22, 0, 0, 2); runtimeListView.Children.Add(detail);
+            }
+        }
+    }
+
+    private async Task ScanRuntimes()
+    {
+        if (runtimeRunning) return;
+        runtimeRunning = true; runtimeStatus = "Verificando o registro e os arquivos do Windows. Nada é alterado nesta etapa."; UpdateToolsView();
+        try
+        {
+            runtimeScan = await Task.Run(() => RuntimeInspector.Scan(new WindowsRuntimeSystem()));
+            runtimeStatus = RuntimePresentation.ScanText(runtimeScan);
+        }
+        finally { runtimeRunning = false; RenderRuntimeList(); UpdateToolsView(); }
+    }
+
+    private async Task InstallRuntimes()
+    {
+        if (runtimeRunning || runtimeScan == null) return;
+        var items = runtimeScan.Missing.Where(s => runtimeChecks.TryGetValue(s.Item.Id, out var check) && check.IsChecked == true).Select(s => s.Item).ToArray();
+        if (items.Length == 0) { runtimeStatus = "Nenhum item selecionado."; UpdateToolsView(); return; }
+        if (MessageBox.Show(this, RuntimePresentation.ConfirmQuestion(items), "Confirmar instalação dos componentes", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        runtimeCancellation = new CancellationTokenSource(); runtimeRunning = true;
+        runtimeStatus = "Iniciando..."; UpdateToolsView();
+        try
+        {
+            var auditPath = Path.Combine(store.Root, "runtimes-audit.ndjson");
+            var progress = new Progress<string>(message => { if (runtimeRunning) { runtimeStatus = message; UpdateToolsView(); } });
+            var results = await RuntimeInstaller.InstallAsync(new WindowsRuntimeSystem(), items, progress, item =>
+            {
+                lock (runtimeAuditSync) File.AppendAllText(auditPath, JsonSerializer.Serialize(item) + Environment.NewLine);
+            }, runtimeCancellation.Token);
+            runtimeRunning = false;
+            runtimeStatus = RuntimePresentation.Result(results);
+            RecordRuntimes(results);
+            runtimeScan = null;
+        }
+        finally { runtimeRunning = false; runtimeCancellation.Dispose(); runtimeCancellation = null; RenderRuntimeList(); UpdateToolsView(); }
+    }
+
+    private void RecordRuntimes(IReadOnlyList<RuntimeInstallResult> results)
+    {
+        var summary = RuntimeInstaller.Summary(results);
+        try { store.Log(user, "Componentes do Windows (Ferramentas): " + summary + " · " + string.Join("; ", results.Select(r => r.Item.Id + " " + r.Outcome + (r.ExitCode is { } code ? " (" + code + ")" : "")))); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        if (healthStore == null) return;
+        try
+        {
+            healthStore.SaveIntervention(new InterventionRecord
+            {
+                Action = "Instalar componentes do Windows (Ferramentas)", Target = string.Join(", ", results.Select(r => r.Item.Id)), Authorized = true, Risk = "baixo",
+                State = RuntimeInstaller.State(results), RebootRequired = results.Any(r => r.Outcome == RuntimeOutcome.RebootPending),
+                After = JsonSerializer.Serialize(results.Select(r => new { r.Item.Id, Outcome = r.Outcome.ToString(), r.ExitCode, r.Signer, r.Sha256, r.Message })), Summary = summary,
+            });
+        }
+        catch (OperationalStoreException ex) { runtimeStatus += "\nO registro no histórico operacional falhou: " + ex.Message; }
     }
     // Aparência (#143): o tema muda na hora e a preferência fica no data.json deste perfil.
     private Border AppearanceCard()

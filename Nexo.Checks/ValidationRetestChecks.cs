@@ -365,7 +365,7 @@ internal static class ValidationRetestChecks
             var newFound = HealthRules.Evaluate(current, thresholds);
             foreach (var finding in newFound) finding.Id += ":s5";
             db.SaveFindings([.. oldFound, .. newFound]);
-            return HealthReportPresentation.FromStore(db, thresholds);
+            return HealthReportPresentation.FromStore(db, MachineSensors.Off, thresholds);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
@@ -407,7 +407,7 @@ internal static class ValidationRetestChecks
                 Problem = "Processo com memória em crescimento persistente", Evidence = $"NexoMemTeste PID 21356 iniciado em {start:yyyy-MM-dd HH:mm:ss zzz}: de 278 MB para {megabytes} MB em 5 leituras e 36 pontos da RAM",
                 Cause = "Crescimento observado neste processo", Recommendation = "Verifique se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção", Confidence = 0.7,
                 MemoryGrowth = new("NexoMemTeste", 278 * Mb, megabytes * Mb) }]);
-            return HealthReportPresentation.FromStore(db);
+            return HealthReportPresentation.FromStore(db, MachineSensors.Off);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
@@ -428,7 +428,7 @@ internal static class ValidationRetestChecks
             foreach (var finding in found) finding.Id += ":s1";
             db.SaveFindings(found);
             foreach (var i in Enumerable.Range(0, 4)) db.SaveSnapshot(Sample(now.AddSeconds(-30 * (3 - i)), false));
-            return HealthReportPresentation.FromStore(db);
+            return HealthReportPresentation.FromStore(db, MachineSensors.Off);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }

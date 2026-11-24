@@ -73,7 +73,7 @@ internal static class MonitoringChecks
             observed.GatewayProbe = new NetworkProbeReading("no_response", "192.0.2.1", "sem resposta ICMP");
             observed.DnsProbe = new NetworkProbeReading("ok", "example.com", "resolvido");
             reportStore.SaveSnapshot(observed);
-            var text = HealthReportPresentation.FromStore(reportStore);
+            var text = HealthReportPresentation.FromStore(reportStore, MachineSensors.Off);
             check(text.Contains("Gateway:") && text.Contains("DNS:") && text.Contains("Destino externo:")
                 && text.Contains("inesperada"), "Relatório separa gateway, DNS e destino externo sem alegar acesso geral");
         }

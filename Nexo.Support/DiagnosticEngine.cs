@@ -2,12 +2,13 @@ namespace Nexo.Support;
 
 public static class DiagnosticEngine
 {
+    public const string TemperatureLimitation = "Sensor de temperatura da CPU indisponível.";
     public static DiagnosticReport BuildReport(HealthSnapshot snapshot, IEnumerable<HealthFinding> ruleFindings, EventBatch events, DateTimeOffset now)
     {
         var report = new DiagnosticReport { Created = now };
         report.Findings.AddRange(ruleFindings);
         report.Findings.AddRange(EventAnalyzer.Analyze(events.Events));
-        if (snapshot.CpuTemperatureC == null) report.Limitations.Add("Sensor de temperatura da CPU indisponível." + (snapshot.CpuTemperature?.Detail is { Length: > 0 } reason ? " " + reason : ""));
+        if (snapshot.CpuTemperatureC == null) report.Limitations.Add(TemperatureLimitation + (snapshot.CpuTemperature?.Detail is { Length: > 0 } reason ? " " + reason : ""));
         if (snapshot.StorageHealth == "unavailable") report.Limitations.Add("Estado dos discos físicos indisponível." + (snapshot.Storage?.Detail is { Length: > 0 } detail ? " " + detail : ""));
         else report.Limitations.Add(HealthReportPresentation.StorageScope);
         if (snapshot.CollectionStatus != "complete") report.Limitations.Add("A coleta de métricas foi parcial.");

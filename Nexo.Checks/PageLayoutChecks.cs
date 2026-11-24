@@ -74,9 +74,13 @@ internal static class PageLayoutChecks
         assert(tickets.Contains("Nenhum chamado é enviado automaticamente") && tickets.Contains("Exportar relatório .txt") && !Regex.IsMatch(tickets, "(?i)glpi|jira|enviar chamado"),
             "#143: Encaminhamentos é o relatório local exportável, sem envio a ferramenta de chamados");
         var tools = Method(window, "private void Tools()");
-        assert(Regex.Matches(tools, @"ToolCard\(\d+,").Count == 3 && Regex.IsMatch(tools, @"ToolCard\(1, [^;]*officeCard\)") && Regex.IsMatch(tools, @"ToolCard\(2, [^;]*optimizeCard\)")
-            && Regex.IsMatch(tools, @"ToolCard\(3, ""[^""]+"", ""Apps pré-instalados e ajustes do Windows"", [^;]*debloatCard\)") && tools.Contains("var debloatCard = Card(DebloatCard());"),
-            "#143: os cartões numerados de Ferramentas são só as ferramentas da própria tela, com o de apps e ajustes (#127) como o 3º");
+        assert(Regex.Matches(tools, @"ToolCard\(\d+,").Count == 5 && Regex.IsMatch(tools, @"ToolCard\(1, [^;]*officeCard\)") && Regex.IsMatch(tools, @"ToolCard\(2, [^;]*optimizeCard\)")
+            && Regex.IsMatch(tools, @"ToolCard\(3, ""[^""]+"", ""Apps pré-instalados e ajustes do Windows"", [^;]*debloatCard\)") && tools.Contains("var debloatCard = Card(DebloatCard());")
+            && Regex.IsMatch(tools, @"ToolCard\(4, [^;]*RuntimePresentation\.CardTitle, [^;]*runtimeCard\)") && tools.Contains("var runtimeCard = Card(RuntimeCard());")
+            && Regex.IsMatch(tools, @"ToolCard\(5, ""[^""]+"", ""Instalar PawnIO \(driver oficial\)"", [^;]*pawnIoCard\)") && tools.Contains("var pawnIoCard = Card(PawnIoPanel());")
+            && tools.IndexOf("PageContent.Children.Add(debloatCard)", StringComparison.Ordinal) < tools.IndexOf("PageContent.Children.Add(runtimeCard)", StringComparison.Ordinal)
+            && tools.IndexOf("PageContent.Children.Add(runtimeCard)", StringComparison.Ordinal) < tools.IndexOf("PageContent.Children.Add(pawnIoCard)", StringComparison.Ordinal),
+            "#143: os cartões numerados de Ferramentas são só as ferramentas da própria tela, com o de apps e ajustes (#127) como o 3º, o de componentes do Windows (#150) como o 4º e o do PawnIO (#142) como o 5º, e as seções seguem a ordem dos cartões");
 
         // 3. Estados da Saúde do PC e do Assistente.
         var health = Method(window, "private void Health()");

@@ -417,7 +417,7 @@ internal static class ValidationFollowUpChecks
                     Problem = "Processo com memória em crescimento persistente", Evidence = "llama-server PID 9100: de 1200 MB para 6200 MB em 4 leituras", Cause = "Crescimento observado neste processo",
                     Recommendation = "Verifique se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção", Confidence = 0.7, MemoryGrowth = new("llama-server", 1200L * 1024 * 1024, 6200L * 1024 * 1024) }
             ]);
-            var report = HealthReportPresentation.FromStore(db);
+            var report = HealthReportPresentation.FromStore(db, MachineSensors.Off);
             assert(report.Contains(HealthReportPresentation.OtherHeader) && report.Contains("llama-server PID 9100") && !report.Contains("GoogleUpdater") && !report.Contains("Serviço automático interrompido"),
                 "Junção com a #57: a parada superada pela leitura atual não vai ao modelo, nem na parte que não é atual");
         }
@@ -453,7 +453,7 @@ internal static class ValidationFollowUpChecks
                     Confidence = 0.7, MemoryGrowth = new("Navegador", 2000 * Mb, 16000 * Mb) }
             ]);
             foreach (var sample in series) { db.SaveSnapshot(sample); HealthOccurrences.RecordPlateaus(db, sample, limits); }
-            report = HealthReportPresentation.FromStore(db, limits).ReplaceLineEndings("\n");
+            report = HealthReportPresentation.FromStore(db, MachineSensors.Off, limits).ReplaceLineEndings("\n");
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
         var lines = report.Split('\n');
@@ -541,7 +541,7 @@ internal static class ValidationFollowUpChecks
                     Cause = "Crescimento observado neste processo", Recommendation = "Verifique se o aplicativo está em uso e salve o trabalho antes de qualquer intervenção", Confidence = 0.7,
                     MemoryGrowth = new("NexoMemTeste", 4375 * Mb, 13591 * Mb) });
             db.SaveFindings(found);
-            return HealthReportPresentation.FromStore(db);
+            return HealthReportPresentation.FromStore(db, MachineSensors.Off);
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }

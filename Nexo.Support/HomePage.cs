@@ -73,11 +73,18 @@ public partial class MainWindow
             Foreground = Brush(health.State switch { HomeHealthState.Critical => "Danger", HomeHealthState.Attention or HomeHealthState.Unavailable => "Warning", _ => "Ink" }),
             Margin = new Thickness(0, 12, 0, 4), TextWrapping = TextWrapping.Wrap });
         panel.Children.Add(Text(health.Detail, 13, "Secondary"));
+        // #142: a temperatura do leitor de sensores do sistema entra já na primeira renderização da Início (a tela de abertura),
+        // pelo live.json lido agora, sem esperar o monitor de saúde nem o 1º tique; sem arquivo fresco, "aguardando o leitor…".
+        var live = sensors.Live();
+        liveTemperatureState = live.State;
+        if (SystemSensorReader.TemperatureText(health.Latest, live, sensors.PawnIoInstalled()) is { } heat)
+        {
+            var temperature = Text(heat.Text, 12, heat.Tone is "Warning" or "Success" ? heat.Tone : "Secondary");
+            temperature.Margin = new Thickness(0, 8, 0, 0); panel.Children.Add(temperature);
+            if (live.State != "off") liveTemperatureViews.Add(temperature);
+        }
         if (health.Latest is { } latest)
         {
-            var temperature = Text("Temperatura da CPU: " + HealthReportPresentation.DescribeTemperature(latest), 12,
-                latest.CpuTemperature?.State is "error" or "invalid" ? "Warning" : "Secondary");
-            temperature.Margin = new Thickness(0, 8, 0, 0); panel.Children.Add(temperature);
             var storage = Text("Discos físicos: " + HealthReportPresentation.DescribeStorage(latest), 12, latest.StorageHealth is "warning" or "unhealthy" ? "Warning" : "Secondary");
             storage.Margin = new Thickness(0, 4, 0, 0); panel.Children.Add(storage);
         }

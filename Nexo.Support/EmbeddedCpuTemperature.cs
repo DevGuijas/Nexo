@@ -1,6 +1,5 @@
 using System.Text.Json;
 using LibreHardwareMonitor.Hardware;
-using LibreHardwareMonitor.PawnIo;
 
 namespace Nexo.Support;
 internal sealed record CpuSensorValue(string Name, string Identifier, double? Value);
@@ -17,14 +16,14 @@ internal sealed class CpuInitializationCircuit
         "A inicialização do sensor embutido falhou. Reinicie o Nexo para tentar novamente. Detalhe: " + detail, null);
 }
 
-/// <summary>CPU-only access; never installs drivers or starts an external monitor.</summary>
+/// <summary>CPU-only access; never installs drivers or starts an external monitor. The PawnIO check is re-read on each call (#142).</summary>
 internal static class EmbeddedCpuTemperature
 {
     // A native hardware call cannot safely be killed. Keep its gate until the worker ends, even after timeout.
     private static readonly SemaphoreSlim Gate = new(1, 1);
     private static readonly CpuInitializationCircuit Initialization = new();
     internal static Task<string> ReadAsync(CancellationToken token) =>
-        ReadAsync(() => Read(() => new LibreCpuSession(), PawnIo.IsInstalled, token, Initialization), token, TimeSpan.FromSeconds(HardwareSensors.TemperatureTimeoutSeconds));
+        ReadAsync(() => Read(() => new LibreCpuSession(), PawnIoDriver.Installed(), token, Initialization), token, TimeSpan.FromSeconds(HardwareSensors.TemperatureTimeoutSeconds));
 
     internal static async Task<string> ReadAsync(Func<string> read, CancellationToken token, TimeSpan timeout)
     {
@@ -57,7 +56,7 @@ internal static class EmbeddedCpuTemperature
             token.ThrowIfCancellationRequested();
             var sensors = session.ReadSensors().ToArray();
             token.ThrowIfCancellationRequested();
-            return JsonSerializer.Serialize(new { Temperature = new { Available = true, Sensors = sensors } });
+            return SensorsJson(sensors);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception ex)
@@ -65,6 +64,10 @@ internal static class EmbeddedCpuTemperature
             return Error(initialization.Failure ?? "Não foi possível acessar o sensor embutido: " + ex.Message);
         }
     }
+    /// <summary>O mesmo JSON da leitura por chamada, para o HardwareSensors escolher o sensor e descartar zero (#142).</summary>
+    internal static string SensorsJson(IEnumerable<CpuSensorValue> sensors) => JsonSerializer.Serialize(new { Temperature = new { Available = true, Sensors = sensors.ToArray() } });
+    /// <summary>Sessão aberta uma vez pelo leitor de sensores do sistema (--sensor-loop), que lê a cada 2 s sem reabrir.</summary>
+    internal static ICpuSensorSession CreateSession() => new LibreCpuSession();
     private static string Error(string detail) => JsonSerializer.Serialize(new { Temperature = new { Available = false, Error = detail } });
     private sealed class LibreCpuSession : ICpuSensorSession
     {

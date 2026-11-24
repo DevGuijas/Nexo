@@ -267,12 +267,12 @@ internal static class ServiceTransitionChecks
             db.SaveFindings([old]);
             db.SaveSnapshot(At(now.AddSeconds(-30), Clean(Google), Clean("Spooler") with { ExitCode = 1067 }));
             db.SaveSnapshot(At(now, Clean(Google), Clean("Spooler") with { ExitCode = 1067 }));
-            var onlyGoogle = HealthReportPresentation.FromStore(db);
+            var onlyGoogle = HealthReportPresentation.FromStore(db, MachineSensors.Off);
             check(!onlyGoogle.Contains("GoogleUpdater", StringComparison.Ordinal) && !onlyGoogle.Contains("Consulte eventos do serviço", StringComparison.Ordinal)
                     && onlyGoogle.Contains("Nenhum achado sustentado", StringComparison.Ordinal),
                 "Ocorrência antiga do GoogleUpdater, hoje parado com saída normal, não chega ao modelo nem traz recomendação");
             db.SaveFindings([crash]);
-            var withCrash = HealthReportPresentation.FromStore(db);
+            var withCrash = HealthReportPresentation.FromStore(db, MachineSensors.Off);
             check(!withCrash.Contains("GoogleUpdater", StringComparison.Ordinal)
                     && withCrash.Contains("persiste nas leituras atuais: Serviço automático interrompido. Evidência: Spooler parado em 2 leituras", StringComparison.Ordinal)
                     && withCrash.Contains("Consulte eventos do serviço", StringComparison.Ordinal),
@@ -290,7 +290,7 @@ internal static class ServiceTransitionChecks
             var now = DateTimeOffset.UtcNow;
             db.SaveSnapshot(At(now.AddSeconds(-30), Clean(Google), Clean(GoogleInternal), Running("Spooler")));
             db.SaveSnapshot(At(now, Clean(Google), Clean(GoogleInternal), Running("Spooler")));
-            var report = HealthReportPresentation.FromStore(db);
+            var report = HealthReportPresentation.FromStore(db, MachineSensors.Off);
             check(!report.Contains("GoogleUpdater", StringComparison.Ordinal) && report.Contains("Nenhum achado sustentado", StringComparison.Ordinal),
                 "Relatório entregue ao modelo não traz os GoogleUpdater parados com saída normal");
         }

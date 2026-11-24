@@ -149,7 +149,7 @@ internal static class MemoryOccurrenceChecks
         WithEngine(curve, (db, run) =>
         {
             foreach (var _ in curve) run();
-            var lines = HealthReportPresentation.FromStore(db, Limits).Split('\n');
+            var lines = HealthReportPresentation.FromStore(db, MachineSensors.Off, Limits).Split('\n');
             var system = lines.SingleOrDefault(line => line.Contains("De 52% para 82%"));
             check(system != null && system.Contains("persiste: NexoMemTeste PID 20248 segue com 16663 MB") && system.Contains("Causa: hipótese, Possível relação com NexoMemTeste PID 20248"),
                 "Relatório do assistente mostra a ocorrência do sistema persistindo e ligada ao processo");

@@ -14,6 +14,8 @@ O monitor mostra separadamente a interface local, o gateway, a resolução DNS e
 
 Em **Ferramentas**, o botão **Otimizar PC** remove arquivos com mais de sete dias apenas das pastas temporárias do perfil e do Windows, depois pede ao Windows a manutenção nativa de discos elegíveis. Discos virtuais são ignorados. A tela mostra quantidades, tempo, erros e resultado por etapa; acesso negado aparece como resultado parcial. O Nexo não mede nem promete ganho de desempenho. O cancelamento não reverte arquivos já removidos.
 
+Em **Ferramentas**, o cartão **Componentes do Windows para programas** (#150, 1.7.0) verifica, só lendo, os Visual C++ Redistributable de 2005 a 2015–2022 (x86 e x64), as DLLs do DirectX de junho de 2010 e a versão do .NET Framework. Ele instala só o que você marcar, pelos instaladores oficiais da Microsoft, com host restrito, assinatura conferida antes do UAC e resultado por item no histórico; o assistente não oferece essa instalação pelo chat. Fontes, hashes e como atualizar: [docs/runtimes.md](docs/runtimes.md).
+
 ## Abrir
 
 Para executar a compilação local, rode `dotnet run --project Nexo.Support -c Release`. Para instalar o aplicativo com o modelo local, baixe [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe). Ele consulta a versão publicada na Oracle ao ser executado; veja [o procedimento de instalação e publicação](docs/INSTALADOR-NUVEM.md). A versão estável publicada atual é a 1.6.3; a 1.7.0 desta branch ainda não é uma entrega estável. Histórico, pré-requisitos de publicação e hashes dos arquivos publicados estão em [CHANGELOG.md](CHANGELOG.md).
@@ -163,6 +165,14 @@ Em **Ferramentas**, o cartão **Apps pré-instalados e ajustes do Windows** (#12
 
 Catálogo adaptado de [rivaed/Windows10-Debloat](https://github.com/rivaed/Windows10-Debloat) e [rivaed/Windows11-Debloat](https://github.com/rivaed/Windows11-Debloat), sob a licença MIT. O script deles não é executado: o Nexo reimplementa os itens escolhidos.
 
+### Driver PawnIO (temperatura da CPU)
+
+Sem o PawnIO, a temperatura da CPU fica indisponível. Em **Saúde do PC** e no cartão 05 de **Ferramentas**, **Instalar PawnIO (driver oficial)** pede confirmação, baixa o `PawnIO_setup.exe` da release 2.2.0 fixada, confere tamanho, SHA-256 e assinatura e abre o assistente do PawnIO com UAC. Com o driver instalado, **Ler temperatura (pede administrador)** lê os sensores num processo separado com admin (`Nexo.exe --read-sensors`), um UAC por clique, e grava o resultado em `%ProgramData%\NexoSupport\sensors`. Para desinstalar: Configurações > Aplicativos > PawnIO. Detalhes em [docs/embedded-temperature.md](docs/embedded-temperature.md).
+
+**Temperatura ao vivo.** Com o PawnIO instalado, **Ativar temperatura ao vivo** (Saúde do PC) instala, com um UAC, o leitor de sensores do sistema: uma cópia mínima do Nexo em `%ProgramFiles%\Nexo\Sensors` (pasta protegida) que roda como a tarefa **Nexo Sensores** (SYSTEM) desde a inicialização, lê só a temperatura da CPU a cada 2 s e grava em `%ProgramData%\NexoSupport\sensors\live.json`. O Nexo sem admin mostra esse valor ao vivo na Saúde do PC, na Início e no chat, com a origem e o horário. Ele nunca roda como SYSTEM a partir da pasta do usuário. Para desativar: Saúde do PC > **Desativar temperatura ao vivo** (um UAC), que remove a tarefa e a pasta; **Atualizar leitor** aparece quando a versão instalada difere da do Nexo.
+
+Terceiros: [PawnIO](https://github.com/namazso/PawnIO), de namazso, sob a GPL-2.0 com exceção para programas que usam só a interface IOCTL; o Nexo não embute o driver nem o instalador e só baixa o instalador oficial ([namazso/PawnIO.Setup](https://github.com/namazso/PawnIO.Setup)) quando o usuário pede.
+
 ## Rede e recuperação
 
 Antes de alterar IP/DNS, o processo elevado salva o backup (`before.json`) e o registro da transação em `%ProgramData%\NexoSupport\operations\<operação>`. Cada pasta dessa cadeia nasce já com o descritor final (herança desligada, dono Administradores, controle total só para SYSTEM e Administradores, leitura para Usuários). Uma pasta que já existe nunca é reparada nem adotada: só é usada se já estiver assim, sem link. Se não estiver, o executor deve recusar a mudança antes de aplicá-la; se sair sem resultado, confira o estado da rede. Os arquivos da pasta protegida também nascem com o descritor explícito (dono Administradores, sem herança), num temporário que substitui o destino; o dono não depende do padrão do processo, que num administrador com o UAC desligado é o próprio usuário. Sem conseguir esse dono, o executor deve interromper a alteração antes de aplicar; uma saída sem resultado não confirma o estado da rede.
@@ -213,9 +223,12 @@ dotnet run --project Nexo.Checks -- --interaction-evals
 dotnet run --project Nexo.Checks -- --interface-probe-live
 dotnet run --project Nexo.Checks -- --hardware-live
 dotnet run --project Nexo.Checks -- --debloat
+dotnet run --project Nexo.Checks -- --runtimes
 dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.7.0
 dotnet run --project Nexo.Setup.Checks -c Release
 ```
+
+O `scripts/Build-CloudRelease.ps1` gera o `nexo-app.zip` do instalador com as mesmas opções desse `dotnet publish`: single-file sem `IncludeNativeLibrariesForSelfExtract`, com as DLLs nativas do WPF ao lado do `Nexo.exe`. Nenhum dos dois extrai arquivos ao abrir, e o leitor de sensores do sistema (#142) depende disso.
 
 `--diagnostics` consulta o Windows real. `--agent-live` usa o modelo instalado e verifica chamadas reais e recusa de correções, sem autorizar alterações. A suíte PowerShell substitui comandos de rede por simuladores e testa aplicação, falha, cancelamento e timeout com restauração.
 

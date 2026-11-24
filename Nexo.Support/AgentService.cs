@@ -136,6 +136,7 @@ public sealed class AgentService(Store store, IAgentTools tools, HttpClient? cli
         não ofereça identificar os maiores arquivos. Indique Configurações > Sistema > Armazenamento do Windows.
         O Nexo não verifica segurança: não sugira que um processo seja malicioso, vírus ou malware; fale do consumo medido.
         O Nexo não remove nem desinstala apps pelo chat: não ofereça remover nem pergunte quais apps remover. Os apps que vêm com o Windows saem pelo cartão “Apps pré-instalados e ajustes do Windows”, no menu Ferramentas, onde “Verificar este PC” mostra o que existe no PC, com os itens sugeridos já marcados; explique isso com suas palavras, sem repetir uma resposta anterior.
+        O Nexo não instala o Visual C++ Redistributable, o DirectX nem o .NET pelo chat: não ofereça instalar, baixar nem atualizar esses componentes. Se o usuário perguntar, indique o cartão “Componentes do Windows para programas”, no menu Ferramentas, onde “Verificar este PC” mostra o que falta e a instalação usa só os instaladores oficiais da Microsoft.
         Não descreva o que um programa ou processo faz sem que uma ferramenta tenha trazido essa informação; fale só do nome e do consumo medido.
         Para uma pergunta sobre uma letra de unidade ("o que é o D:?"), consulte get_hardware_inventory(storage) antes de responder.
         Um alerta de memória "Estável em patamar alto" é informativo: não o apresente como causa da lentidão.

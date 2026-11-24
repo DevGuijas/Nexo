@@ -21,17 +21,24 @@ public sealed class LiveMetricsPanel : Border
     private readonly LiveMetricsSampler sampler;
     private readonly ILiveMetricsSource source;
     private readonly DispatcherTimer timer = new() { Interval = LiveMetricsSampler.Interval };
-    private readonly Tile cpu, memory, disk, network;
+    private readonly Tile cpu, memory, disk, network, temperature;
     private readonly TextBlock footer;
+    private readonly System.Windows.Controls.Primitives.UniformGrid grid;
+    // #142, opção 2: temperatura do leitor de sensores do sistema (live.json), lida na montagem e a cada tique, só com a tela visível.
+    private readonly ILiveSensorSystem sensors;
+    private readonly List<double?> temperatureHistory = new();
+    public LiveTemperature Temperature { get; private set; } = new("off", "");
+    public event Action<LiveTemperature>? TemperatureUpdated;
     private Window? window;
     private bool loaded, sampling;
     private double sampleMilliseconds;
 
-    public LiveMetricsPanel() : this(new WindowsLiveMetricsSource()) { }
+    public LiveMetricsPanel(MachineSensors machine) : this(new WindowsLiveMetricsSource(), machine.LiveSystem) { }
 
-    public LiveMetricsPanel(ILiveMetricsSource source)
+    public LiveMetricsPanel(ILiveMetricsSource source, ILiveSensorSystem sensors)
     {
         this.source = source;
+        this.sensors = sensors;
         sampler = new LiveMetricsSampler(source);
         Background = Resource("Surface"); BorderBrush = Resource("Stroke"); BorderThickness = new Thickness(1);
         CornerRadius = new CornerRadius(12); Padding = new Thickness(18); Margin = new Thickness(0, 0, 0, 14);
@@ -40,17 +47,20 @@ public sealed class LiveMetricsPanel : Border
         // #143: título do cartão em Barlow Condensed, como os das outras seções da Saúde do PC.
         if (TryFindResource("DisplayFont") is FontFamily display) { title.FontFamily = display; title.FontSize = 21; }
         panel.Children.Add(title);
-        var grid = new System.Windows.Controls.Primitives.UniformGrid { Columns = 4, Margin = new Thickness(0, 12, 0, 10) };
+        grid = new System.Windows.Controls.Primitives.UniformGrid { Columns = 4, Margin = new Thickness(0, 12, 0, 10) };
         cpu = new Tile("CPU", "performance"); memory = new Tile("Memória", "health"); disk = new Tile("Disco", "storage"); network = new Tile("Rede", "network");
-        foreach (var tile in new[] { cpu, memory, disk, network }) grid.Children.Add(tile.Root);
+        temperature = new Tile("Temperatura", "health");
+        foreach (var tile in new[] { cpu, memory, disk, network, temperature }) grid.Children.Add(tile.Root);
         panel.Children.Add(grid);
         footer = new TextBlock { FontSize = 12, Foreground = Resource("Secondary"), TextWrapping = TextWrapping.Wrap };
         panel.Children.Add(footer);
         Child = panel;
         AutomationProperties.SetName(this, "Uso do computador agora");
         Render(null);
+        // Na abertura do Nexo a temperatura já aparece: leitura síncrona do live.json (local e pequena), sem esperar o 1º tique.
+        RenderTemperature(SystemSensorReader.Evaluate(sensors, DateTimeOffset.UtcNow));
         timer.Tick += async (_, _) => await Tick();
-        Loaded += (_, _) => { loaded = true; Attach(); UpdateRunning(); };
+        Loaded += (_, _) => { loaded = true; Attach(); RenderTemperature(SystemSensorReader.Evaluate(sensors, DateTimeOffset.UtcNow)); UpdateRunning(); };
         Unloaded += (_, _) => { loaded = false; UpdateRunning(); };
         // A página Assistente só recolhe a área das páginas: o painel continua carregado, mas deixa de estar visível.
         IsVisibleChanged += (_, _) => UpdateRunning();
@@ -95,9 +105,9 @@ public sealed class LiveMetricsPanel : Border
         try
         {
             var watch = Stopwatch.StartNew();
-            var reading = await Task.Run(() => sampler.Sample(DateTimeOffset.UtcNow));
+            var (reading, live) = await Task.Run(() => (sampler.Sample(DateTimeOffset.UtcNow), SystemSensorReader.Evaluate(sensors, DateTimeOffset.UtcNow)));
             sampleMilliseconds = watch.Elapsed.TotalMilliseconds;
-            if (Visible) Render(reading);
+            if (Visible) { Render(reading); RenderTemperature(live); }
         }
         catch (Exception ex) { footer.Text = "Leitura ao vivo interrompida: " + ex.Message; }
         finally { sampling = false; }
@@ -128,7 +138,30 @@ public sealed class LiveMetricsPanel : Border
             sampler.NetworkHistory, null);
         var nexo = reading.NexoCpu.Status == LiveStatus.Ok ? reading.NexoCpu.Value!.Value.ToString("F1", CultureInfo.CurrentCulture) + "%" : "medindo";
         footer.Text = "Atualiza a cada segundo enquanto esta tela está aberta. Não é gravado no histórico. Disco: tempo ativo do disco mais ocupado; leitura e gravação somam todos. Rede: o adaptador mais ativo. "
-            + "Uso de CPU do próprio Nexo: " + nexo + " · amostra em " + sampleMilliseconds.ToString("F0", CultureInfo.CurrentCulture) + " ms.";
+            + "Uso de CPU do próprio Nexo: " + nexo + " · amostra em " + sampleMilliseconds.ToString("F0", CultureInfo.CurrentCulture) + " ms."
+            + (Temperature.State != "off" ? " Temperatura: " + SystemSensorReader.SourceLabel + ", gravada a cada 2 s." : "");
+    }
+
+    private void RenderTemperature(LiveTemperature live)
+    {
+        Temperature = live;
+        var shown = live.State != "off";
+        temperature.Root.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+        grid.Columns = shown ? 5 : 4;
+        if (shown)
+        {
+            temperatureHistory.Add(live.Valid ? live.Celsius : null);
+            if (temperatureHistory.Count > LiveMetricsSampler.HistoryCapacity) temperatureHistory.RemoveAt(0);
+            var (value, detail) = live.State switch
+            {
+                "live" => (live.Celsius!.Value.ToString("F1", CultureInfo.CurrentCulture) + " °C", ElevatedSensorReader.SensorName(live.Sensor) + " · " + SystemSensorReader.SourceLabel),
+                "waiting" => ("aguardando…", "Temperatura: " + SystemSensorReader.WaitingText),
+                "stale" => ("sem resposta", live.Message),
+                _ => ("sem leitura", live.Message)
+            };
+            temperature.Set(value, detail, temperatureHistory);
+        }
+        TemperatureUpdated?.Invoke(live);
     }
 
     private static string Detail(LiveMetric metric, string? ok) => metric.Status switch

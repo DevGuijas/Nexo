@@ -488,7 +488,7 @@ internal static class RaidTemperatureChecks
     private static int Occurrences(string text, string part) => (text.Length - text.Replace(part, "", StringComparison.Ordinal).Length) / part.Length;
 
     // Relatório como o HealthReportPresentation monta no PC: AMD-RAID e pendrive, temperatura sem PawnIO e o T: encerrado.
-    private static string PcReport(TemperatureReading? temperature = null, PhysicalDiskReading[]? storage = null, string storageStatus = "healthy")
+    internal static string PcReport(TemperatureReading? temperature = null, PhysicalDiskReading[]? storage = null, string storageStatus = "healthy")
     {
         var root = Path.Combine(Path.GetTempPath(), "nexo-raid-" + Guid.NewGuid().ToString("N"));
         try
@@ -507,14 +507,14 @@ internal static class RaidTemperatureChecks
             var later = new[] { Sample(now.AddSeconds(-30), new DiskHealth("C:\\", 389_000, 500_000)), Sample(now, new DiskHealth("C:\\", 389_000, 500_000)) };
             foreach (var sample in low.Concat(later)) db.SaveSnapshot(sample);
             db.SaveFindings(found);
-            var report = HealthReportPresentation.FromStore(db);
+            var report = HealthReportPresentation.FromStore(db, MachineSensors.Off);
             if (!report.Contains("resolvida")) throw new Exception("FAIL: o relatório do PC não trouxe o T: encerrado: " + report);
             return report;
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }
 
-    private static InvestigationEvidence Observed(string report)
+    internal static InvestigationEvidence Observed(string report)
     {
         var evidence = new InvestigationEvidence();
         evidence.Observe("get_health_report", "h", JsonSerializer.SerializeToElement(new { }), WindowsTools.Ok(report));
