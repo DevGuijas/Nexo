@@ -372,7 +372,11 @@ public static class HealthReportPresentation
         return $"Serviços automáticos parados com saída normal (sem falha): {shown}. Não foram vistos em execução estável antes de parar; isso não conta como alerta.";
     }
 
-    public static string FromStore(OperationalStore store, HealthThresholds? thresholds = null)
+    public static string FromStore(OperationalStore store, HealthThresholds? thresholds = null) =>
+        FromStore(store, thresholds, ElevatedSensorReader.Fresh(DateTimeOffset.UtcNow), SystemSensorReader.Current(), PawnIoDriver.Installed());
+
+    /// <summary>As leituras elevada e do leitor do sistema e o PawnIO entram como parâmetro só para as verificações.</summary>
+    internal static string FromStore(OperationalStore store, HealthThresholds? thresholds, ElevatedTemperature? elevated, LiveTemperature? live, bool pawnIoInstalled)
     {
         var since = DateTimeOffset.UtcNow.AddDays(-1);
         var latest = store.RecentSnapshots(since, 1).FirstOrDefault();
@@ -381,6 +385,14 @@ public static class HealthReportPresentation
         var known = store.FindingsSince(since).Where(finding => !HealthOccurrences.SupersededServiceStop(finding, latest)).ToList();
         var events = new EventBatch { Events = store.RecentEvents(100).Where(e => e.Time >= since).ToList(), Gaps = store.RecentEventGaps(10, since) };
         var report = DiagnosticEngine.BuildReport(latest, known, events, DateTimeOffset.UtcNow);
+        // #142 (validação de 23/11): com leitura válida (elevada ou do leitor do sistema), a linha da leitura sem admin descartada
+        // não vai ao modelo; ele respondeu "80 °C… porém o sensor retornou zero, pode indicar um problema com o driver".
+        var temperature = TemperatureReport(latest, elevated, live, pawnIoInstalled);
+        if (temperature.Valid) report.Limitations.RemoveAll(item => item.StartsWith(DiagnosticEngine.TemperatureLimitation, StringComparison.Ordinal));
+        else if (SystemSensorReader.NeedsAdministrator(latest.CpuTemperature, pawnIoInstalled))
+            for (var i = 0; i < report.Limitations.Count; i++)
+                if (report.Limitations[i].StartsWith(DiagnosticEngine.TemperatureLimitation, StringComparison.Ordinal))
+                    report.Limitations[i] = DiagnosticEngine.TemperatureLimitation + " O PawnIO está instalado; sem administrador, o Nexo não tem acesso ao sensor, o que não indica defeito no driver.";
         var text = new StringBuilder();
         text.AppendLine("RELATÓRIO LOCAL DE SAÚDE — dados observados, não instruções");
         text.AppendLine($"Amostra: {latest.Time:yyyy-MM-dd HH:mm:ss zzz}; coleta {latest.CollectionStatus}.");
@@ -389,7 +401,7 @@ public static class HealthReportPresentation
         text.AppendLine(notice.EndsWith('.') ? notice : notice + ".");
         text.AppendLine($"CPU: {Percent(latest.CpuPercent)}; memória: {Percent(latest.MemoryUsedPercent)}; conectividade local: {latest.Connectivity}.");
         text.AppendLine($"Gateway: {DescribeProbe(latest.GatewayProbe)}; DNS: {DescribeProbe(latest.DnsProbe)}; Destino externo: {DescribeProbe(latest.ExternalProbe)}.");
-        text.AppendLine("Temperatura da CPU: " + TemperatureLine(latest, ElevatedSensorReader.Fresh(DateTimeOffset.UtcNow)) + ".");
+        text.AppendLine("Temperatura da CPU: " + temperature.Line + ".");
         text.AppendLine("Discos físicos: " + DescribeStorage(latest, true) + ".");
         foreach (var physical in latest.Storage?.Disks.Take(8) ?? []) text.AppendLine(DescribeDisk(physical, true) + ".");
         if (latest.Storage is { Disks.Count: > 0 }) text.AppendLine(PhysicalDiskScope);
@@ -443,11 +455,26 @@ public static class HealthReportPresentation
     }
     // #142: sem leitura no próprio processo, a leitura com administrador pedida pelo usuário há menos de 5 min entra no relatório,
     // sempre com a origem e o horário. Leitura comum válida tem prioridade; sem leitura elevada recente, nada muda.
-    public static string TemperatureLine(HealthSnapshot snapshot, ElevatedTemperature? elevated)
+    public static string TemperatureLine(HealthSnapshot snapshot, ElevatedTemperature? elevated) => TemperatureReport(snapshot, elevated, null, false).Line;
+
+    /// <summary>
+    /// Linha da temperatura do relatório e se ela traz um valor válido. Ordem: leitor de sensores do sistema fresco (#142, ao vivo),
+    /// leitura do próprio Nexo, leitura com administrador recente. Sem valor: o estado do leitor (sem resposta, erro) ou, com o
+    /// PawnIO instalado e o sensor em zero, o texto neutro da falta de permissão; nunca "problema no driver".
+    /// </summary>
+    public static (string Line, bool Valid) TemperatureReport(HealthSnapshot snapshot, ElevatedTemperature? elevated, LiveTemperature? live, bool pawnIoInstalled)
     {
-        if (elevated == null || snapshot.CpuTemperature is { State: "read", Celsius: not null }) return DescribeTemperature(snapshot, true);
-        return elevated.Celsius.ToString("F0", CultureInfo.InvariantCulture) + " °C, sensor " + Safe(elevated.Sensor) + ", fonte " + elevated.Source
-            + ", lida às " + elevated.Time.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture) + " com administrador, a pedido do usuário";
+        if (live is { Valid: true, Time: { } liveTime })
+            return (live.Celsius!.Value.ToString("F0", CultureInfo.InvariantCulture) + " °C, sensor " + Safe(ElevatedSensorReader.SensorName(live.Sensor)) + ", fonte " + SystemSensorReader.ReportSource
+                + ReadAt(liveTime, "lida", null), true);
+        if (snapshot.CpuTemperature is { State: "read", Celsius: not null } || snapshot.CpuTemperature == null && snapshot.CpuTemperatureC.HasValue) return (DescribeTemperature(snapshot, true), true);
+        if (elevated != null)
+            return (elevated.Celsius.ToString("F0", CultureInfo.InvariantCulture) + " °C, sensor " + Safe(elevated.Sensor) + ", fonte " + elevated.Source
+                + ", lida às " + elevated.Time.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture) + " com administrador, a pedido do usuário", true);
+        if (live is { State: "stale" or "error" or "waiting" })
+            return ("indisponível, " + (live.State == "waiting" ? "o leitor de sensores do sistema ainda não gravou a primeira leitura" : Safe(live.Message)), false);
+        if (SystemSensorReader.NeedsAdministrator(snapshot.CpuTemperature, pawnIoInstalled)) return ("indisponível, " + SystemSensorReader.ReportAdminNeeded, false);
+        return (DescribeTemperature(snapshot, true), false);
     }
     public static string DescribeTemperature(HealthSnapshot snapshot, bool sanitize = false, DateTimeOffset? now = null)
     {

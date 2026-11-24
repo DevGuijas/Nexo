@@ -13,6 +13,8 @@ public static class HardwareSensors
     public const string TemperatureSource = "Libre Hardware Monitor (biblioteca embutida no Nexo)";
     public const string StorageSource = "Windows Storage (Get-PhysicalDisk)";
     public const double MaxPlausibleCelsius = 125;
+    /// <summary>Sensor que só devolve zero: no PC com o PawnIO instalado, é o acesso negado ao Nexo sem administrador (#142).</summary>
+    public const string ZeroDetail = "O sensor retornou zero, sem temperatura válida; a leitura foi descartada. Mesmo instalado, o driver pode estar sem permissão de acesso ao hardware para o Nexo.";
     private static readonly string[] PackageSensors = ["CPU Package", "Package", "Core (Tdie)", "Core (Tctl/Tdie)"];
     private static readonly string[] AlertStatuses = ["Degraded", "Stressed", "Predictive Failure", "Error", "Non-Recoverable Error", "No Contact", "Lost Communication", "Aborted", "Supporting Entity in Error", "Failed Media", "Split", "Stale Metadata", "IO Error", "Unrecognized Metadata", "Transient Error", "Not Usable"];
     private static readonly string[] NormalStatuses = ["OK", "Online", "In Service"];
@@ -165,7 +167,7 @@ public static class HardwareSensors
             if (sensor.Value is { } value && double.IsFinite(value) && value > 0 && value <= MaxPlausibleCelsius)
                 return new TemperatureReading("read", Math.Round(value, 1), sensor.Name + " (" + sensor.Identifier + ")", TemperatureSource, time);
         if (sensors.Any(s => s.Value == 0))
-            return new TemperatureReading("invalid", Source: TemperatureSource, Time: time, Detail: "O sensor retornou zero, sem temperatura válida; a leitura foi descartada. Mesmo instalado, o driver pode estar sem permissão de acesso ao hardware para o Nexo.");
+            return new TemperatureReading("invalid", Source: TemperatureSource, Time: time, Detail: ZeroDetail);
         return new TemperatureReading("invalid", Source: TemperatureSource, Time: time, Detail: $"O sensor {sensors[0].Name} informou valor ausente ou fora de 0–{MaxPlausibleCelsius:F0} °C; a leitura foi descartada.");
     }
 

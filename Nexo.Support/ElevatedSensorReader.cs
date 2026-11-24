@@ -186,7 +186,7 @@ public static class ElevatedSensorReader
     }
 
     [SupportedOSPlatform("windows")]
-    private static bool IsAdministrator()
+    internal static bool IsAdministrator()
     {
         using var identity = WindowsIdentity.GetCurrent();
         return new WindowsPrincipal(identity).IsInRole(WindowsBuiltInRole.Administrator);
@@ -217,7 +217,7 @@ public static class ElevatedSensorReader
 
     /// <summary>Arquivo criado já com o descritor (CreateNew num temporário da pasta protegida), trocado na mesma pasta e conferido.</summary>
     [SupportedOSPlatform("windows")]
-    private static string? WriteProtected(string path, string text)
+    internal static string? WriteProtected(string path, string text)
     {
         var temporary = path + ".tmp";
         if (File.Exists(temporary)) File.Delete(temporary);

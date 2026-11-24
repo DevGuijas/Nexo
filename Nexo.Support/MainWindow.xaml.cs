@@ -61,6 +61,11 @@ public partial class MainWindow : Window
     private string? pawnIoStatus;
     private bool elevatedReadRunning;
     private ElevatedReadResult? elevatedRead;
+    // Leitor de sensores do sistema (#142, opção 2): ativar, atualizar e desativar só por clique, um UAC cada.
+    private bool liveReaderRunning;
+    private string? liveReaderStatus;
+    private string? liveTemperatureState;
+    private readonly List<TextBlock> liveTemperatureViews = new();
     private DebloatPreview? debloatPreview;
     private readonly Dictionary<string, CheckBox> debloatChecks = new();
     private CheckBox? debloatRiskView;
@@ -377,6 +382,7 @@ public partial class MainWindow : Window
         }
         if (target == "chat") return;
         PageContent.Children.Clear();
+        liveTemperatureViews.Clear();
         switch (target) { case "home": Home(); break; case "profile": Profile(); break; case "users": Users(); break; case "history": History(); break; case "tickets": Tickets(); break; case "health": Health(); break; case "tools": Tools(); break; case "settings": Settings(); break; case "audit": Audits(); break; }
         PageScroll.ScrollToTop();
     }
@@ -428,7 +434,7 @@ public partial class MainWindow : Window
     }
     private void LiveMetricsSection()
     {
-        liveMetrics ??= new LiveMetricsPanel();
+        if (liveMetrics == null) { liveMetrics = new LiveMetricsPanel(); liveMetrics.TemperatureUpdated += OnLiveTemperature; }
         if (liveMetrics.Parent is Panel previous) previous.Children.Remove(liveMetrics);
         PageContent.Children.Add(liveMetrics);
     }
@@ -469,17 +475,34 @@ public partial class MainWindow : Window
                 overview.Children.Add(metrics);
 
                 // Temperatura (#142): sem o driver PawnIO (ou sem sensor), a leitura fica indisponível e a tela diz por quê, sem tom de erro;
-                // erro ou valor descartado aparece como atenção.
+                // erro ou valor descartado aparece como atenção. Com o PawnIO instalado e o sensor em zero, falta permissão: texto neutro.
+                // Com o leitor de sensores do sistema, vale o live.json lido agora, na montagem da tela.
                 overview.Children.Add(PageKit.Group("Sensores"));
+                var pawnIoInstalled = PawnIoDriver.Installed();
+                var live = SystemSensorReader.Current();
+                liveTemperatureState = live.State;
                 var temperatureText = "Temperatura da CPU: " + HealthReportPresentation.DescribeTemperature(latest);
-                if (latest.CpuTemperature is { State: "read", Celsius: not null } || latest.CpuTemperature == null && latest.CpuTemperatureC.HasValue)
+                if (SystemSensorReader.Line(live) is { } liveLine)
+                {
+                    var liveView = StatusLine(liveLine.Text, liveLine.Tone);
+                    liveTemperatureViews.Add(liveView.Children.OfType<TextBlock>().First());
+                    overview.Children.Add(liveView);
+                    overview.Children.Add(LiveReaderPanel(live));
+                }
+                else if (latest.CpuTemperature is { State: "read", Celsius: not null } || latest.CpuTemperature == null && latest.CpuTemperatureC.HasValue)
                     overview.Children.Add(StatusLine(temperatureText, "Success"));
                 else
                 {
-                    var failed = latest.CpuTemperature?.State is "error" or "invalid";
-                    // "invalid" é valor descartado; "error" é falha de leitura (o sensor não respondeu), não descarte.
-                    var title = latest.CpuTemperature?.State == "invalid" ? "Leitura de temperatura descartada" : failed ? "Falha na leitura de temperatura" : "Temperatura indisponível neste computador";
-                    var unavailable = PageKit.Notice("health", title, temperatureText, failed ? "Warning" : "Neutral");
+                    Border unavailable;
+                    if (SystemSensorReader.NeedsAdministrator(latest.CpuTemperature, pawnIoInstalled))
+                        unavailable = PageKit.Notice("health", SystemSensorReader.AdminNeededTitle, SystemSensorReader.AdminNeededDetail, "Neutral");
+                    else
+                    {
+                        var failed = latest.CpuTemperature?.State is "error" or "invalid";
+                        // "invalid" é valor descartado; "error" é falha de leitura (o sensor não respondeu), não descarte.
+                        var title = latest.CpuTemperature?.State == "invalid" ? "Leitura de temperatura descartada" : failed ? "Falha na leitura de temperatura" : "Temperatura indisponível neste computador";
+                        unavailable = PageKit.Notice("health", title, temperatureText, failed ? "Warning" : "Neutral");
+                    }
                     unavailable.Margin = new Thickness(0, 8, 0, 0); overview.Children.Add(unavailable);
                     overview.Children.Add(TemperatureActions());
                 }
@@ -1243,13 +1266,90 @@ public partial class MainWindow : Window
         }
         else
         {
-            var read = Action("Ler temperatura (pede administrador)", async (_, _) => await GuardAsync(ReadTemperatureElevated), true);
+            var activate = Action(SystemSensorReader.ActivateLabel, async (_, _) => await GuardAsync(() => ChangeLiveReader("install")), true);
+            activate.Tag = "temperature-live-activate"; activate.IsEnabled = !liveReaderRunning; actions.Children.Add(activate);
+            var read = Action("Ler temperatura (pede administrador)", async (_, _) => await GuardAsync(ReadTemperatureElevated));
             read.Tag = "temperature-elevated"; read.IsEnabled = !elevatedReadRunning; actions.Children.Add(read);
         }
+        if (liveReaderStatus != null) panel.Children.Add(StatusLine(liveReaderStatus, "Neutral"));
         panel.Children.Add(actions);
-        panel.Children.Add(Text(installed ? "A leitura roda num processo separado com administrador e vale para esta tela; o Nexo não pede o UAC sozinho."
+        panel.Children.Add(Text(installed ? "A temperatura ao vivo instala um leitor mínimo como tarefa do sistema (um UAC, uma vez). A leitura única roda num processo separado com administrador e vale para esta tela. O Nexo não pede o UAC sozinho."
             : "Driver de kernel de terceiros (namazso, GPL-2.0). Nada é baixado antes da sua confirmação.", 11, "Subtle"));
         return panel;
+    }
+
+    // Leitor de sensores do sistema instalado (#142): versão, Desativar e, com versão diferente da do app, Atualizar leitor.
+    private StackPanel LiveReaderPanel(LiveTemperature live)
+    {
+        var panel = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+        var installedVersion = WindowsLiveSensorSystem.InstalledVersion() ?? (live.Version.Length > 0 ? live.Version : "desconhecida");
+        var outdated = installedVersion != AppVersion.Current;
+        panel.Children.Add(Text("Leitor de sensores do sistema (tarefa \"" + SystemSensorReader.TaskName + "\", SYSTEM) · versão " + installedVersion
+            + (outdated ? " · este Nexo é a " + AppVersion.Current : ""), 12, "Secondary"));
+        if (liveReaderStatus != null) panel.Children.Add(StatusLine(liveReaderStatus, "Neutral"));
+        var actions = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };
+        if (outdated)
+        {
+            var update = Action(SystemSensorReader.UpdateLabel, async (_, _) => await GuardAsync(() => ChangeLiveReader("update", installedVersion)), true);
+            update.Tag = "temperature-live-update"; update.IsEnabled = !liveReaderRunning; actions.Children.Add(update);
+        }
+        var deactivate = Action(SystemSensorReader.DeactivateLabel, async (_, _) => await GuardAsync(() => ChangeLiveReader("remove")));
+        deactivate.Tag = "temperature-live-deactivate"; deactivate.IsEnabled = !liveReaderRunning; actions.Children.Add(deactivate);
+        panel.Children.Add(actions);
+        panel.Children.Add(Text("Desativar remove a tarefa e a pasta " + SystemSensorReader.FolderLabel + " (um UAC). O PawnIO continua instalado.", 11, "Subtle"));
+        return panel;
+    }
+
+    // A cada tique do cartão "Agora" (só com a tela visível): mesmo estado, só o texto muda; estado novo (aguardando → ao vivo,
+    // ao vivo → sem resposta), a tela é remontada.
+    private void OnLiveTemperature(LiveTemperature live)
+    {
+        if (page is not ("home" or "health")) return;
+        if (liveTemperatureState != null && live.State != liveTemperatureState) { liveTemperatureState = live.State; RefreshMonitoredPage(); return; }
+        liveTemperatureState = live.State;
+        if (SystemSensorReader.Line(live) is { } line) foreach (var view in liveTemperatureViews) view.Text = line.Text;
+    }
+
+    private async Task ChangeLiveReader(string action, string installedVersion = "")
+    {
+        if (liveReaderRunning) return;
+        var (title, details) = action switch
+        {
+            "remove" => (SystemSensorReader.DeactivateTitle, SystemSensorReader.DeactivateDetails),
+            "update" => (SystemSensorReader.UpdateTitle, SystemSensorReader.UpdateDetails(installedVersion)),
+            _ => (SystemSensorReader.ConfirmationTitle, SystemSensorReader.ConfirmationDetails)
+        };
+        if (!await ConfirmChange(new ChangeRequest(title, details))) return;
+        liveReaderRunning = true; liveReaderStatus = "Aguardando a autorização de administrador (UAC)..."; RefreshMonitoredPage();
+        SensorReaderResult result;
+        try
+        {
+            string script;
+            if (action == "remove") script = SystemSensorReader.RemoveScript(ProtectedFolderScript.Text);
+            else { var (source, files) = WindowsLiveSensorSystem.Sources(); script = SystemSensorReader.InstallScript(source, files, ProtectedFolderScript.Text); }
+            result = await SystemSensorReader.ApplyAsync(WindowsLiveSensorSystem.RunElevatedAsync, action, script, CancellationToken.None);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException or ArgumentException)
+        { result = new("failed", "Não foi possível preparar o leitor de sensores: " + ex.Message); }
+        finally { liveReaderRunning = false; }
+        liveReaderStatus = result.Message;
+        var name = action switch { "remove" => SystemSensorReader.DeactivateLabel, "update" => SystemSensorReader.UpdateLabel + " de sensores", _ => SystemSensorReader.ActivateLabel };
+        try { store.Log(user, name + ": " + result.State); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        if (healthStore != null)
+        {
+            try
+            {
+                healthStore.SaveIntervention(new InterventionRecord
+                {
+                    Action = name, Target = SystemSensorReader.InstallFolder + " · tarefa " + SystemSensorReader.TaskName, Authorized = true, Risk = "médio",
+                    State = result.State switch { "done" => "concluída", "canceled" => "cancelada", _ => "falhou" },
+                    After = JsonSerializer.Serialize(result), Summary = result.Message,
+                });
+            }
+            catch (OperationalStoreException ex) { liveReaderStatus += "\nO registro no histórico operacional falhou: " + ex.Message; }
+        }
+        liveTemperatureState = null;
+        RefreshMonitoredPage();
     }
 
     private void RefreshPawnIoViews()

@@ -56,7 +56,7 @@ internal static class EmbeddedCpuTemperature
             token.ThrowIfCancellationRequested();
             var sensors = session.ReadSensors().ToArray();
             token.ThrowIfCancellationRequested();
-            return JsonSerializer.Serialize(new { Temperature = new { Available = true, Sensors = sensors } });
+            return SensorsJson(sensors);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception ex)
@@ -64,6 +64,10 @@ internal static class EmbeddedCpuTemperature
             return Error(initialization.Failure ?? "Não foi possível acessar o sensor embutido: " + ex.Message);
         }
     }
+    /// <summary>O mesmo JSON da leitura por chamada, para o HardwareSensors escolher o sensor e descartar zero (#142).</summary>
+    internal static string SensorsJson(IEnumerable<CpuSensorValue> sensors) => JsonSerializer.Serialize(new { Temperature = new { Available = true, Sensors = sensors.ToArray() } });
+    /// <summary>Sessão aberta uma vez pelo leitor de sensores do sistema (--sensor-loop), que lê a cada 2 s sem reabrir.</summary>
+    internal static ICpuSensorSession CreateSession() => new LibreCpuSession();
     private static string Error(string detail) => JsonSerializer.Serialize(new { Temperature = new { Available = false, Error = detail } });
     private sealed class LibreCpuSession : ICpuSensorSession
     {

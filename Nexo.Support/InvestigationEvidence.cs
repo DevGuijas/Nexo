@@ -276,6 +276,7 @@ public sealed class InvestigationEvidence
         if (ClaimsDriveContents(text)) return SuggestsClosedDiskUsage(text) ? ClosedDiskReason : DriveContentsReason;
         if (OffersUnsupportedAction(text)) return UnsupportedActionReason;
         if (OffersSensorDriverCheck(text)) return SensorDriverOfferReason;
+        if (OffersLiveReader(text)) return LiveReaderOfferReason;
         if (SendsToTaskManagerForTemperature(text)) return TemperatureSourceReason;
         if (PresentsClosedTrend(text)) return ClosedTrendReason;
         if (PresentsClosedDisk(text)) return ClosedDiskReason;
@@ -299,6 +300,7 @@ public sealed class InvestigationEvidence
             DriveContentsReason => ClaimsDriveContents,
             UnsupportedActionReason => OffersUnsupportedAction,
             SensorDriverOfferReason => OffersSensorDriverCheck,
+            LiveReaderOfferReason => OffersLiveReader,
             ClosedDiskReason => PresentsClosedDisk,
             MalwareReason => SuggestsMalware,
             TemperatureSourceReason => SendsToTaskManagerForTemperature,
@@ -397,6 +399,14 @@ public sealed class InvestigationEvidence
         !NegatedHead(sentence, offer) && !Orientation.IsMatch(offer.Groups["lead"].Value)
         && (Regex.IsMatch(offer.Groups["target"].Value, @"\bpawnio\b") || AsksTemperature && Regex.IsMatch(offer.Groups["obj"].Value, @"\bdrivers?\b")
             && !OtherDevice.IsMatch(offer.Groups["obj"].Value) && !OtherDevice.IsMatch(AgentProtocol.Normalize(UserRequest)))));
+    // #142, opção 2: a Saúde do PC tem "Ativar temperatura ao vivo" (o leitor de sensores do sistema), "Desativar" e "Atualizar
+    // leitor". São botões da tela, como o do PawnIO: nenhuma ferramenta do modelo instala, verifica, ativa ou atualiza o leitor, e a
+    // oferta em 1ª pessoa é recusada. Orientar ("você pode ativar na Saúde do PC") e a negação passam.
+    private static readonly Regex LiveReaderOffer = new(@"(?<head>\b(?:posso|podemos|poderia|poderiamos|consigo|vou|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo)\b(?<lead>[^:;.]*?)"
+        + @"\b(?:ativ\w*|habilit\w*|lig\w*|instal\w*|configur\w*|verific\w*|confer\w*|chec\w*|atualiz\w*|reinstal\w*|desativ\w*|inici\w*|reinici\w*|baix\w*)\b)"
+        + @"(?<obj>\s+(?:[^\s:;.]+\s+){0,5}?(?:temperatura (?:da cpu )?(?:ao vivo|em tempo real)|leitor(?:es)? (?:de|dos) sensores|leitor do sistema|tarefa (?:do sistema |agendada )?nexo sensores|nexo sensores)\b)");
+    private bool OffersLiveReader(string normalized) => Sentences(normalized).Any(sentence => LiveReaderOffer.Matches(sentence).Any(offer =>
+        !NegatedHead(sentence, offer) && !Orientation.IsMatch(offer.Groups["lead"].Value)));
     private static bool NegatedHead(string sentence, Match offer) =>
         Regex.Matches(sentence[..offer.Index], @"[\p{L}\p{N}]+").TakeLast(3).Concat(Regex.Matches(offer.Groups["head"].Value, @"[\p{L}\p{N}]+"))
             .Any(word => word.Value is "nao" or "nem" or "nunca");
@@ -510,6 +520,7 @@ public sealed class InvestigationEvidence
     // Gerenciador de Tarefas não mostra a temperatura da CPU, e o relatório de saúde já traz a leitura ou o motivo de ela estar
     // indisponível. A frase que nega ("o Gerenciador de Tarefas não mostra a temperatura") e a que usa o Gerenciador para outra
     // coisa passam. Programa de terceiros (HWMonitor) não é recusado: a linha do monitor garante a informação do Nexo na resposta.
+    internal const string LiveReaderOfferReason = "O Nexo não tem ferramenta para ativar, instalar, verificar ou atualizar a temperatura ao vivo (o leitor de sensores do sistema): não ofereça isso. Se for útil, diga que o próprio usuário pode ativá-la na Saúde do PC, pelo botão \"Ativar temperatura ao vivo\".";
     internal const string SensorDriverOfferReason = "O Nexo não tem ferramenta para verificar, instalar ou procurar o driver PawnIO (o driver do sensor de temperatura): não ofereça isso. Diga que, segundo o relatório de saúde, o driver PawnIO não está instalado e que instalá-lo é decisão do usuário.";
     internal const string TemperatureSourceReason = "O Gerenciador de Tarefas do Windows não mostra a temperatura da CPU. Cite a temperatura do relatório de saúde (get_health_report) ou, se ela estiver indisponível, o motivo informado nele, sem mandar o usuário procurar essa leitura no Gerenciador de Tarefas.";
     // O Gerenciador de Tarefas precisa aparecer como o lugar de ver a temperatura, e a negação vale dentro desse trecho (@qa): "a

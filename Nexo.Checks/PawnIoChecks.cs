@@ -14,6 +14,7 @@ internal static class PawnIoChecks
         await Elevated(check);
         Report(check);
         Refusal(check);
+        await LiveSensorChecks.Run(check);
     }
 
     private sealed class FakeInstall : IPawnIoInstallSystem
