@@ -5,21 +5,45 @@ var root = Path.Combine(Path.GetTempPath(), "NexoChecks-" + Guid.NewGuid().ToStr
 var count = 0;
 void Assert(bool condition, string title) { if (!condition) throw new Exception("FAIL: " + title); Console.WriteLine("PASS: " + title); count++; }
 void Reject(Action action, string title) { try { action(); } catch (InvalidOperationException) { Assert(true, title); return; } throw new Exception("FAIL: " + title); }
+// #142: nenhuma verificação lê o leitor de sensores, o PawnIO ou a leitura elevada da máquina onde roda. Uma leitura pela fonte
+// real (MachineSensors.System) é anotada e falha na hora; ao fim de cada modo, a lista tem de estar vazia.
+var realSensorReads = new List<string>();
+MachineSensors.RealReadGuard = what =>
+{
+    lock (realSensorReads) realSensorReads.Add(what);
+    throw new InvalidOperationException("FAIL: leitura real da máquina sem injeção (" + what + ")");
+};
+void Hermetic()
+{
+    string[] reads; lock (realSensorReads) reads = realSensorReads.Distinct().ToArray();
+    Assert(reads.Length == 0, "#142 verificações herméticas: nenhuma leitura do leitor de sensores, do PawnIO nem da leitura elevada da máquina sem injeção"
+        + (reads.Length > 0 ? " · lidos: " + string.Join(", ", reads) : ""));
+}
 if (args.Contains("--embedded-temperature"))
 {
     EmbeddedTemperatureChecks.Run(Assert);
+    Hermetic();
+    Console.WriteLine($"{count} verificações aprovadas.");
+    return;
+}
+if (args.Contains("--pawnio"))
+{
+    await PawnIoChecks.Run(Assert);
+    Hermetic();
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
 if (args.Contains("--module-path"))
 {
     await ModulePathGuardChecks.Run(Assert);
+    Hermetic();
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
 if (args.Contains("--pipe-peer"))
 {
     await PipePeerChecks.Run(Assert);
+    Hermetic();
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
@@ -31,12 +55,14 @@ if (args.Contains("--debloat"))
     var appRemovalAdmin = appRemovalStore.Login("Guisbz", "1234");
     appRemovalAdmin.MustChangePassword = false; appRemovalStore.Save();
     await AppRemovalChatChecks.Run(appRemovalStore, appRemovalAdmin, Assert);
+    Hermetic();
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
 if (args.Contains("--network-decision"))
 {
     await NetworkDecisionChecks.Run(Assert);
+    Hermetic();
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
@@ -46,12 +72,14 @@ if (args.Contains("--raid-temperature"))
     var raidAdmin = raidStore.Login("Guisbz", "1234");
     raidAdmin.MustChangePassword = false; raidStore.Save();
     await RaidTemperatureChecks.Run(raidStore, raidAdmin, Assert);
+    Hermetic();
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
 if (args.Contains("--runtimes"))
 {
     await RuntimeChecks.Run(Assert);
+    Hermetic();
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
@@ -59,12 +87,14 @@ if (args.Contains("--theme"))
 {
     ThemeChecks.Run(Assert);
     ShellChecks.Run(Assert);
+    Hermetic();
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
 if (args.Contains("--live-metrics"))
 {
     LiveMetricsChecks.Run(Assert);
+    Hermetic();
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
@@ -74,6 +104,7 @@ if (args.Contains("--closed-occurrence"))
     var closedAdmin = closedStore.Login("Guisbz", "1234");
     closedAdmin.MustChangePassword = false; closedStore.Save();
     await ClosedOccurrenceChecks.Run(closedStore, closedAdmin, Assert);
+    Hermetic();
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
@@ -83,18 +114,21 @@ if (args.Contains("--network-followup"))
     var followUpAdmin = followUpStore.Login("Guisbz", "1234");
     followUpAdmin.MustChangePassword = false; followUpStore.Save();
     await NetworkFollowUpChecks.Run(followUpStore, followUpAdmin, Assert);
+    Hermetic();
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
 if (args.Contains("--network-recovery"))
 {
     await NetworkRecoveryChecks.Run(Assert);
+    Hermetic();
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
 try
 {
     EmbeddedTemperatureChecks.Run(Assert);
+    await PawnIoChecks.Run(Assert);
     await ModulePathGuardChecks.Run(Assert);
     await BasicOptimizationChecks.Run(Assert);
     await DebloatChecks.Run(Assert);
@@ -401,6 +435,7 @@ try
     if (args.Contains("--network-evals")) await NetworkEvals.Run(store, admin, Assert);
     if (args.Contains("--interaction-evals")) await InteractionEvals.Run(store, admin, Assert);
     if (args.Contains("--component-evals")) await ComponentEvals.Run(store, admin, Assert);
+    Hermetic();
     Console.WriteLine($"\n{count} verificações aprovadas. Nenhuma correção de hardware executada.");
 }
 finally { if (Directory.Exists(root)) Directory.Delete(root, true); }

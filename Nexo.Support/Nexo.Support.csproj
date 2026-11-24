@@ -11,6 +11,8 @@
     <Product>Nexo</Product>
     <Description>Agente local de suporte para Windows com monitoramento de saúde e recuperação supervisionada.</Description>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- #142, P9: Main próprio (Program.cs), para o leitor de sensores do sistema (modo sensor-loop) restringir a busca de DLLs antes de o WPF carregar. -->
+    <StartupObject>Nexo.Support.Program</StartupObject>
     <!-- Ícone do Nexo (#143): o mesmo arquivo vai no .exe e no atalho (ApplicationIcon), na janela (Resource) e na bandeja. -->
     <ApplicationIcon>Assets\nexo.ico</ApplicationIcon>
   </PropertyGroup>

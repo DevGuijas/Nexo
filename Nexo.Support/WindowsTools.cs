@@ -18,6 +18,8 @@ public sealed record ChangeRequest(string Title, string Details, bool KeepNetwor
 public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest, Task<bool>> confirm, IProgress<string> progress, Action<string>? inform = null) : IAgentTools
 {
     internal static readonly TimeSpan ElevatedTimeout = TimeSpan.FromMinutes(15);
+    /// <summary>Leituras da máquina do get_health_report (#142); o MainWindow passa as dele, e as verificações, a fonte desligada.</summary>
+    public MachineSensors Sensors { get; init; } = MachineSensors.System;
     internal static readonly TimeSpan NvidiaInstallerTimeout = TimeSpan.FromMinutes(30);
     internal static readonly TimeSpan NvidiaSupervisionTimeout = NvidiaInstallerTimeout + TimeSpan.FromMinutes(5);
 
@@ -580,7 +582,7 @@ public sealed class WindowsTools(Store store, Account actor, Func<ChangeRequest,
                 {
                     HealthThresholds limits;
                     try { limits = HealthSettings.Load(store.Root).Thresholds(); } catch { limits = new HealthThresholds(); }
-                    return Ok(HealthReportPresentation.FromStore(operational, limits));
+                    return Ok(HealthReportPresentation.FromStore(operational, Sensors, limits));
                 }
             case "get_driver_store":
                 var observedId = Value(args, "device_id");

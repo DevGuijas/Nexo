@@ -49,6 +49,23 @@ try
     }
     Reject(() => Installer.ExtractChecked(archive, Path.Combine(root, "target"), 1000), "Entrada ZIP que escapa da pasta rejeitada");
     Check(!File.Exists(Path.Combine(root, "outside.txt")), "Nenhum arquivo foi criado fora da pasta de instalação");
+    // #142, B1: o nexo-app.zip oficial (single-file sem extração) traz as DLLs nativas do WPF ao lado do Nexo.exe e a pasta ThirdParty.
+    var appArchive = Path.Combine(root, "app.zip");
+    string[] appFiles = ["Nexo.exe", "wpfgfx_cor3.dll", "PresentationNative_cor3.dll", "ThirdParty/LibreHardwareMonitor/LICENSE.txt"];
+    using (var zip = ZipFile.Open(appArchive, ZipArchiveMode.Create))
+        foreach (var name in appFiles) { using var writer = new StreamWriter(zip.CreateEntry(name).Open()); writer.Write(name); }
+    var appTarget = Path.Combine(root, "app-target");
+    Installer.ExtractChecked(appArchive, appTarget, 1000);
+    Check(appFiles.All(name => File.ReadAllText(Path.Combine([appTarget, .. name.Split('/')])) == name),
+        "Pacote do aplicativo com várias entradas (Nexo.exe, DLLs nativas ao lado dele e ThirdParty) extraído inteiro na pasta");
+    var nestedArchive = Path.Combine(root, "nested-traversal.zip");
+    using (var zip = ZipFile.Open(nestedArchive, ZipArchiveMode.Create))
+    {
+        using (var writer = new StreamWriter(zip.CreateEntry("Nexo.exe").Open())) writer.Write("exe");
+        using (var writer = new StreamWriter(zip.CreateEntry("ThirdParty/../../outside-nested.dll").Open())) writer.Write("não escrever fora");
+    }
+    Reject(() => Installer.ExtractChecked(nestedArchive, Path.Combine(root, "nested-target"), 1000), "Entrada ZIP que sobe por uma subpasta e escapa da pasta rejeitada");
+    Check(!File.Exists(Path.Combine(root, "outside-nested.dll")), "A DLL da entrada que escapa não foi criada fora da pasta de instalação");
     var blobData = Encoding.UTF8.GetBytes("model-data");
     var digest = Convert.ToHexString(SHA256.HashData(blobData)).ToLowerInvariant();
     var modelArchive = Path.Combine(root, "model.zip");

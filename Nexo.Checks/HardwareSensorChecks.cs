@@ -152,7 +152,7 @@ internal static class HardwareSensorChecks
             using var store = new OperationalStore(root);
             read.Time = DateTimeOffset.UtcNow;
             store.SaveSnapshot(read);
-            var text = HealthReportPresentation.FromStore(store);
+            var text = HealthReportPresentation.FromStore(store, MachineSensors.Off);
             check(text.Contains("Temperatura da CPU: 55 °C, sensor CPU Package") && text.Contains("Discos físicos: atenção informada pelo Windows") && text.Contains("Disco 1 “HDD”")
                 && text.Contains("não é uma leitura SMART completa"),
                 "Sensores: relatório de saúde para o assistente traz temperatura, discos e o limite da fonte");
@@ -162,7 +162,7 @@ internal static class HardwareSensorChecks
                 "Sensores: relatório avisa, logo depois dos discos físicos, que a leitura não os liga às letras de unidade (#93)");
             var noDisks = new HealthSnapshot { Time = DateTimeOffset.UtcNow.AddSeconds(1), Storage = new StorageReading("unavailable", HardwareSensors.StorageSource, DateTimeOffset.UtcNow, 0, [], "O Windows não listou discos físicos."), StorageHealth = "unavailable" };
             store.SaveSnapshot(noDisks);
-            check(!HealthReportPresentation.FromStore(store).Contains(HealthReportPresentation.PhysicalDiskScope),
+            check(!HealthReportPresentation.FromStore(store, MachineSensors.Off).Contains(HealthReportPresentation.PhysicalDiskScope),
                 "Sensores: sem disco físico listado, o aviso das letras de unidade não aparece");
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }

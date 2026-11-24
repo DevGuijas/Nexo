@@ -191,7 +191,7 @@ internal static class HealthOccurrenceChecks
                 new HealthFinding { Id = "disk-low:C::b", Time = now.AddMinutes(-5), Problem = "Disco cheio" },
                 new HealthFinding { Id = "service-stopped:Spooler:c", Time = now.AddMinutes(-5), Problem = "Spooler parado" }
             ]);
-            var lines = HealthReportPresentation.FromStore(db).Split('\n');
+            var lines = HealthReportPresentation.FromStore(db, MachineSensors.Off).Split('\n');
             string Line(string text) => lines.First(line => line.Contains(text));
             check(Line("CPU alta").Contains("persiste nas leituras atuais"), "Relatório do assistente indica alerta ainda ativo");
             check(Line("Disco cheio").Contains("resolvida") && !Line("Disco cheio").Contains("persiste"), "Relatório do assistente indica alerta que cessou");
