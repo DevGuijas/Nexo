@@ -10,7 +10,7 @@ O Nexo não mexe em antivírus, Defender, anticheat nem serviços do Windows. N�
 
 1. **Hash fixado ou versão atual:**
    - Os instaladores de URL fixa e conteúdo imutável (VC++ 2005, 2008, 2010, 2012 e 2013 e o `dxwebsetup.exe`) têm URL, tamanho e SHA-256 fixados em `Nexo.Support/RuntimeCatalog.cs`.
-   - O VC++ v14 (2015–2022 e posteriores) usa o link permanente da Microsoft, que muda de versão. O arquivo é aceito com a assinatura Authenticode `Valid` do assinante `CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US` e com tamanho até 64 MB.
+   - O VC++ v14 (2015–2022 e posteriores) usa o link permanente da Microsoft, que muda de versão. O arquivo é aceito com a assinatura Authenticode `Valid` do assinante `CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US`, com a cadeia terminando na raiz `Microsoft Root Certificate Authority 2011` e com tamanho até 64 MB.
 2. **VC++ antigos (2005 a 2013):** só ganham caixa de seleção quando faltam, e vêm desmarcados. O v14 que falta vem marcado. O DirectX que falta também vem desmarcado: o pedido da #150 não define o padrão dele, e o cartão instala só o que o usuário marca.
 3. **DirectX:** o instalador web oficial `dxwebsetup.exe` (9.29.1974.1), com `/Q`. Ele tem 288 KB e baixa o resto da própria Microsoft.
 4. **Um UAC por item:** cada instalador roda por `runas`, um de cada vez. Um executor elevado único para vários itens exigiria um modo elevado do Nexo recebendo caminhos de arquivo. Isso abre a troca do arquivo entre a conferência e a execução, por isso ficou de fora.
@@ -48,6 +48,27 @@ Observações:
 - **VC++ 2013:** a página da Microsoft aponta `aka.ms/highdpimfc2013x64enu` e `aka.ms/highdpimfc2013x86enu`, que redirecionam para as URLs acima. O Nexo fixa a URL final.
 - **Assinantes lidos no Mac:** os VC++ 2005, 2008 e 2010, o v14 e o `dxwebsetup.exe` são assinados por `CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US`. O 2012 e o 2013 são assinados por `CN=Microsoft Corporation, OU=MOPR, O=Microsoft Corporation, L=Redmond, S=Washington, C=US`, numa cadeia de 2013/2014. Cada item do catálogo tem o assinante exato que espera; o MOPR só é aceito no 2012 e no 2013, que têm o SHA-256 fixado.
 
+## Raízes da cadeia
+
+Só o Subject e o `Valid` não bastam: uma raiz extra instalada no PC, por adware ou por um proxy TLS, emitiria um certificado com o mesmo Subject, e o Windows o daria como `Valid`. Por isso, na mesma chamada do PowerShell do `Get-AuthenticodeSignature`, o Nexo monta a cadeia do `SignerCertificate` com `X509Chain` e exige que o certificado raiz tenha a impressão digital SHA-1 esperada para o item (campo `Root` do catálogo). A comparação é exata, sem diferenciar maiúsculas de minúsculas. Se a raiz for outra, o item para em "Assinatura não confiável", antes do UAC.
+
+- A cadeia usa `RevocationMode` `NoCheck`, para não depender de rede. O `Valid` do Authenticode já vem da conferência do Windows, e nenhum outro ponto do Nexo consulta revogação no PC do usuário (o `Online` existe só no script de assinatura do release).
+- Os certificados embutidos no arquivo entram como auxiliares (`ExtraStore`). A raiz precisa vir do repositório do Windows e ter a impressão digital fixada.
+
+| Raiz | SHA-1 | Itens |
+|---|---|---|
+| Microsoft Root Certificate Authority 2011 | `8F43288AD272F3103B6FB1428485EA3014C0BCFE` | v14, 2010, 2008, 2005 e `dxwebsetup.exe` |
+| Microsoft Root Certificate Authority (2001) | `CDD4EEAE6000AC7F40C3802C171E30148030C072` | 2012 e 2013 |
+
+Conferência em 23/11/2026, no Mac, com os arquivos da tabela acima. Nenhum deles traz a raiz embutida: só a folha e o intermediário (o 2012 e o 2013 também trazem a cadeia do carimbo de tempo).
+
+1. `openssl pkcs7 -print_certs` na assinatura de cada arquivo mostra o intermediário: `Microsoft Code Signing PCA 2024` no v14, `Microsoft Code Signing PCA 2011` no 2005, 2008, 2010 e DirectX, e `Microsoft Code Signing PCA` no 2012 e 2013.
+2. O "authority key identifier" desses intermediários é `72:2D:3A:02:...:89:34` (PCA 2011 e 2024) e `0E:AC:82:60:...:E4:A4` (PCA). Eles são o "subject key identifier" das duas raízes.
+3. As raízes foram baixadas das URLs AIA dos próprios intermediários, no repositório da Microsoft: `http://www.microsoft.com/pki/certs/MicRooCerAut2011_2011_03_22.crt` e `http://www.microsoft.com/pki/certs/MicrosoftRootCert.crt`. O SHA-1 delas é o da tabela.
+4. `openssl verify -no_check_time` confirma a cadeia inteira: folha → intermediário → raiz, nos 13 arquivos.
+
+A raiz de 2001 venceu em 2021, mas o Windows a mantém no repositório de raízes para assinaturas com carimbo de tempo. Os instaladores de 2012 e 2013 dependem disso.
+
 ## Argumentos silenciosos
 
 | Instalador | Argumentos | Fonte |
@@ -60,8 +81,9 @@ Observações:
 Códigos de saída:
 
 - 0 é sucesso, conferido depois pela verificação;
-- 3010 e 1641 viram "Reinício pendente", e o Nexo não reinicia o PC;
-- 1638, versão igual ou mais nova já instalada, vira "Já instalado";
+- 3010 vira "Reinício pendente", e o Nexo não reinicia o PC;
+- 1641 também vira "Reinício pendente", mas o texto diz que o instalador da Microsoft já iniciou o reinício do Windows;
+- 1638, versão igual ou mais nova já instalada, vira "Já instalado" só se a verificação depois confirmar o componente. Se ele não aparecer, vira "Falha (1638)";
 - qualquer outro código vira "Falha", com o código.
 
 ## Como funciona
@@ -78,14 +100,30 @@ Códigos de saída:
   2. Cada item é baixado só de `aka.ms`, `download.microsoft.com` ou `download.visualstudio.microsoft.com`, por HTTPS na porta 443, sem redirecionamento automático. Cada salto é conferido antes do pedido, com no máximo 5 redirecionamentos.
   3. O tamanho é limitado durante o download: o fixado, ou 64 MB no v14.
   4. O arquivo vai para `%TEMP%\Nexo\Runtimes\<guid>` e fica aberto sem compartilhar escrita até o instalador terminar. Um link ou junção no caminho é recusado.
-  5. O Nexo confere o SHA-256 (quando fixado) e o Authenticode `Valid` com o assinante esperado, e só então pede o UAC.
-  6. Depois do instalador, a verificação confere o componente.
-  7. Um UAC cancelado encerra a fila: os itens seguintes ficam "Não iniciado". O cancelamento do cartão vale entre itens; um instalador já iniciado termina antes.
-- **Resultado por item:** Ok, Já instalado, Reinício pendente, Falha (com código), UAC cancelado, Integridade, Assinatura, Endereço recusado, Sem download, Link no caminho ou Não iniciado. Ele vai:
+  5. A pasta `<guid>` ganha uma DACL protegida, sem herança, aplicada pelo próprio Nexo, sem admin (veja "Pasta do instalador").
+  6. O Nexo confere o SHA-256 (quando fixado), o Authenticode `Valid` com o assinante esperado e a raiz da cadeia.
+  7. Com o arquivo ainda aberto, o Nexo confere que a pasta contém só o instalador, e só então pede o UAC.
+  8. Depois do instalador, a verificação confere o componente.
+  9. Um UAC cancelado encerra a fila: os itens seguintes ficam "Não iniciado". O cancelamento do cartão vale entre itens; um instalador já iniciado termina antes.
+- **Resultado por item:** Ok, Já instalado, Reinício pendente, Falha (com código), UAC cancelado, Integridade, Assinatura, Assinatura não confiável, Endereço recusado, Sem download, Link no caminho, Pasta do instalador alterada ou Não iniciado. Ele vai:
   - para o cartão;
-  - para `runtimes-audit.ndjson` na pasta do Nexo, com a URL final, os bytes, o SHA-256 calculado, o assinante e o código de saída;
+  - para `runtimes-audit.ndjson` na pasta do Nexo, com a URL final, os bytes, o SHA-256 calculado, o assinante, o código de saída e, se sobrou, a pasta temporária (`Leftover`);
   - para o histórico operacional (`operations.db`, intervenção "Instalar componentes do Windows (Ferramentas)");
   - para o log da conta.
+
+## Pasta do instalador
+
+A pasta `%TEMP%\Nexo\Runtimes\<guid>` herdaria a ACL do `%TEMP%`. Um processo da mesma conta poderia gravar uma DLL ali antes do UAC, e os instaladores antigos (2005 e 2008, pacotes IExpress) carregam DLLs da própria pasta, já como administrador. Por isso, depois do download e antes do `runas`, o Nexo aplica à pasta uma DACL protegida, sem herança:
+
+- `OWNER RIGHTS` (`S-1-3-4`) com `ReadAndExecute`, `Delete` e `DeleteSubdirectoriesAndFiles`. Isso tira do dono o `WRITE_DAC` e o `WRITE_OWNER` implícitos e impede criar arquivos e pastas;
+- `SYSTEM` e Administradores com controle total;
+- nenhuma ACE para o usuário atual.
+
+O dono ainda pode definir a DACL nesse momento; depois dela, perde o `WRITE_DAC`. As ACEs são herdáveis, e o Windows as propaga ao instalador já gravado. Com o arquivo ainda aberto e travado, o Nexo lista a pasta: arquivos e subpastas, inclusive ocultos e de sistema, e os fluxos alternativos (ADS) da pasta e do instalador. Se houver qualquer coisa além do instalador, o item para em "Pasta do instalador alterada" e nada é executado.
+
+No fim, o Nexo apaga o arquivo e a pasta com a ACE de `Delete` do `OWNER RIGHTS`. Se não conseguir, por exemplo quando sobrou um arquivo plantado, a pasta fica e o caminho vai para `runtimes-audit.ndjson`, sem erro para o usuário.
+
+Risco residual: depois do UAC, o instalador elevado extrai os próprios arquivos no `%TEMP%`. Esse risco é o mesmo de rodar o instalador da Microsoft a partir da pasta Downloads, e fica fora do alcance do Nexo.
 
 ## Como atualizar quando a Microsoft trocar um arquivo
 
@@ -93,11 +131,11 @@ Um instalador fixado que mudou para na etapa de integridade e não é executado:
 
 1. Abra a fonte oficial da tabela acima e confirme a URL nova na própria página da Microsoft. Não use espelhos.
 2. Baixe numa pasta vazia com `curl -sL -o arquivo.exe -w "%{url_effective} %{size_download}\n" <url>` e confirme que o host final está na lista.
-3. Calcule o SHA-256 (`shasum -a 256` ou `Get-FileHash`). No Windows, confira `Get-AuthenticodeSignature` com `Status` igual a `Valid` e o `SignerCertificate.Subject`.
-4. Troque URL, tamanho, SHA-256 e, se mudou, o assinante em `Nexo.Support/RuntimeCatalog.cs`. Atualize os valores conferidos em `Nexo.Checks/RuntimeChecks.cs` e a tabela e a data deste documento.
+3. Calcule o SHA-256 (`shasum -a 256` ou `Get-FileHash`). No Windows, confira `Get-AuthenticodeSignature` com `Status` igual a `Valid`, o `SignerCertificate.Subject` e a raiz da cadeia (seção "Raízes da cadeia"). No Mac, siga os 4 passos daquela seção.
+4. Troque URL, tamanho, SHA-256 e, se mudaram, o assinante e a raiz (`Root`) em `Nexo.Support/RuntimeCatalog.cs`. Atualize os valores conferidos em `Nexo.Checks/RuntimeChecks.cs` e a tabela e a data deste documento.
 5. Rode `dotnet run --project Nexo.Checks -- --runtimes`.
 
-O v14 não precisa de atualização enquanto o link permanente continuar entregando um arquivo assinado pela Microsoft com até 64 MB. Se a Microsoft trocar o assinante ou passar desse limite, o item para em "Assinatura" ou "Integridade", e a atualização segue os mesmos passos.
+O v14 não precisa de atualização enquanto o link permanente continuar entregando um arquivo assinado pela Microsoft com até 64 MB. Se a Microsoft trocar o assinante, a raiz ou passar desse limite, o item para em "Assinatura", "Assinatura não confiável" ou "Integridade", e a atualização segue os mesmos passos.
 
 ## Testes
 
@@ -107,7 +145,9 @@ O v14 não precisa de atualização enquanto o link permanente continuar entrega
 - os nomes das chaves de desinstalação e as DLLs do DirectX faltando;
 - a verificação sem alterar nada;
 - o hash diferente, os tamanhos, os hosts fora da lista, os laços de redirecionamento e o assinante diferente;
-- os códigos 3010, 1638, de erro e 0 sem o componente;
+- a raiz da cadeia por item, com a saída simulada do PowerShell e o script real num pwsh com `Get-AuthenticodeSignature` falso;
+- a ordem DACL → assinatura → listar → runas e a recusa com arquivo, subpasta ou ADS a mais na pasta; no Windows, a DACL real (o dono não cria arquivo nem troca a DACL, e apaga tudo no fim);
+- os códigos 3010, 1641, 1638 com e sem o componente depois, de erro e 0 sem o componente;
 - o UAC cancelado, os itens antigos desmarcados e a trava do modelo.
 
 A validação no PC fica no roteiro da #150.
