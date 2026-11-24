@@ -624,7 +624,7 @@ public static class NetworkRecovery
     }
 
     [SupportedOSPlatform("windows")]
-    private static string? UntrustedItem(FileSystemInfo item)
+    internal static string? UntrustedItem(FileSystemInfo item)
     {
         if (item.Attributes.HasFlag(FileAttributes.ReparsePoint)) return item.FullName + ": é link (reparse point)";
         FileSystemSecurity security = item is DirectoryInfo folder ? folder.GetAccessControl() : ((FileInfo)item).GetAccessControl();

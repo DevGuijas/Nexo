@@ -74,9 +74,10 @@ internal static class PageLayoutChecks
         assert(tickets.Contains("Nenhum chamado é enviado automaticamente") && tickets.Contains("Exportar relatório .txt") && !Regex.IsMatch(tickets, "(?i)glpi|jira|enviar chamado"),
             "#143: Encaminhamentos é o relatório local exportável, sem envio a ferramenta de chamados");
         var tools = Method(window, "private void Tools()");
-        assert(Regex.Matches(tools, @"ToolCard\(\d+,").Count == 3 && Regex.IsMatch(tools, @"ToolCard\(1, [^;]*officeCard\)") && Regex.IsMatch(tools, @"ToolCard\(2, [^;]*optimizeCard\)")
-            && Regex.IsMatch(tools, @"ToolCard\(3, ""[^""]+"", ""Apps pré-instalados e ajustes do Windows"", [^;]*debloatCard\)") && tools.Contains("var debloatCard = Card(DebloatCard());"),
-            "#143: os cartões numerados de Ferramentas são só as ferramentas da própria tela, com o de apps e ajustes (#127) como o 3º");
+        assert(Regex.Matches(tools, @"ToolCard\(\d+,").Count == 4 && Regex.IsMatch(tools, @"ToolCard\(1, [^;]*officeCard\)") && Regex.IsMatch(tools, @"ToolCard\(2, [^;]*optimizeCard\)")
+            && Regex.IsMatch(tools, @"ToolCard\(3, ""[^""]+"", ""Apps pré-instalados e ajustes do Windows"", [^;]*debloatCard\)") && tools.Contains("var debloatCard = Card(DebloatCard());")
+            && Regex.IsMatch(tools, @"ToolCard\(4, ""[^""]+"", ""Instalar PawnIO \(driver oficial\)"", [^;]*pawnIoCard\)") && tools.Contains("var pawnIoCard = Card(PawnIoPanel());"),
+            "#143: os cartões numerados de Ferramentas são só as ferramentas da própria tela, com o de apps e ajustes (#127) como o 3º e o do PawnIO (#142) como o 4º");
 
         // 3. Estados da Saúde do PC e do Assistente.
         var health = Method(window, "private void Health()");

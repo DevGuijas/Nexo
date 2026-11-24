@@ -11,6 +11,12 @@ if (args.Contains("--embedded-temperature"))
     Console.WriteLine($"{count} verificações aprovadas.");
     return;
 }
+if (args.Contains("--pawnio"))
+{
+    await PawnIoChecks.Run(Assert);
+    Console.WriteLine($"{count} verificações aprovadas.");
+    return;
+}
 if (args.Contains("--module-path"))
 {
     await ModulePathGuardChecks.Run(Assert);
@@ -89,6 +95,7 @@ if (args.Contains("--network-recovery"))
 try
 {
     EmbeddedTemperatureChecks.Run(Assert);
+    await PawnIoChecks.Run(Assert);
     await ModulePathGuardChecks.Run(Assert);
     await BasicOptimizationChecks.Run(Assert);
     await DebloatChecks.Run(Assert);

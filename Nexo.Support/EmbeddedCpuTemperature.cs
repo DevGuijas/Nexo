@@ -1,6 +1,5 @@
 using System.Text.Json;
 using LibreHardwareMonitor.Hardware;
-using LibreHardwareMonitor.PawnIo;
 
 namespace Nexo.Support;
 internal sealed record CpuSensorValue(string Name, string Identifier, double? Value);
@@ -17,14 +16,14 @@ internal sealed class CpuInitializationCircuit
         "A inicialização do sensor embutido falhou. Reinicie o Nexo para tentar novamente. Detalhe: " + detail, null);
 }
 
-/// <summary>CPU-only access; never installs drivers or starts an external monitor.</summary>
+/// <summary>CPU-only access; never installs drivers or starts an external monitor. The PawnIO check is re-read on each call (#142).</summary>
 internal static class EmbeddedCpuTemperature
 {
     // A native hardware call cannot safely be killed. Keep its gate until the worker ends, even after timeout.
     private static readonly SemaphoreSlim Gate = new(1, 1);
     private static readonly CpuInitializationCircuit Initialization = new();
     internal static Task<string> ReadAsync(CancellationToken token) =>
-        ReadAsync(() => Read(() => new LibreCpuSession(), PawnIo.IsInstalled, token, Initialization), token, TimeSpan.FromSeconds(HardwareSensors.TemperatureTimeoutSeconds));
+        ReadAsync(() => Read(() => new LibreCpuSession(), PawnIoDriver.Installed(), token, Initialization), token, TimeSpan.FromSeconds(HardwareSensors.TemperatureTimeoutSeconds));
 
     internal static async Task<string> ReadAsync(Func<string> read, CancellationToken token, TimeSpan timeout)
     {

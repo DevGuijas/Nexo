@@ -56,6 +56,11 @@ public partial class MainWindow : Window
     private bool debloatRunning;
     private bool debloatCanUndo;
     private string debloatStatus = "Nenhuma verificação iniciada nesta sessão.";
+    // PawnIO e leitura com administrador (#142): só por clique; a leitura elevada vale para a tela de Saúde aberta.
+    private bool pawnIoRunning;
+    private string? pawnIoStatus;
+    private bool elevatedReadRunning;
+    private ElevatedReadResult? elevatedRead;
     private DebloatPreview? debloatPreview;
     private readonly Dictionary<string, CheckBox> debloatChecks = new();
     private CheckBox? debloatRiskView;
@@ -359,6 +364,7 @@ public partial class MainWindow : Window
     {
         if (busy) return;
         if (target == "users") store.Require(user, a => a.Admin);
+        if (target != "health") elevatedRead = null;
         page = target;
         ChatView.Visibility = target == "chat" ? Visibility.Visible : Visibility.Collapsed;
         PageScroll.Visibility = target == "chat" ? Visibility.Collapsed : Visibility.Visible;
@@ -475,6 +481,7 @@ public partial class MainWindow : Window
                     var title = latest.CpuTemperature?.State == "invalid" ? "Leitura de temperatura descartada" : failed ? "Falha na leitura de temperatura" : "Temperatura indisponível neste computador";
                     var unavailable = PageKit.Notice("health", title, temperatureText, failed ? "Warning" : "Neutral");
                     unavailable.Margin = new Thickness(0, 8, 0, 0); overview.Children.Add(unavailable);
+                    overview.Children.Add(TemperatureActions());
                 }
 
                 overview.Children.Add(PageKit.Group("Armazenamento"));
@@ -1160,6 +1167,8 @@ public partial class MainWindow : Window
         overview.Children.Add(ToolCard(1, "Instalação", "Instalar Office", "Office LTSC 2024 com o aviso de licença por volume.", "Microsoft · Office LTSC 2024", officeCard));
         overview.Children.Add(ToolCard(2, "Manutenção", "Otimizar PC", "Temporários antigos e manutenção nativa dos discos.", "Temporários · disco", optimizeCard));
         overview.Children.Add(ToolCard(3, "Privacidade · aparência", "Apps pré-instalados e ajustes do Windows", "Apps que vêm com o Windows e ajustes, aplicados só depois da sua confirmação.", "Apps · serviços · ajustes", debloatCard));
+        var pawnIoCard = Card(PawnIoPanel()); PageContent.Children.Add(pawnIoCard);
+        overview.Children.Add(ToolCard(4, "Sensores · driver de terceiros", "Instalar PawnIO (driver oficial)", "Driver da leitura de temperatura da CPU, instalado pelo assistente oficial depois da sua confirmação.", "namazso · GPL-2.0 · " + PawnIoSetup.Version, pawnIoCard));
         UpdateToolsView();
     }
     // Situação da ferramenta numa faixa própria, com o rótulo em mono.
@@ -1202,6 +1211,96 @@ public partial class MainWindow : Window
         AutomationProperties.SetName(card, number.ToString("00") + ", " + title + ": " + description);
         card.Click += (_, _) => section.BringIntoView();
         return card;
+    }
+
+    // PawnIO (#142): driver de terceiros, só por clique e depois da confirmação. O modelo não oferece nada disso (#135).
+    private StackPanel PawnIoPanel()
+    {
+        var panel = new StackPanel();
+        panel.Children.Add(SectionHeading("health", "Driver PawnIO para a temperatura da CPU"));
+        panel.Children.Add(Text("A temperatura da CPU passa por um driver de kernel. O Nexo não embute o PawnIO: baixa o instalador oficial " + PawnIoSetup.Version + " do GitHub, confere o hash e a assinatura e abre o assistente dele com a autorização de administrador.", 13, "Secondary"));
+        panel.Children.Add(Text("Para desinstalar depois: " + PawnIoSetup.Uninstall + ".", 12, "Secondary"));
+        var installed = PawnIoDriver.Installed();
+        panel.Children.Add(ToolStatus(Text(pawnIoStatus ?? (installed ? "O PawnIO está instalado neste computador." : "O PawnIO não está instalado neste computador."), 13, "Ink")));
+        var install = Action("Instalar PawnIO (driver oficial)", async (_, _) => await GuardAsync(InstallPawnIo), true);
+        install.Tag = "pawnio-install-tools"; install.IsEnabled = !pawnIoRunning && !installed;
+        panel.Children.Add(install);
+        return panel;
+    }
+
+    // Saúde do PC (#142): sem o driver, o botão de instalar; com o driver e sem leitura no Nexo, um UAC por clique para ler.
+    private StackPanel TemperatureActions()
+    {
+        var panel = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+        var installed = PawnIoDriver.Installed();
+        if (elevatedRead is { } result) panel.Children.Add(StatusLine("Temperatura da CPU: " + result.Message, result.State switch { "read" => "Success", "running" => "Neutral", _ => "Warning" }));
+        if (pawnIoStatus != null && !installed) panel.Children.Add(StatusLine(pawnIoStatus, "Neutral"));
+        var actions = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };
+        if (!installed)
+        {
+            var install = Action("Instalar PawnIO (driver oficial)", async (_, _) => await GuardAsync(InstallPawnIo), true);
+            install.Tag = "pawnio-install"; install.IsEnabled = !pawnIoRunning; actions.Children.Add(install);
+        }
+        else
+        {
+            var read = Action("Ler temperatura (pede administrador)", async (_, _) => await GuardAsync(ReadTemperatureElevated), true);
+            read.Tag = "temperature-elevated"; read.IsEnabled = !elevatedReadRunning; actions.Children.Add(read);
+        }
+        panel.Children.Add(actions);
+        panel.Children.Add(Text(installed ? "A leitura roda num processo separado com administrador e vale para esta tela; o Nexo não pede o UAC sozinho."
+            : "Driver de kernel de terceiros (namazso, GPL-2.0). Nada é baixado antes da sua confirmação.", 11, "Subtle"));
+        return panel;
+    }
+
+    private void RefreshPawnIoViews()
+    {
+        if (page == "health") RefreshMonitoredPage();
+        else if (page == "tools") { var position = PageScroll.VerticalOffset; ShowPage("tools"); PageScroll.ScrollToVerticalOffset(position); }
+    }
+
+    private async Task InstallPawnIo()
+    {
+        if (pawnIoRunning || PawnIoDriver.Installed()) return;
+        if (!await ConfirmChange(new ChangeRequest(PawnIoSetup.ConfirmationTitle, PawnIoSetup.ConfirmationDetails))) return;
+        pawnIoRunning = true; pawnIoStatus = "Iniciando o download do instalador oficial..."; RefreshPawnIoViews();
+        PawnIoInstallResult result;
+        try
+        {
+            var progress = new Progress<string>(message => { pawnIoStatus = message; RefreshPawnIoViews(); });
+            result = await PawnIoSetup.InstallAsync(new WindowsPawnIoInstallSystem(), progress, CancellationToken.None);
+        }
+        finally { pawnIoRunning = false; }
+        pawnIoStatus = result.Message;
+        var summary = "Instalar PawnIO " + PawnIoSetup.Version + ": " + result.State + (result.ExitCode.HasValue ? " (código " + result.ExitCode + ")" : "") + (result.Signer.Length > 0 ? "; assinante " + result.Signer : "");
+        try { store.Log(user, summary); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        if (healthStore != null)
+        {
+            try
+            {
+                healthStore.SaveIntervention(new InterventionRecord
+                {
+                    Action = "Instalar PawnIO (driver oficial)", Target = PawnIoSetup.Url.ToString(), Authorized = true, Risk = "médio",
+                    State = result.State switch { "installed" => "concluída", "canceled" => "cancelada", _ => "falhou" },
+                    After = JsonSerializer.Serialize(result), Summary = result.Message,
+                });
+            }
+            catch (OperationalStoreException ex) { pawnIoStatus += "\nO registro no histórico operacional falhou: " + ex.Message; }
+        }
+        RefreshPawnIoViews();
+    }
+
+    private async Task ReadTemperatureElevated()
+    {
+        if (elevatedReadRunning) return;
+        elevatedReadRunning = true; elevatedRead = new ElevatedReadResult("running", "aguardando a autorização de administrador e a leitura (até " + ElevatedSensorReader.TimeoutSeconds + " s)."); RefreshMonitoredPage();
+        ElevatedReadResult result;
+        try { result = await ElevatedSensorReader.ReadAsync(new WindowsElevatedSensorSystem(), ElevatedSensorReader.Root, () => DateTimeOffset.UtcNow, CancellationToken.None); }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or System.ComponentModel.Win32Exception) { result = new("failed", "A leitura com administrador não começou: " + ex.Message); }
+        finally { elevatedReadRunning = false; }
+        try { store.Log(user, "Leitura de temperatura com administrador: " + result.State); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        // Só a tela de Saúde aberta mostra o resultado; ao sair dela, ele é descartado.
+        if (page == "health") elevatedRead = result;
+        RefreshMonitoredPage();
     }
 
     // Remoção de apps e ajustes (#127): só pelo menu, nunca pelo modelo. Verificar não altera nada; Aplicar pede confirmação.

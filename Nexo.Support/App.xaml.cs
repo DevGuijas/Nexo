@@ -7,6 +7,13 @@ public partial class App : Application
     private Mutex? instance;
     protected override void OnStartup(StartupEventArgs e)
     {
+        // #142: o leitor de sensores elevado não abre janela, não usa o mutex nem carrega dados do usuário; lê, grava e termina.
+        if (e.Args.Length > 0 && e.Args[0] == ElevatedSensorReader.Argument)
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            Shutdown(ElevatedSensorReader.Run(e.Args));
+            return;
+        }
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
         var preview = e.Args.Contains("--screenshot") || e.Args.Contains("--tray-smoke");

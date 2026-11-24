@@ -389,7 +389,7 @@ public static class HealthReportPresentation
         text.AppendLine(notice.EndsWith('.') ? notice : notice + ".");
         text.AppendLine($"CPU: {Percent(latest.CpuPercent)}; memória: {Percent(latest.MemoryUsedPercent)}; conectividade local: {latest.Connectivity}.");
         text.AppendLine($"Gateway: {DescribeProbe(latest.GatewayProbe)}; DNS: {DescribeProbe(latest.DnsProbe)}; Destino externo: {DescribeProbe(latest.ExternalProbe)}.");
-        text.AppendLine("Temperatura da CPU: " + DescribeTemperature(latest, true) + ".");
+        text.AppendLine("Temperatura da CPU: " + TemperatureLine(latest, ElevatedSensorReader.Fresh(DateTimeOffset.UtcNow)) + ".");
         text.AppendLine("Discos físicos: " + DescribeStorage(latest, true) + ".");
         foreach (var physical in latest.Storage?.Disks.Take(8) ?? []) text.AppendLine(DescribeDisk(physical, true) + ".");
         if (latest.Storage is { Disks.Count: > 0 }) text.AppendLine(PhysicalDiskScope);
@@ -440,6 +440,14 @@ public static class HealthReportPresentation
         return local.Date == today
             ? $", {verb} às {local.ToString("HH:mm:ss", CultureInfo.InvariantCulture)}"
             : $", {verb} em {local.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)} às {local.ToString("HH:mm:ss", CultureInfo.InvariantCulture)}";
+    }
+    // #142: sem leitura no próprio processo, a leitura com administrador pedida pelo usuário há menos de 5 min entra no relatório,
+    // sempre com a origem e o horário. Leitura comum válida tem prioridade; sem leitura elevada recente, nada muda.
+    public static string TemperatureLine(HealthSnapshot snapshot, ElevatedTemperature? elevated)
+    {
+        if (elevated == null || snapshot.CpuTemperature is { State: "read", Celsius: not null }) return DescribeTemperature(snapshot, true);
+        return elevated.Celsius.ToString("F0", CultureInfo.InvariantCulture) + " °C, sensor " + Safe(elevated.Sensor) + ", fonte " + elevated.Source
+            + ", lida às " + elevated.Time.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture) + " com administrador, a pedido do usuário";
     }
     public static string DescribeTemperature(HealthSnapshot snapshot, bool sanitize = false, DateTimeOffset? now = null)
     {
