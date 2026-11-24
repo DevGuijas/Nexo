@@ -14,14 +14,8 @@ public partial class App : Application
             Shutdown(ElevatedSensorReader.Run(e.Args));
             return;
         }
-        // #142, opção 2: o leitor de sensores do sistema (tarefa "Nexo Sensores", SYSTEM) também não abre janela nem lê dados do
-        // usuário; recusa (código 2) fora de %ProgramFiles%\Nexo\Sensors ou com qualquer argumento extra.
-        if (e.Args.Length > 0 && e.Args[0] == SystemSensorReader.LoopArgument)
-        {
-            ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            Shutdown(SystemSensorReader.RunLoop(e.Args));
-            return;
-        }
+        // #142, P9: o leitor de sensores do sistema (--sensor-loop, tarefa "Nexo Sensores", SYSTEM) não chega aqui. Ele desvia no
+        // Program.Main, antes de o App existir, porque o Main gerado pelo WPF roda InitializeComponent (App.xaml) antes do OnStartup.
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
         var preview = e.Args.Contains("--screenshot") || e.Args.Contains("--tray-smoke");

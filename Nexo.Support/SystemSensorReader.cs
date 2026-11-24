@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.Principal;
 using System.Text;
@@ -49,7 +50,6 @@ public static class SystemSensorReader
     public const string TaskName = "Nexo Sensores";
     public const string Executable = "Nexo.exe";
     public const string ExtractFolder = "extract";
-    public const string ExtractVariable = "DOTNET_BUNDLE_EXTRACT_BASE_DIR";
     public const string SourceLabel = "leitor de sensores do sistema";
     public const string ReportSource = "leitor de sensores do sistema (LibreHardwareMonitor como SYSTEM, cópia protegida em Arquivos de Programas, ao vivo)";
     public const string FolderLabel = @"%ProgramFiles%\Nexo\Sensors";
@@ -105,11 +105,14 @@ public static class SystemSensorReader
     // ---------- modo --sensor-loop ----------
 
     /// <summary>
-    /// Só "--sensor-loop", sem mais nada, e só a partir de %ProgramFiles%\Nexo\Sensors\Nexo.exe. No executável single-file, a
-    /// extração das bibliotecas nativas precisa estar dentro da pasta protegida: em %TEMP% do SYSTEM (C:\Windows\Temp) um usuário
-    /// comum consegue criar pastas e plantar DLLs. Devolve o motivo da recusa ou null.
+    /// Só "--sensor-loop", sem mais nada, e só a partir de %ProgramFiles%\Nexo\Sensors\Nexo.exe. No executável single-file, nenhum
+    /// arquivo pode ter sido extraído: extraído, ele iria para o %TEMP% do SYSTEM (C:\Windows\Temp\.net), onde um usuário comum
+    /// consegue criar pastas e plantar DLLs. A extração aparece na lista de pastas de busca nativa que o host entrega ao runtime
+    /// (NATIVE_DLL_SEARCH_DIRECTORIES): sem extração, ela só tem a pasta do executável; com extração, ganha a pasta extraída. O .NET 8
+    /// não publica outra propriedade com esse caminho (não há BUNDLE_EXTRACTION_PATH). Fora do single-file (pasta do build), a lista
+    /// não é conferida. Devolve o motivo da recusa ou null.
     /// </summary>
-    public static string? ValidateLoop(IReadOnlyList<string> args, string? processPath, string installFolder, bool singleFile, string? extractBase)
+    public static string? ValidateLoop(IReadOnlyList<string> args, string? processPath, string installFolder, bool singleFile, string? nativeSearchDirectories)
     {
         if (args.Count != 1 || !string.Equals(args[0], LoopArgument, StringComparison.Ordinal)) return "O leitor de sensores aceita só " + LoopArgument + ", sem outros argumentos.";
         if (string.IsNullOrEmpty(installFolder) || !Path.IsPathFullyQualified(installFolder)) return "Pasta protegida do leitor indisponível.";
@@ -120,20 +123,40 @@ public static class SystemSensorReader
         var expected = Path.Combine(folder, Executable);
         if (!string.Equals(full, processPath, StringComparison.Ordinal) || !string.Equals(full, expected, StringComparison.OrdinalIgnoreCase))
             return "O leitor de sensores só roda a partir de " + expected + "; nunca da pasta do usuário.";
-        if (singleFile && !string.Equals(Path.TrimEndingDirectorySeparator(extractBase ?? ""), Path.Combine(folder, ExtractFolder), StringComparison.OrdinalIgnoreCase))
-            return "A extração das bibliotecas nativas precisa ficar em " + Path.Combine(folder, ExtractFolder) + ".";
+        if (singleFile && Extracted(nativeSearchDirectories, folder) is { } extracted)
+            return "O leitor de sensores não roda com arquivos extraídos do single-file (" + extracted + "); só com as DLLs nativas ao lado do Nexo.exe em " + folder + ".";
+        return null;
+    }
+
+    /// <summary>Primeira pasta de busca nativa que não é a pasta protegida, ou o motivo de a lista faltar; null quando só há ela.</summary>
+    private static string? Extracted(string? nativeSearchDirectories, string folder)
+    {
+        var entries = (nativeSearchDirectories ?? "").Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (entries.Length == 0) return "lista de pastas nativas do runtime indisponível";
+        foreach (var entry in entries)
+        {
+            string full;
+            try { full = Path.IsPathFullyQualified(entry) ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(entry)) : ""; }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { full = ""; }
+            if (!string.Equals(full, folder, StringComparison.OrdinalIgnoreCase)) return entry;
+        }
         return null;
     }
 
     public static bool SingleFile => string.IsNullOrEmpty(typeof(SystemSensorReader).Assembly.Location);
+    public const string NativeSearchProperty = "NATIVE_DLL_SEARCH_DIRECTORIES";
 
-    /// <summary>Códigos: 2 recusado (argumentos ou caminho), 3 não é SYSTEM, 4 pasta não confiável, 6 o sensor não abriu; 0 outra instância já roda.</summary>
+    /// <summary>
+    /// Códigos: 2 recusado (argumentos, caminho ou arquivos extraídos do single-file), 3 não é SYSTEM, 4 pasta não confiável,
+    /// 5 a busca de DLLs não foi restringida (SensorLoopEntry), 6 o sensor não abriu; 0 outra instância já roda. Chamado só pelo
+    /// SensorLoopEntry, depois do SetDefaultDllDirectories.
+    /// </summary>
     public static int RunLoop(string[] args) =>
-        RunLoop(args, Environment.ProcessPath, InstallFolder, SingleFile, Environment.GetEnvironmentVariable(ExtractVariable));
+        RunLoop(args, Environment.ProcessPath, InstallFolder, SingleFile, AppContext.GetData(NativeSearchProperty) as string);
 
-    internal static int RunLoop(string[] args, string? processPath, string installFolder, bool singleFile, string? extractBase)
+    internal static int RunLoop(string[] args, string? processPath, string installFolder, bool singleFile, string? nativeSearchDirectories)
     {
-        if (ValidateLoop(args, processPath, installFolder, singleFile, extractBase) != null) return 2;
+        if (ValidateLoop(args, processPath, installFolder, singleFile, nativeSearchDirectories) != null) return 2;
         if (!OperatingSystem.IsWindows() || !IsSystem()) return 3;
         if (UntrustedInstall(installFolder) != null) return 4;
         using var single = new Mutex(true, @"Global\Nexo.Sensors", out var first);
@@ -393,12 +416,17 @@ public static class SystemSensorReader
         $nxTask='Nexo Sensores'
         $nxLive=Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)) 'NexoSupport\sensors\live.json'
         function Test-NexoLink($path) { (Get-Item -LiteralPath $path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint }
+        # Todo Nexo.exe cujo executável é exatamente o da cópia protegida (o Windows não diferencia maiúsculas). A tarefa antiga
+        # (cmd.exe /c ... Nexo.exe) deixava o Nexo.exe órfão quando parava: o Stop-ScheduledTask encerrava só o cmd.exe.
+        function Get-NexoSensorProcess {
+          @(Get-CimInstance -ClassName Win32_Process -Filter "Name='Nexo.exe'" -ErrorAction Stop | Where-Object { $_.ExecutablePath -and [string]::Equals([string]$_.ExecutablePath, $nxExe, [StringComparison]::OrdinalIgnoreCase) })
+        }
         function Stop-NexoSensorLoop {
           if(Get-ScheduledTask -TaskName $nxTask -TaskPath '\' -ErrorAction SilentlyContinue){ Stop-ScheduledTask -TaskName $nxTask -TaskPath '\' -ErrorAction SilentlyContinue }
           for($i=0; $i -lt 20; $i++){
-            $running=@(Get-Process -Name 'Nexo' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $nxExe })
+            $running=@(Get-NexoSensorProcess)
             if($running.Count -eq 0){ return }
-            if($i -eq 8){ $running | Stop-Process -Force -ErrorAction SilentlyContinue }
+            if($i % 4 -eq 0){ foreach($process in $running){ Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue } }
             Start-Sleep -Milliseconds 500
           }
           throw 'O leitor de sensores não terminou a tempo. Nada mais foi alterado.'
@@ -466,16 +494,12 @@ public static class SystemSensorReader
         foreach($old in @(Get-ChildItem -LiteralPath $nxTarget -Force -File)){
           if($nxFiles -notcontains $old.Name -and -not ($old.Attributes -band [IO.FileAttributes]::ReparsePoint)){ Remove-Item -LiteralPath $old.FullName -Force }
         }
-        # (c) Tarefa do sistema: SYSTEM, na inicialização, reinício em falha e sem limite de tempo. O cmd.exe do System32 (/d, sem
-        # AutoRun) fixa o PATH nas pastas do Windows (uma DLL que faltar nunca é procurada numa pasta do PATH que um usuário grave) e
-        # a extração das bibliotecas nativas do single-file dentro da pasta protegida antes de abrir o Nexo.exe. Caminho com % ou aspas
-        # mudaria a linha do cmd.exe: é recusado.
-        $nxSystem=[Environment]::SystemDirectory
-        $nxCmd=[IO.Path]::Combine($nxSystem,'cmd.exe')
-        $nxPath=$nxSystem + ';' + [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows) + ';' + [IO.Path]::Combine($nxSystem,'Wbem')
-        if(($nxPath + $nxExtract + $nxExe) -match '[%"]'){throw 'O caminho do leitor tem % ou aspas e não pode ir para a tarefa. Nada foi registrado.'}
-        $nxArguments='/d /c set "PATH=' + $nxPath + '" && set "DOTNET_BUNDLE_EXTRACT_BASE_DIR=' + $nxExtract + '" && "' + $nxExe + '" --sensor-loop'
-        $action=New-ScheduledTaskAction -Execute $nxCmd -Argument $nxArguments -WorkingDirectory $nxTarget
+        # (c) Tarefa do sistema: SYSTEM, na inicialização, reinício em falha e sem limite de tempo. A ação é o próprio Nexo.exe da
+        # pasta protegida, sem cmd.exe: parar a tarefa (Stop-ScheduledTask, schtasks /End) encerra o leitor, e o reinício em falha
+        # vale para ele. A busca de DLLs (SetDefaultDllDirectories) e a recusa de arquivos extraídos do single-file ficam dentro do
+        # --sensor-loop. O agendador expande % no caminho, e aspas mudariam a ação: um caminho com % ou aspas é recusado.
+        if(($nxExe + $nxTarget) -match '[%"]'){throw 'O caminho do leitor tem % ou aspas e não pode ir para a tarefa. Nada foi registrado.'}
+        $action=New-ScheduledTaskAction -Execute $nxExe -Argument '--sensor-loop' -WorkingDirectory $nxTarget
         $trigger=New-ScheduledTaskTrigger -AtStartup
         $principal=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
         $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -MultipleInstances IgnoreNew -Priority 7
@@ -575,4 +599,42 @@ public sealed class WindowsLiveSensorSystem : ILiveSensorSystem
 
     /// <summary>O executor elevado supervisionado (o mesmo do debloat): UAC uma vez, PowerShell com a fixação do PSModulePath.</summary>
     public static Task<string> RunElevatedAsync(string script, CancellationToken token) => OptimizationDiskExecutor.RunAsync(NetworkRecovery.Compact(script), token);
+}
+
+/// <summary>
+/// Entrada do modo --sensor-loop (#142, P9), chamada pelo Program.Main antes de qualquer tipo do WPF. A tarefa executa o Nexo.exe
+/// direto, sem cmd.exe e sem PATH fixo na linha de comando: a primeira coisa do processo é restringir a busca de DLLs à pasta do
+/// executável e ao System32 (SetDefaultDllDirectories), antes de carregar qualquer DLL nativa (WPF, LibreHardwareMonitor, PawnIO).
+/// Sem campos estáticos, para não disparar o inicializador do SystemSensorReader antes da restrição.
+/// </summary>
+public static class SensorLoopEntry
+{
+    public static int Run(string[] args) => Run(args, NativeDllSearch.Restrict, SystemSensorReader.RunLoop);
+
+    /// <summary>Código 5 quando a busca não foi restringida; senão, o código do loop.</summary>
+    internal static int Run(string[] args, Func<bool> restrictDllSearch, Func<string[], int> loop) => restrictDllSearch() ? loop(args) : 5;
+}
+
+/// <summary>
+/// Ordem de busca de DLLs do processo do leitor: só a pasta do executável (a pasta protegida) e o System32. Com isso, o PATH e a
+/// pasta atual deixam de valer para LoadLibrary sem caminho e para as dependências das DLLs nativas carregadas depois.
+/// </summary>
+public static class NativeDllSearch
+{
+    public const uint LoadLibrarySearchApplicationDir = 0x00000200;
+    public const uint LoadLibrarySearchSystem32 = 0x00000800;
+    public const uint Flags = LoadLibrarySearchApplicationDir | LoadLibrarySearchSystem32;
+
+    [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetDefaultDllDirectories(uint directoryFlags);
+
+    /// <summary>True quando a ordem de busca ficou restrita; false fora do Windows ou se o kernel32 recusar.</summary>
+    public static bool Restrict()
+    {
+        if (!OperatingSystem.IsWindows()) return false;
+        try { return SetDefaultDllDirectories(Flags); }
+        catch (Exception ex) when (ex is EntryPointNotFoundException or DllNotFoundException) { return false; }
+    }
 }

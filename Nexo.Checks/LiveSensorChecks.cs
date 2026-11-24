@@ -29,11 +29,15 @@ internal static class LiveSensorChecks
     {
         var folder = Path.Combine(Path.GetTempPath(), "NexoPF-" + Guid.NewGuid().ToString("N"), "Nexo", "Sensors");
         var exe = Path.Combine(folder, "Nexo.exe");
-        var extract = Path.Combine(folder, "extract");
-        check(SystemSensorReader.ValidateLoop(["--sensor-loop"], exe, folder, false, null) == null && SystemSensorReader.ValidateLoop(["--sensor-loop"], exe, folder, true, extract) == null,
-            "#142 leitor do sistema: --sensor-loop aceita só o Nexo.exe da pasta protegida");
+        // NATIVE_DLL_SEARCH_DIRECTORIES como o host entrega: pastas separadas por Path.PathSeparator, com separador no fim.
+        string Dirs(params string[] folders) => string.Join(Path.PathSeparator, folders) + Path.PathSeparator;
+        var only = Dirs(folder + Path.DirectorySeparatorChar);
+        check(SystemSensorReader.ValidateLoop(["--sensor-loop"], exe, folder, false, null) == null && SystemSensorReader.ValidateLoop(["--sensor-loop"], exe, folder, true, only) == null
+            && SystemSensorReader.ValidateLoop(["--sensor-loop"], exe, folder, true, Dirs(folder, folder + Path.DirectorySeparatorChar)) == null,
+            "#142 leitor do sistema: --sensor-loop aceita só o Nexo.exe da pasta protegida; no single-file, só com a pasta protegida como pasta de busca nativa (nada extraído)");
         var user = Path.Combine(Path.GetTempPath(), "Users", "u", "AppData", "Local", "Programs", "Nexo", "Nexo.exe");
-        (string[] Args, string? Path, bool Single, string? Extract)[] refused =
+        var systemTemp = Path.Combine(Path.GetTempPath(), ".net", "Nexo", "f+bA_GNFZ5QUP6JUF_VSGKn3KwesrDI=");
+        (string[] Args, string? Path, bool Single, string? Native)[] refused =
         [
             (["--sensor-loop", "x"], exe, false, null),
             (["--sensor-loop", "--theme", "glacial"], exe, false, null),
@@ -48,16 +52,51 @@ internal static class LiveSensorChecks
             (["--sensor-loop"], Path.Combine(folder, "Outro.exe"), false, null),
             (["--sensor-loop"], "Nexo.exe", false, null),
             (["--sensor-loop"], null, false, null),
+            // Single-file com extração (IncludeNativeLibrariesForSelfExtract): a pasta extraída entra na lista, no %TEMP% do SYSTEM
+            // ou mesmo dentro da pasta protegida (a extração antiga em Sensors\extract); sem a lista, também recusa.
             (["--sensor-loop"], exe, true, null),
-            (["--sensor-loop"], exe, true, Path.Combine(Path.GetTempPath(), ".net")),
+            (["--sensor-loop"], exe, true, ""),
+            (["--sensor-loop"], exe, true, Dirs(systemTemp + Path.DirectorySeparatorChar, folder + Path.DirectorySeparatorChar, systemTemp)),
+            (["--sensor-loop"], exe, true, Dirs(folder, systemTemp)),
+            (["--sensor-loop"], exe, true, Dirs(folder, Path.Combine(folder, "extract", "Nexo", "abc"))),
+            (["--sensor-loop"], exe, true, Dirs(folder + "-x")),
+            (["--sensor-loop"], exe, true, Dirs(folder, "extract")),
         ];
-        var accepted = refused.Where(item => SystemSensorReader.ValidateLoop(item.Args, item.Path, folder, item.Single, item.Extract) == null).Select(item => string.Join(" ", item.Args) + " @ " + item.Path).ToList();
-        check(accepted.Count == 0, "#142 leitor do sistema: recusa argumento extra, outro modo, executável fora de %ProgramFiles%\\Nexo\\Sensors (pasta do usuário, vizinha, subpasta, \"..\") e extração nativa fora da pasta protegida"
+        var accepted = refused.Where(item => SystemSensorReader.ValidateLoop(item.Args, item.Path, folder, item.Single, item.Native) == null).Select(item => string.Join(" ", item.Args) + " @ " + item.Path + " · " + item.Native).ToList();
+        check(accepted.Count == 0, "#142 leitor do sistema: recusa argumento extra, outro modo, executável fora de %ProgramFiles%\\Nexo\\Sensors (pasta do usuário, vizinha, subpasta, \"..\") e single-file com arquivos extraídos (no %TEMP% do SYSTEM ou na pasta protegida)"
             + (accepted.Count > 0 ? " · aceitos: " + string.Join(" | ", accepted) : ""));
-        check(SystemSensorReader.RunLoop(["--sensor-loop"]) == 2 && SystemSensorReader.RunLoop(["--sensor-loop", "x"], exe, folder, false, null) == 2
-            && SystemSensorReader.RunLoop(["--sensor-loop"], user, folder, false, null) == 2,
-            "#142 leitor do sistema: fora da cópia protegida ou com argumento extra, o modo sai com código 2 antes de ler qualquer sensor");
-        check(SystemSensorReader.RunLoop(["--sensor-loop"], exe, folder, false, null) == 3, "#142 leitor do sistema: no caminho certo, mas sem ser SYSTEM, sai com código 3");
+        var extracted = SystemSensorReader.ValidateLoop(["--sensor-loop"], exe, folder, true, Dirs(folder, systemTemp));
+        check(extracted != null && extracted.Contains("extraídos") && extracted.Contains(systemTemp), "#142 leitor do sistema: a recusa da extração diz qual pasta extraída apareceu: " + extracted);
+        check(SystemSensorReader.RunLoop(["--sensor-loop", "x"], exe, folder, false, null) == 2 && SystemSensorReader.RunLoop(["--sensor-loop"], user, folder, false, null) == 2
+            && SystemSensorReader.RunLoop(["--sensor-loop"], exe, folder, true, Dirs(folder, systemTemp)) == 2,
+            "#142 leitor do sistema: fora da cópia protegida, com argumento extra ou com arquivos extraídos, o modo sai com código 2 antes de ler qualquer sensor");
+        check(SystemSensorReader.RunLoop(["--sensor-loop"], exe, folder, false, null) == 3 && SystemSensorReader.RunLoop(["--sensor-loop"], exe, folder, true, only) == 3,
+            "#142 leitor do sistema: no caminho certo (build ou single-file sem extração), mas sem ser SYSTEM, sai com código 3");
+
+        // P9: a busca de DLLs é restringida antes de o loop fazer qualquer coisa; se não der, código 5 e o loop não roda.
+        var calls = new List<string>();
+        var ran = SensorLoopEntry.Run(["--sensor-loop"], () => { calls.Add("restrict"); return true; }, args => { calls.Add("loop " + string.Join(" ", args)); return 3; });
+        var blocked = SensorLoopEntry.Run(["--sensor-loop"], () => { calls.Add("restrict"); return false; }, _ => { calls.Add("loop"); return 0; });
+        check(ran == 3 && blocked == 5 && calls.SequenceEqual(["restrict", "loop --sensor-loop", "restrict"]),
+            "#142 P9: --sensor-loop restringe a busca de DLLs antes do loop; sem a restrição, sai com código 5 sem rodar o loop: " + string.Join(", ", calls));
+        var import = typeof(NativeDllSearch).GetMethod("SetDefaultDllDirectories", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        var dll = import?.GetCustomAttributes(typeof(System.Runtime.InteropServices.DllImportAttribute), false).OfType<System.Runtime.InteropServices.DllImportAttribute>().FirstOrDefault();
+        var code = Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Code");
+        var reader = File.ReadAllText(Path.Combine(code, "SystemSensorReader.cs")).ReplaceLineEndings("\n");
+        var restrict = reader[reader.IndexOf("public static bool Restrict()", StringComparison.Ordinal)..];
+        restrict = restrict[..restrict.IndexOf("\n    }", StringComparison.Ordinal)];
+        check(dll != null && string.Equals(dll.Value, "kernel32.dll", StringComparison.OrdinalIgnoreCase) && NativeDllSearch.Flags == 0x0A00
+            && restrict.Contains("SetDefaultDllDirectories(Flags)") && reader.Contains("public static int Run(string[] args) => Run(args, NativeDllSearch.Restrict, SystemSensorReader.RunLoop);"),
+            "#142 P9: a restrição é SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32) do kernel32, e a entrada do modo usa ela antes do RunLoop");
+        var program = File.ReadAllText(Path.Combine(code, "Program.cs")).ReplaceLineEndings("\n");
+        var app = File.ReadAllText(Path.Combine(code, "App.xaml.cs"));
+        var project = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Project", "Nexo.Support.csproj"));
+        var main = program[program.IndexOf("public static int Main(string[] args)", StringComparison.Ordinal)..];
+        main = main[..main.IndexOf("\n    }", StringComparison.Ordinal)];
+        var firstStatement = main[(main.IndexOf('{') + 1)..].TrimStart();
+        check(project.Contains("<StartupObject>Nexo.Support.Program</StartupObject>") && firstStatement.StartsWith("if (args.Length > 0 && string.Equals(args[0], SystemSensorReader.LoopArgument, StringComparison.Ordinal)) return SensorLoopEntry.Run(args);", StringComparison.Ordinal)
+            && !main.Contains("new App") && !main.Contains("InitializeComponent") && program.Contains("new App()") && !app.Contains("SystemSensorReader.LoopArgument") && !app.Contains("RunLoop"),
+            "#142 P9: o desvio do --sensor-loop é a primeira instrução do Main próprio (StartupObject), antes de o App e o InitializeComponent do WPF existirem; o OnStartup não tem mais esse desvio");
     }
 
     private sealed class FakeLive : ILiveSensorSystem
@@ -279,11 +318,20 @@ internal static class LiveSensorChecks
         check(install.StartsWith(PowerShellModulePath.Guard, StringComparison.Ordinal) && remove.StartsWith(PowerShellModulePath.Guard, StringComparison.Ordinal) && launchOk,
             "#142 scripts de instalação e remoção começam com a fixação do PSModulePath (#131) e passam na conferência do executor elevado antes do UAC");
         check(install.Contains("$nxTask='Nexo Sensores'") && install.Contains("New-ScheduledTaskTrigger -AtStartup") && install.Contains("-UserId 'SYSTEM' -LogonType ServiceAccount")
-            && install.Contains("-ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)") && install.Contains("$nxExe + '\" --sensor-loop'")
+            && install.Contains("-ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)")
             && install.Contains("Start-ScheduledTask -TaskName $nxTask") && install.Contains("$nxTarget=Join-Path $nxParent 'Sensors'") && install.Contains("$nxParent=Join-Path $nxBase 'Nexo'")
-            && install.Contains("[Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)") && install.Contains("DOTNET_BUNDLE_EXTRACT_BASE_DIR=")
+            && install.Contains("[Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)")
             && !Regex.IsMatch(install, @"\$env:(?!PSModulePath)", RegexOptions.IgnoreCase),
             "#142 script de instalação: tarefa \"Nexo Sensores\" como SYSTEM, na inicialização, com reinício e sem limite, rodando --sensor-loop da pasta em Arquivos de Programas, sem variável de ambiente do usuário");
+        // P9: a ação é o Nexo.exe direto. Os comentários do script citam a ação antiga; o que vale é o código.
+        string Code(string script) => string.Join("\n", script.ReplaceLineEndings("\n").Split('\n').Where(line => !line.TrimStart().StartsWith('#')));
+        check(Code(install).Contains("$action=New-ScheduledTaskAction -Execute $nxExe -Argument '--sensor-loop' -WorkingDirectory $nxTarget\n"),
+            "#142 P9 script de instalação: a ação da tarefa executa o Nexo.exe da pasta protegida, com só --sensor-loop e a pasta como diretório de trabalho");
+        check(!Regex.IsMatch(Code(install) + Code(remove), @"\bcmd(\.exe)?\b|(?<![A-Za-z])PATH=|DOTNET_BUNDLE_EXTRACT_BASE_DIR|\$nxCmd|&&", RegexOptions.IgnoreCase),
+            "#142 P9 scripts: sem cmd.exe, sem PATH e sem DOTNET_BUNDLE_EXTRACT_BASE_DIR na tarefa (a proteção está no --sensor-loop)");
+        check(Code(install).Contains("Get-CimInstance -ClassName Win32_Process -Filter \"Name='Nexo.exe'\" -ErrorAction Stop") && Code(remove).Contains("[string]::Equals([string]$_.ExecutablePath, $nxExe, [StringComparison]::OrdinalIgnoreCase)")
+            && !Code(install + remove).Contains("Get-Process") && At(Code(install), "Stop-ScheduledTask -TaskName") < At(Code(install), "Stop-Process -Id $process.ProcessId -Force"),
+            "#142 P9 scripts: depois do Stop-ScheduledTask, o Desativar e o Atualizar procuram o Nexo.exe pelo ExecutablePath exato (Win32_Process) e o encerram");
         check(At(install, "Use-ProtectedDirectory $nxTarget") > 0 && At(install, "Use-ProtectedDirectory $nxTarget") < At(install, "Stop-NexoSensorLoop\n")
             && At(install, "Stop-NexoSensorLoop\n") < At(install, "foreach($name in $nxFiles)") && At(install, "foreach($name in $nxFiles)") < At(install, "Register-ScheduledTask -TaskName")
             && install.Contains("$nxIn=New-Object System.IO.FileStream($from,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)") && install.Contains("$sha.ComputeHash($nxIn)") && install.Contains("$nxIn.CopyTo($output)")
@@ -305,6 +353,19 @@ internal static class LiveSensorChecks
     private const string Fakes = """
 
         $script:acl=@{}; $script:links=@(); $script:reg=$null; $script:started=''; $script:unreg=$false
+        $script:procs=@(); $script:stubborn=@(); $script:killed=@(); $script:kills=@()
+        function Get-CimInstance { param($ClassName,$Filter,$ErrorAction)
+          if($ClassName -ne 'Win32_Process'){ throw ('classe inesperada: ' + $ClassName) }
+          $name=if($Filter -match "^Name='([^']+)'$"){ $Matches[1] } else { $null }
+          @($script:procs | Where-Object { ($null -eq $name -or $_.Name -eq $name) -and ($script:killed -notcontains $_.ProcessId -or $script:stubborn -contains $_.ProcessId) })
+        }
+        # Registra quem foi encerrado e o estado do Nexo.exe da pasta protegida e da tarefa naquele momento (ordem).
+        function Stop-Process { param($Id,[switch]$Force,$ErrorAction)
+          $script:killed+=$Id
+          $size=if(Test-Path -LiteralPath $nxExe){ (Get-Item -LiteralPath $nxExe).Length } else { -1 }
+          $script:kills+=([string]$Id + '/' + $size + '/' + [bool]$script:reg + '/' + $script:unreg)
+        }
+        function Start-Sleep { param($Milliseconds) }
         function Assert-Trusted($path) {
           if($script:links -contains [string]$path){ throw ('A cópia protegida do Nexo em ' + $path + ' é um link e não é usada. Nenhuma alteração foi feita.') }
           $entry=$script:acl[[string]$path]
@@ -340,7 +401,8 @@ internal static class LiveSensorChecks
         {
             // No Windows, sem isto o pwsh escreve na página de código do console e os acentos chegam trocados (CI de 24/11).
             var wrapped = "[Console]::OutputEncoding=[Text.Encoding]::UTF8\ntry {\n$nxResult=@(. {\n" + body + "\n})\nWrite-Output ('OK:' + ($nxResult[-1] | ConvertTo-Json -Compress -Depth 4))\n} catch { Write-Output ('ERRO:' + $_.Exception.Message) }\n"
-                + "Write-Output ('REG:' + ($script:reg | ConvertTo-Json -Compress -Depth 4))\nWrite-Output ('START:' + $script:started)\nWrite-Output ('UNREG:' + $script:unreg)\n";
+                + "Write-Output ('REG:' + ($script:reg | ConvertTo-Json -Compress -Depth 4))\nWrite-Output ('START:' + $script:started)\nWrite-Output ('UNREG:' + $script:unreg)\n"
+                + "Write-Output ('KILLS:' + ($script:kills -join ','))\n";
             File.WriteAllText(path, wrapped, new UTF8Encoding(true));
             var start = new ProcessStartInfo(shell) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, StandardOutputEncoding = Encoding.UTF8 };
             foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", path }) start.ArgumentList.Add(argument);
@@ -369,6 +431,19 @@ internal static class LiveSensorChecks
             string Target(string folder) => Path.Combine(folder, "Nexo", "Sensors");
             string Install(string folder, string setup) => Prepare(SystemSensorReader.InstallScript(source, files, ProtectedFolderScript.Text + Fakes + setup), folder, Path.Combine(root, "live.json"));
             string Literal(string path) => "'" + path.Replace("'", "''") + "'";
+            // Win32_Process falso: o órfão com o caminho exato (também em maiúsculas), e Nexo.exe que não são o leitor.
+            string Processes(string folder) => "$script:procs=@(" + string.Join(",", new (int Id, string Name, string? Path)[]
+            {
+                (11120, "Nexo.exe", Path.Combine(folder, "Nexo.exe")),
+                (11121, "Nexo.exe", Path.Combine(folder, "Nexo.exe").ToUpperInvariant()),
+                (500, "Nexo.exe", Path.Combine(root, "user", "Nexo", "Nexo.exe")),
+                (501, "Nexo.exe", Path.Combine(folder + "-x", "Nexo.exe")),
+                (502, "Nexo.exe", Path.Combine(folder, "sub", "Nexo.exe")),
+                (503, "Nexo.exe", Path.Combine(folder, "Nexo.exe.old")),
+                (504, "Nexo.exe", null),
+                (505, "cmd.exe", Path.Combine(root, "Windows", "System32", "cmd.exe")),
+            }.Select(item => "[pscustomobject]@{ProcessId=" + item.Id + ";Name='" + item.Name + "';ExecutablePath=" + (item.Path == null ? "$null" : Literal(item.Path)) + "}")) + ")\n";
+            string OldTask(string folder) => "$script:reg=[pscustomobject]@{TaskName='Nexo Sensores';Action=[pscustomobject]@{Execute='C:\\Windows\\System32\\cmd.exe';Argument=" + Literal("/d /c set \"PATH=C:\\Windows\\System32\" && \"" + Path.Combine(folder, "Nexo.exe") + "\" --sensor-loop") + "}}\n";
 
             var good = Case("good");
             var output = await Pwsh(shell, Install(good, ""));
@@ -378,9 +453,8 @@ internal static class LiveSensorChecks
             var sha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(exeBytes));
             check(copied && output.Contains("OK:") && output.Contains("Nexo.exe " + sha) && output.Contains("START:Nexo Sensores")
                 && output.Contains("\"TaskName\":\"Nexo Sensores\"") && output.Contains("\"AtStartup\":true") && output.Contains("\"UserId\":\"SYSTEM\"") && output.Contains("\"Limit\":\"00:00:00\"")
-                && output.Contains("\"RestartCount\":999") && output.Contains("--sensor-loop") && output.Contains(Path.Combine(target, "Nexo.exe").Replace("\\", "\\\\")) && output.Contains("cmd.exe")
-                && Regex.IsMatch(output, @"/d /c set \\""PATH=[^%""]*?\\"" (?:&&|\\u0026\\u0026) set \\""DOTNET_BUNDLE_EXTRACT_BASE_DIR="),
-                "#142 script real (cmdlets falsos): copia com SHA-256 igual ao da origem, registra \"Nexo Sensores\" (SYSTEM, AtStartup, sem limite, reinício, PATH fixo nas pastas do Windows) e inicia: " + Short(output));
+                && output.Contains("\"RestartCount\":999") && Action(output) == (Path.Combine(target, "Nexo.exe"), "--sensor-loop", target) && !output.Contains("cmd.exe"),
+                "#142 script real (cmdlets falsos): copia com SHA-256 igual ao da origem, registra \"Nexo Sensores\" (SYSTEM, AtStartup, sem limite, reinício) com a ação Nexo.exe --sensor-loop da pasta protegida, sem cmd.exe, e inicia: " + Short(output));
 
             foreach (var (name, setup, expected) in new[]
             {
@@ -416,10 +490,22 @@ internal static class LiveSensorChecks
             File.WriteAllText(Path.Combine(updateTarget, "extract", "abc", "wpfgfx_cor3.dll"), "antiga");
             File.WriteAllText(Path.Combine(updateTarget, "Antigo.dll"), "antiga");
             File.WriteAllText(Path.Combine(updateTarget, "Nexo.exe"), "antiga");
-            var updated = await Pwsh(shell, Install(update, ""));
+            // P9: a instalação antiga (ação cmd.exe) deixou o Nexo.exe órfão (PID 11120 no PC); o Atualizar o encerra antes de copiar.
+            var updated = await Pwsh(shell, Install(update, Processes(updateTarget) + OldTask(updateTarget)));
             check(updated.Contains("OK:") && !Directory.Exists(Path.Combine(updateTarget, "extract")) && !File.Exists(Path.Combine(updateTarget, "Antigo.dll"))
                 && File.ReadAllBytes(Path.Combine(updateTarget, "Nexo.exe")).SequenceEqual(exeBytes) && updated.Contains("START:Nexo Sensores"),
                 "#142 script real (Atualizar leitor): a extração antiga e os arquivos que não fazem mais parte do leitor saem, e o Nexo.exe é o novo: " + Short(updated));
+            check(Kills(updated).SequenceEqual(["11120/6/True/False", "11121/6/True/False"]) && Action(updated) == (Path.Combine(updateTarget, "Nexo.exe"), "--sensor-loop", updateTarget),
+                "#142 P9 Atualizar leitor: encerra só o Nexo.exe com o ExecutablePath exato da cópia protegida (o órfão da tarefa antiga), antes de copiar, sem tocar no Nexo.exe do usuário, da pasta vizinha, de subpasta ou sem caminho, e re-registra a tarefa com a ação direta: "
+                + string.Join(", ", Kills(updated)) + " · " + Action(updated));
+            var stuck = Case("stuck");
+            var stuckTarget = Target(stuck);
+            Directory.CreateDirectory(stuckTarget);
+            File.WriteAllText(Path.Combine(stuckTarget, "Nexo.exe"), "antiga");
+            var stuckResult = await Pwsh(shell, Install(stuck, Processes(stuckTarget) + "$script:stubborn=@(11120)\n"));
+            check(stuckResult.Contains("ERRO:") && stuckResult.Contains("não terminou a tempo") && File.ReadAllText(Path.Combine(stuckTarget, "Nexo.exe")) == "antiga" && Untouched(stuckResult)
+                && Kills(stuckResult).Count > 1 && Kills(stuckResult).All(kill => kill.StartsWith("11120/", StringComparison.Ordinal) || kill.StartsWith("11121/", StringComparison.Ordinal)),
+                "#142 P9: um leitor que não termina para a atualização antes de copiar ou registrar: " + Short(stuckResult));
             var self = await Pwsh(shell, Prepare(SystemSensorReader.InstallScript(Target(update), files, ProtectedFolderScript.Text + Fakes), update, Path.Combine(root, "live.json")));
             check(self.Contains("ERRO:") && self.Contains("já é a cópia do leitor") && Untouched(self), "#142 script real: o Nexo aberto da própria cópia do leitor não se copia sobre ela: " + Short(self));
             var linkSource = Path.Combine(root, "user", "Atalho");
@@ -463,12 +549,30 @@ internal static class LiveSensorChecks
             File.WriteAllBytes(Path.Combine(cleanTarget, "Nexo.exe"), exeBytes);
             File.WriteAllText(Path.Combine(cleanTarget, "extract", "Nexo", "abc", "wpfgfx_cor3.dll"), "x");
             File.WriteAllText(Path.Combine(root, "live.json"), "{}");
-            var removed = await Pwsh(shell, Remove(clean, "$script:reg=[pscustomobject]@{TaskName='Nexo Sensores'}\n"));
+            var removed = await Pwsh(shell, Remove(clean, Processes(cleanTarget) + OldTask(cleanTarget)));
             check(removed.Contains("OK:") && !Directory.Exists(cleanTarget) && !Directory.Exists(Path.GetDirectoryName(cleanTarget)) && removed.Contains("UNREG:True") && !File.Exists(Path.Combine(root, "live.json")),
                 "#142 script real de remoção: tarefa removida, pasta Sensors (com a extração) e a pasta Nexo vazia apagadas, live.json apagado: " + Short(removed));
+            check(Kills(removed).SequenceEqual(["11120/70000/True/False", "11121/70000/True/False"]),
+                "#142 P9 Desativar: encerra só o Nexo.exe com o ExecutablePath exato da cópia protegida, antes de remover a tarefa e a pasta, sem tocar nos outros Nexo.exe: " + string.Join(", ", Kills(removed)));
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
     }
+
+    private static (string Execute, string Argument, string WorkingDirectory)? Action(string output)
+    {
+        var line = output.ReplaceLineEndings("\n").Split('\n').FirstOrDefault(item => item.StartsWith("REG:", StringComparison.Ordinal));
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(line?[4..] is { Length: > 0 } json ? json : "null");
+            if (document.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) return null;
+            var action = document.RootElement.GetProperty("Action");
+            return (action.GetProperty("Execute").GetString() ?? "", action.GetProperty("Argument").GetString() ?? "", action.GetProperty("WorkingDirectory").GetString() ?? "");
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or KeyNotFoundException or InvalidOperationException) { return null; }
+    }
+
+    private static List<string> Kills(string output) =>
+        output.ReplaceLineEndings("\n").Split('\n').FirstOrDefault(item => item.StartsWith("KILLS:", StringComparison.Ordinal))?[6..].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList() ?? [];
 
     private static string Short(string text) => text.Length <= 700 ? text.ReplaceLineEndings(" ⏎ ") : text[..700].ReplaceLineEndings(" ⏎ ") + "…";
 
