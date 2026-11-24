@@ -371,7 +371,7 @@ internal static class NetworkFollowUpChecks
 
             // O OfferNetworkRecovery sai antes do aviso e do posted com o resultado já registrado: a abertura fica na Início.
             var sources = Path.Combine(AppContext.BaseDirectory, "ThemeSources");
-            var window = File.ReadAllText(File.Exists(Path.Combine(sources, "MainWindow.xaml.cs")) ? Path.Combine(sources, "MainWindow.xaml.cs") : Path.Combine(sources, "Code", "MainWindow.xaml.cs"));
+            var window = File.ReadAllText(File.Exists(Path.Combine(sources, "MainWindow.xaml.cs")) ? Path.Combine(sources, "MainWindow.xaml.cs") : Path.Combine(sources, "Code", "MainWindow.xaml.cs")).ReplaceLineEndings("\n");
             var offer = System.Text.RegularExpressions.Regex.Match(window, @"private async Task OfferNetworkRecovery\(\)\s*\{(?<body>.*?)\n    \}", System.Text.RegularExpressions.RegexOptions.Singleline).Groups["body"].Value;
             var skip = offer.IndexOf("if (NetworkRecovery.AlreadyRecorded(outcome)) continue;", StringComparison.Ordinal);
             var log = offer.IndexOf("store.Log(user, \"Transação de rede interrompida", StringComparison.Ordinal);
@@ -387,11 +387,12 @@ internal static class NetworkFollowUpChecks
             assert(marks.Length == 2 && rendered > attach && marks.Contains(rendered + "RenderEntry(origin.Entries[^1]); ".Length)
                 && marks.Max() > post && marks.Max() < offer.IndexOf("posted = true;", StringComparison.Ordinal),
                 "Aviso de rede (@qa): na abertura, a marca de aviso já mostrado é gravada depois do AddEntry ou do RenderEntry, nunca antes da entrega");
-            var change = File.ReadAllText(Path.Combine(sources, "Code", "NetworkChange.cs"));
+            // O checkout do Windows (CI e PC) traz os fontes com CRLF; a busca é feita no texto em LF.
+            var change = File.ReadAllText(Path.Combine(sources, "Code", "NetworkChange.cs")).ReplaceLineEndings("\n");
             var recover = change.IndexOf("var recovery = await NetworkRecovery.Recover(interrupted", StringComparison.Ordinal);
             var delivered = change.IndexOf("var outcome = JsonSerializer.Serialize(new { success = false, changed = !unchanged", StringComparison.Ordinal);
             var sessionMark = change.IndexOf("NetworkRecovery.MarkNotified(interrupted, recovery);", StringComparison.Ordinal);
-            var recoverSource = File.ReadAllText(Path.Combine(sources, "Code", "NetworkRecovery.cs"));
+            var recoverSource = File.ReadAllText(Path.Combine(sources, "Code", "NetworkRecovery.cs")).ReplaceLineEndings("\n");
             var recoverBody = string.Join("\n", recoverSource[recoverSource.IndexOf("public static async Task<string> Recover(", StringComparison.Ordinal)..recoverSource.IndexOf("public static string Explain(", StringComparison.Ordinal)]
                 .Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
             assert(recover >= 0 && delivered > recover && sessionMark > delivered && change.Contains("NetworkRecovery.MarkNotified(interrupted, recovery);\n        return outcome;", StringComparison.Ordinal)
