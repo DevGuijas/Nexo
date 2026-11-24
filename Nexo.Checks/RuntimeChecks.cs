@@ -6,7 +6,7 @@ using Nexo.Support;
 namespace Nexo.Checks;
 
 /// <summary>
-/// #150: cartão "Componentes do Windows para jogos e programas". Registro, arquivos, download, assinatura e processo são simulados;
+/// #150: cartão "Componentes do Windows para programas". Registro, arquivos, download, assinatura e processo são simulados;
 /// nenhum teste toca o registro, a rede ou o UAC de verdade.
 /// </summary>
 internal static class RuntimeChecks
@@ -642,9 +642,9 @@ internal static class RuntimeChecks
         string[] accepted =
         [
             "Não posso instalar o DirectX pelo chat.",
-            "Posso explicar como instalar o Visual C++ pelo cartão Componentes do Windows para jogos e programas, em Ferramentas.",
-            "Posso indicar onde instalar o DirectX: no cartão Componentes do Windows para jogos e programas, no menu Ferramentas.",
-            "Você pode instalar o VC++ pelo cartão Componentes do Windows para jogos e programas, em Ferramentas.",
+            "Posso explicar como instalar o Visual C++ pelo cartão Componentes do Windows para programas, em Ferramentas.",
+            "Posso indicar onde instalar o DirectX: no cartão Componentes do Windows para programas, no menu Ferramentas.",
+            "Você pode instalar o VC++ pelo cartão Componentes do Windows para programas, em Ferramentas.",
             "Posso instalar o driver da placa de vídeo com a sua autorização.",
             "Vou reinstalar o driver de vídeo.",
             "Posso verificar a versão do DirectX no relatório.",
@@ -659,7 +659,7 @@ internal static class RuntimeChecks
             "Posso ajudar a entender por que o FPS fica baixo com o DirectX 12.",
             "Posso conferir se há atualização do .NET no Windows Update.",
             "Vou listar os pacotes instalados do Visual C++ que aparecem no relatório.",
-            "Posso explicar o que é e como instalar o Visual C++ pelo cartão Componentes do Windows para jogos e programas.",
+            "Posso explicar o que é e como instalar o Visual C++ pelo cartão Componentes do Windows para programas.",
             "Posso indicar o cartão onde você pode instalar o DirectX, em Ferramentas.",
             "Posso analisar o erro do instalador do DirectX que apareceu na tela.",
         ];
@@ -680,7 +680,7 @@ internal static class RuntimeChecks
         var code = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "MainWindow.xaml.cs"));
         var install = Regex.Match(code, @"private async Task InstallRuntimes\(\).*?\n    \}", RegexOptions.Singleline).Value;
         var render = Regex.Match(code, @"private void RenderRuntimeList\(\).*?\n    \}", RegexOptions.Singleline).Value;
-        check(code.Contains("ToolCard(4, \"Jogos · programas\", RuntimePresentation.CardTitle") && code.Contains("Action(\"Verificar este PC\", async (_, _) => await GuardAsync(ScanRuntimes), icon: \"search\")")
+        check(code.Contains("ToolCard(4, \"Programas · bibliotecas\", RuntimePresentation.CardTitle") && code.Contains("Action(\"Verificar este PC\", async (_, _) => await GuardAsync(ScanRuntimes), icon: \"search\")")
             && code.Contains("Action(\"Instalar selecionados\", async (_, _) => await GuardAsync(InstallRuntimes), true)") && code.Contains("officeRunning || optimizationRunning || debloatRunning || runtimeRunning"),
             "#150 cartão: 04 em Ferramentas, Verificar (secundário) e Instalar selecionados (primário), e o Nexo não fecha no meio da instalação");
         check(install.IndexOf("ConfirmQuestion", StringComparison.Ordinal) is > 0 and var confirm && install.IndexOf("RuntimeInstaller.InstallAsync", StringComparison.Ordinal) > confirm

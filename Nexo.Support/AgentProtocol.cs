@@ -171,7 +171,7 @@ public static class AgentProtocol
         && RemovalOffer.Matches(sentence).Any(offer => !Regex.IsMatch(sentence[..offer.Index], @"\b(?:nao|nem|nunca)\s+(?:\w+\s+){0,2}$")));
 
     // Componentes do Windows (#150): o Visual C++ Redistributable, o DirectX e o .NET são instalados só pelo cartão
-    // "Componentes do Windows para jogos e programas", no menu Ferramentas, com os instaladores oficiais da Microsoft, a
+    // "Componentes do Windows para programas", no menu Ferramentas, com os instaladores oficiais da Microsoft, a
     // assinatura conferida e o UAC. O modelo não oferece nem executa essa instalação pelo chat, como na remoção de apps (#127)
     // e no driver do sensor (#135). É recusada a oferta em 1ª pessoa de instalar, reinstalar, baixar, atualizar ou reparar um
     // desses componentes, com ele a até quatro palavras do verbo. Passam a negação antes da oferta ("não posso instalar o
@@ -184,7 +184,7 @@ public static class AgentProtocol
     // download" e "executar o instalador" também são oferta. A orientação só vale quando nada coordenado ("e", "mas", "ou",
     // "depois", "também", "já") separa o verbo de orientar da instalação: "posso explicar o erro e já instalar o VC++" é oferta.
     internal const string RuntimeInstallReason = "A resposta oferece instalar, baixar ou atualizar o Visual C++ Redistributable, o DirectX ou o .NET, e o Nexo não faz isso pelo chat. Tire essa oferta e mantenha o resto da resposta. Se o usuário quiser instalar esses componentes, indique o cartão “" + RuntimeCard + "”, no menu Ferramentas, onde “Verificar este PC” mostra o que falta neste PC e só os instaladores oficiais da Microsoft são usados.";
-    internal const string RuntimeCard = "Componentes do Windows para jogos e programas";
+    internal const string RuntimeCard = "Componentes do Windows para programas";
     private const string RuntimeObject = @"(?:(?:visual )?c\+\+|vc\+\+|vc_?redist\w*|redistribu\w*|directx|dxsetup|dxwebsetup|d3dx\w*|xinput\w*|xaudio\w*|\.net\b|dotnet\b|net framework\b|bibliotecas? (?:do|de) (?:visual|runtime|jogos?)\b)";
     private const string RuntimeStem = @"(?:reinstal|instal|baix|atualiz|repar)";
     private const string RuntimeVerb = @"(?:(?!repar(?:e|em)\s+que\b)" + RuntimeStem + @"(?:ar(?:ei|emos|ia|iamos|mos)?|e|em|emos|ando|asse|assem|assemos|a-(?:lo|la|los|las))"

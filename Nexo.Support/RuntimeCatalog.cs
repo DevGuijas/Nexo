@@ -4,7 +4,7 @@ public enum RuntimeArch { X86, X64 }
 public enum RuntimeKind { VisualCpp, DirectX }
 
 /// <summary>
-/// Um componente do cartão "Componentes do Windows para jogos e programas" (#150). <see cref="Sha256"/> e <see cref="Size"/> só
+/// Um componente do cartão "Componentes do Windows para programas" (#150). <see cref="Sha256"/> e <see cref="Size"/> só
 /// existem nos instaladores de URL fixa e conteúdo imutável; no VC++ v14 (2015–2026), o link permanente da Microsoft muda de
 /// versão, e o arquivo é aceito pela assinatura Authenticode da Microsoft e pelo tamanho até <see cref="MaxSize"/>. <see cref="Root"/> é a
 /// impressão digital SHA-1 do certificado raiz em que a cadeia do assinante tem de terminar.

@@ -66,7 +66,7 @@ public partial class MainWindow : Window
     private Button? debloatUndoView;
     private Button? debloatCancelView;
     private readonly object debloatAuditSync = new();
-    // Componentes do Windows para jogos e programas (#150).
+    // Componentes do Windows para programas (#150).
     private CancellationTokenSource? runtimeCancellation;
     private bool runtimeRunning;
     private string runtimeStatus = "Nenhuma verificação iniciada nesta sessão.";
@@ -1178,7 +1178,7 @@ public partial class MainWindow : Window
         overview.Children.Add(ToolCard(1, "Instalação", "Instalar Office", "Office LTSC 2024 com o aviso de licença por volume.", "Microsoft · Office LTSC 2024", officeCard));
         overview.Children.Add(ToolCard(2, "Manutenção", "Otimizar PC", "Temporários antigos e manutenção nativa dos discos.", "Temporários · disco", optimizeCard));
         overview.Children.Add(ToolCard(3, "Privacidade · aparência", "Apps pré-instalados e ajustes do Windows", "Apps que vêm com o Windows e ajustes, aplicados só depois da sua confirmação.", "Apps · serviços · ajustes", debloatCard));
-        overview.Children.Add(ToolCard(4, "Jogos · programas", RuntimePresentation.CardTitle, "Visual C++, DirectX e .NET: o que falta neste PC, instalado só pelos instaladores oficiais da Microsoft.", "VC++ · DirectX · .NET", runtimeCard));
+        overview.Children.Add(ToolCard(4, "Programas · bibliotecas", RuntimePresentation.CardTitle, "Visual C++, DirectX e .NET: o que falta neste PC, instalado só pelos instaladores oficiais da Microsoft.", "VC++ · DirectX · .NET", runtimeCard));
         UpdateToolsView();
     }
     // Situação da ferramenta numa faixa própria, com o rótulo em mono.
@@ -1367,7 +1367,7 @@ public partial class MainWindow : Window
     {
         var panel = new StackPanel();
         panel.Children.Add(SectionHeading("tools", RuntimePresentation.CardTitle));
-        panel.Children.Add(Text("Muitos jogos e programas não abrem quando falta um Visual C++ Redistributable ou uma DLL do DirectX antigo (d3dx9_43.dll, xinput1_3.dll). Primeiro o Nexo verifica o que existe neste PC, sem alterar nada; depois instala só o que você marcar.", 13, "Secondary"));
+        panel.Children.Add(Text("Muitos programas não abrem quando falta um Visual C++ Redistributable ou uma DLL do DirectX antigo (d3dx9_43.dll, xinput1_3.dll). Primeiro o Nexo verifica o que existe neste PC, sem alterar nada; depois instala só o que você marcar.", 13, "Secondary"));
         panel.Children.Add(Text(RuntimePresentation.CardNotice, 12, "Secondary"));
         runtimeProgressView = Text(runtimeStatus, 13, "Ink");
         panel.Children.Add(ToolStatus(runtimeProgressView));

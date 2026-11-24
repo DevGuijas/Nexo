@@ -1,4 +1,4 @@
-# Componentes do Windows para jogos e programas (#150)
+# Componentes do Windows para programas (#150)
 
 Cartão 04 de **Ferramentas**. Ele verifica, só lendo o registro e os arquivos, o Visual C++ Redistributable (2005 a 2015–2022, x86 e x64), as DLLs do DirectX End-User Runtime de junho de 2010 e a versão do .NET Framework. Depois instala só o que o usuário marcar, sempre pelo instalador oficial da Microsoft.
 

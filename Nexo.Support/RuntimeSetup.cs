@@ -403,7 +403,7 @@ public static class RuntimeInstaller
 /// <summary>Textos do cartão, sem depender do WPF.</summary>
 public static class RuntimePresentation
 {
-    public const string CardTitle = "Componentes do Windows para jogos e programas";
+    public const string CardTitle = "Componentes do Windows para programas";
     public const string CardNotice = "O Nexo verifica o Visual C++ Redistributable (2005 a 2015–2022, x86 e x64), o DirectX End-User Runtime de junho de 2010 e a versão do .NET Framework. Ele instala só o que você marcar, sempre pelo instalador oficial da Microsoft, com a assinatura conferida antes do UAC. O Nexo não mexe em antivírus, anticheat nem serviços do Windows.";
 
     public static string ConfirmQuestion(IEnumerable<RuntimeItem> items) =>
