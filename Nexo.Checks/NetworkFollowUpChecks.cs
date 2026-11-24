@@ -262,14 +262,23 @@ internal static class NetworkFollowUpChecks
             if (applied) File.WriteAllText(Path.Combine(secured, "applied.json"), "{}");
             return dir;
         }
-        async Task<Opening> Open(string dir, DateTimeOffset at)
+        // Uma abertura como o OfferNetworkRecovery: Recover, entrega do aviso e, só depois dela, a marca (MarkNotified).
+        // deliver: false simula a entrega que falhou (store.Save() do AddEntry lançou, ou o app caiu) antes da marca.
+        async Task<Opening> Open(string dir, DateTimeOffset at, bool deliver = true)
         {
             var item = NetworkRecovery.Scan(local, at, _ => false, trust).FirstOrDefault(i => i.Directory == dir);
             if (item == null) return new Opening(null, null, 0, 0);
             var prompts = 0; var starts = 0;
             var outcome = await NetworkRecovery.Recover(item, request => { prompts++; request.OnDismissed?.Invoke(); return Task.FromResult(false); },
                 _ => { starts++; return new FakeProcess(); }, TimeSpan.FromSeconds(1), CancellationToken.None, (_, _) => Task.FromResult<string?>(null));
-            return new Opening(item, outcome, prompts, starts);
+            var opening = new Opening(item, outcome, prompts, starts);
+            try
+            {
+                if (opening.Posts && !deliver) throw new IOException("store.Save() falhou ao gravar o aviso");
+                if (opening.Posts) NetworkRecovery.MarkNotified(item, outcome);
+            }
+            catch (IOException) { }
+            return opening;
         }
         string[] Protected(string dir) => Directory.GetFiles(Path.Combine(protectedRoot, Path.GetFileName(dir))).OrderBy(f => f, StringComparer.Ordinal)
             .Select(f => Path.GetFileName(f) + "=" + File.ReadAllText(f)).ToArray();
@@ -332,6 +341,28 @@ internal static class NetworkFollowUpChecks
                 "Aviso de rede: a transação que ainda pede restaurar ou manter continua oferecida em toda abertura; a marca de aviso não a esconde"
                 + $" · janelas {pendingFirst.Prompts}/{pendingSecond.Prompts}");
 
+            // A entrega que falha antes da marca (store.Save() do AddEntry, ou o app que cai): a abertura seguinte avisa de novo. O
+            // Recover sozinho não grava a marca; só a entrega concluída a grava.
+            var lost = Operation("keeping", created);
+            var lostFirst = await Open(lost, now, deliver: false);
+            var lostMarked = File.Exists(Path.Combine(lost, NetworkRecovery.ResultFile)) && File.ReadAllText(Path.Combine(lost, NetworkRecovery.ResultFile)).Contains("\"notified\"");
+            var lostSecond = await Open(lost, now.AddMinutes(5), deliver: false);
+            var lostThird = await Open(lost, now.AddMinutes(10));
+            var lostFourth = await Open(lost, now.AddMinutes(15));
+            assert(lostFirst.Posts && !lostMarked && lostSecond.Posts && lostThird.Posts && !lostFourth.Posts,
+                "Aviso de rede (@qa): a marca é gravada só depois de o aviso ser entregue; se a entrega falhar, a abertura seguinte avisa de novo"
+                + $" · posta {lostFirst.Posts}/{lostSecond.Posts}/{lostThird.Posts}/{lostFourth.Posts}, marca antes da entrega {lostMarked}");
+            // MarkNotified não marca uma transação pendente nem um resultado diferente do aviso informativo.
+            File.Delete(Path.Combine(pending, NetworkRecovery.ResultFile));
+            var pendingItem = NetworkRecovery.Inspect(pending, now, _ => false, trust: trust)!;
+            NetworkRecovery.MarkNotified(pendingItem, NetworkRecovery.PostponedMessage);
+            File.Delete(Path.Combine(lost, NetworkRecovery.ResultFile));
+            var lostItem = NetworkRecovery.Inspect(lost, now, _ => false, trust: trust)!;
+            NetworkRecovery.MarkNotified(lostItem, JsonSerializer.Serialize(new { success = false, error = "Confirmação indisponível." }));
+            assert(pendingItem.Resolution == null && lostItem.Resolution != null && !NetworkRecovery.AlreadyRecorded(lostItem.Resolution)
+                && !File.Exists(Path.Combine(pending, NetworkRecovery.ResultFile)) && !File.ReadAllText(Path.Combine(lost, NetworkRecovery.ResultFile)).Contains("\"notified\""),
+                "Aviso de rede (@qa): a marca só é gravada para o aviso informativo que saiu; transação pendente ou outro resultado não são marcados");
+
             // A marca apagada só faz o aviso voltar, uma vez.
             File.Delete(Path.Combine(keeping, NetworkRecovery.ResultFile));
             var erasedFirst = await Open(keeping, now.AddHours(6));
@@ -349,6 +380,23 @@ internal static class NetworkFollowUpChecks
             assert(log >= 0 && skip > log && attach > skip && post > skip && offer.IndexOf("posted = true;", StringComparison.Ordinal) > post
                 && offer.Contains("if (posted && page != \"chat\") ShowPage(\"chat\");"),
                 "Aviso de rede: na abertura, o resultado já registrado vai só para o log, antes da conversa de origem, do aviso e da troca para o Assistente");
+            // @qa: a marca vem depois da entrega, nos dois caminhos do chat da abertura, e não antes do Recover devolver.
+            var mark = "NetworkRecovery.MarkNotified(item, outcome);";
+            var marks = System.Text.RegularExpressions.Regex.Matches(offer, System.Text.RegularExpressions.Regex.Escape(mark)).Select(m => m.Index).ToArray();
+            var rendered = offer.IndexOf("RenderEntry(origin.Entries[^1]); " + mark + " continue;", StringComparison.Ordinal);
+            assert(marks.Length == 2 && rendered > attach && marks.Contains(rendered + "RenderEntry(origin.Entries[^1]); ".Length)
+                && marks.Max() > post && marks.Max() < offer.IndexOf("posted = true;", StringComparison.Ordinal),
+                "Aviso de rede (@qa): na abertura, a marca de aviso já mostrado é gravada depois do AddEntry ou do RenderEntry, nunca antes da entrega");
+            var change = File.ReadAllText(Path.Combine(sources, "Code", "NetworkChange.cs"));
+            var recover = change.IndexOf("var recovery = await NetworkRecovery.Recover(interrupted", StringComparison.Ordinal);
+            var delivered = change.IndexOf("var outcome = JsonSerializer.Serialize(new { success = false, changed = !unchanged", StringComparison.Ordinal);
+            var sessionMark = change.IndexOf("NetworkRecovery.MarkNotified(interrupted, recovery);", StringComparison.Ordinal);
+            var recoverSource = File.ReadAllText(Path.Combine(sources, "Code", "NetworkRecovery.cs"));
+            var recoverBody = string.Join("\n", recoverSource[recoverSource.IndexOf("public static async Task<string> Recover(", StringComparison.Ordinal)..recoverSource.IndexOf("public static string Explain(", StringComparison.Ordinal)]
+                .Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+            assert(recover >= 0 && delivered > recover && sessionMark > delivered && change.Contains("NetworkRecovery.MarkNotified(interrupted, recovery);\n        return outcome;", StringComparison.Ordinal)
+                && !recoverBody.Contains("MarkNotified") && !recoverBody.Contains("notified"),
+                "Aviso de rede (@qa): na sessão, a marca vem depois de montar o resultado entregue; o Recover só lê a marca, não a grava");
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { } }
     }

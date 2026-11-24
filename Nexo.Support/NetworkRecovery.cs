@@ -470,8 +470,9 @@ public static class NetworkRecovery
     {
         try
         {
-        // Estado que não pede decisão: o aviso sai uma vez por transação; nas aberturas seguintes ele volta como já registrado.
-        if (item.Resolution != null) return await RecordNotice(item).ConfigureAwait(false);
+        // Estado que não pede decisão: devolvido como está. A marca de aviso já mostrado não é gravada aqui, só depois da entrega
+        // (MarkNotified); com a marca, o Inspect já devolve o resultado como já registrado.
+        if (item.Resolution != null) return item.Resolution;
         if (item.Before == null) throw new InvalidOperationException("Transação sem backup validado.");
         var resultPath = Path.Combine(item.Directory, ResultFile);
         var backup = Path.Combine(item.ProtectedDirectory ?? item.Directory, "before.json");
@@ -730,27 +731,25 @@ public static class NetworkRecovery
     }
 
     /// <summary>
-    /// Depois de entregar o aviso de um estado que não pede decisão, grava a marca local (resultado + notified, id e Created) para
-    /// que a abertura seguinte só registre no log. Sem a gravação, o aviso volta na próxima abertura, como antes.
+    /// Chamado por quem mostra o resultado, só depois de o aviso ter sido entregue (no chat da abertura ou no resultado da alteração
+    /// na sessão): grava a marca local (resultado + notified, id e Created) para que a abertura seguinte só registre no log. Só marca
+    /// o resultado informativo de um estado que não pede decisão, e só quando foi ele que saiu; uma transação pendente ou um resultado
+    /// já registrado não mudam nada. Se a entrega falhar antes desta chamada, ou a gravação falhar, o aviso volta na próxima abertura.
     /// </summary>
-    private static async Task<string> RecordNotice(InterruptedNetworkTransaction item)
+    public static void MarkNotified(InterruptedNetworkTransaction item, string delivered)
     {
-        var resolution = item.Resolution!;
-        if (AlreadyRecorded(resolution)) return resolution;
+        if (item.Resolution == null || delivered != item.Resolution || AlreadyRecorded(delivered)) return;
         try
         {
-            if (JsonNode.Parse(resolution) is JsonObject marked)
-            {
-                var (id, created) = NoticeKey(item.Directory, item.Record);
-                marked["notified"] = true;
-                marked["operationId"] = id;
-                marked["created"] = created;
-                marked["recordedAt"] = DateTimeOffset.UtcNow;
-                await WriteTextAtomic(Path.Combine(item.Directory, ResultFile), marked.ToJsonString()).ConfigureAwait(false);
-            }
+            if (JsonNode.Parse(delivered) is not JsonObject marked) return;
+            var (id, created) = NoticeKey(item.Directory, item.Record);
+            marked["notified"] = true;
+            marked["operationId"] = id;
+            marked["created"] = created;
+            marked["recordedAt"] = DateTimeOffset.UtcNow;
+            WriteTextAtomic(Path.Combine(item.Directory, ResultFile), marked.ToJsonString()).GetAwaiter().GetResult();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { }
-        return resolution;
     }
 
     private static string ReadDecision(string directory)

@@ -887,9 +887,11 @@ public partial class MainWindow : Window
                 Conversation? origin = null;
                 try { origin = NetworkRecovery.AttachToOrigin(store, user, item.Directory, outcome, DateTimeOffset.Now); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { store.Log(user, "Resultado da recuperação de rede não anexado à conversa de origem: " + ex.Message); }
-                if (origin != null && ReferenceEquals(origin, conversation)) { RenderEntry(origin.Entries[^1]); continue; }
+                // A marca de aviso já mostrado só é gravada depois de o aviso estar no chat: se a entrega falhar, ele volta na próxima abertura.
+                if (origin != null && ReferenceEquals(origin, conversation)) { RenderEntry(origin.Entries[^1]); NetworkRecovery.MarkNotified(item, outcome); continue; }
                 AddEntry("assistant", "Encontrei uma alteração de rede que não terminou.\n\n" + message
                     + (origin != null ? "\n\nO resultado também foi registrado no atendimento “" + origin.Title + "”." : ""), NetworkRecovery.Restored(outcome) ? "result" : "error");
+                NetworkRecovery.MarkNotified(item, outcome);
                 posted = true;
             }
         }

@@ -98,6 +98,11 @@ internal static class NetworkRecoveryChecks
             check(prompts.SequenceEqual(["Manter a configuração de rede?"]) && kept.RecoveryStarts == 0 && !Flag(kept.Result, "reverted")
                 && Text(kept.Result.GetProperty("recovery"), "message").Contains("não foi conferida") && File.Exists(Path.Combine(kept.Directory, NetworkRecovery.ResultFile)),
                 "Rede: executor encerrado após confirmação de manter registra a incerteza sem desfazer a escolha");
+            // O resultado de keeping foi entregue na sessão: a abertura seguinte só o registra no log, sem aviso no chat.
+            var keptNext = NetworkRecovery.Inspect(kept.Directory, DateTimeOffset.UtcNow.AddMinutes(11), _ => false, trust: trust);
+            check(File.ReadAllText(Path.Combine(kept.Directory, NetworkRecovery.ResultFile)).Contains("\"notified\":true")
+                && keptNext?.Resolution is { } keptResolution && NetworkRecovery.AlreadyRecorded(keptResolution),
+                "Aviso de rede: o resultado de keeping entregue na sessão fica marcado, e a abertura seguinte não repete o aviso");
 
             prompts.Clear();
             var declined = await Apply(store, trust, async (dir, _) => await Backup(dir, protectedRoot, Before), prompts, false);
