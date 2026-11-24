@@ -74,12 +74,37 @@ internal static class LiveSensorChecks
         check(SystemSensorReader.RunLoop(["--sensor-loop"], exe, folder, false, null) == 3 && SystemSensorReader.RunLoop(["--sensor-loop"], exe, folder, true, only) == 3,
             "#142 leitor do sistema: no caminho certo (build ou single-file sem extração), mas sem ser SYSTEM, sai com código 3");
 
-        // P9: a busca de DLLs é restringida antes de o loop fazer qualquer coisa; se não der, código 5 e o loop não roda.
+        // P9: a busca de DLLs é restringida e o PATH é fixado antes de o loop fazer qualquer coisa; se não der, código 5 e o loop não roda.
         var calls = new List<string>();
-        var ran = SensorLoopEntry.Run(["--sensor-loop"], () => { calls.Add("restrict"); return true; }, args => { calls.Add("loop " + string.Join(" ", args)); return 3; });
-        var blocked = SensorLoopEntry.Run(["--sensor-loop"], () => { calls.Add("restrict"); return false; }, _ => { calls.Add("loop"); return 0; });
-        check(ran == 3 && blocked == 5 && calls.SequenceEqual(["restrict", "loop --sensor-loop", "restrict"]),
-            "#142 P9: --sensor-loop restringe a busca de DLLs antes do loop; sem a restrição, sai com código 5 sem rodar o loop: " + string.Join(", ", calls));
+        var ran = SensorLoopEntry.Run(["--sensor-loop"], () => { calls.Add("restrict"); return true; }, () => { calls.Add("path"); return true; }, args => { calls.Add("loop " + string.Join(" ", args)); return 3; });
+        var blocked = SensorLoopEntry.Run(["--sensor-loop"], () => { calls.Add("restrict"); return false; }, () => { calls.Add("path"); return true; }, _ => { calls.Add("loop"); return 0; });
+        var unfixed = SensorLoopEntry.Run(["--sensor-loop"], () => { calls.Add("restrict"); return true; }, () => { calls.Add("path"); return false; }, _ => { calls.Add("loop"); return 0; });
+        check(ran == 3 && blocked == 5 && unfixed == 5 && calls.SequenceEqual(["restrict", "path", "loop --sensor-loop", "restrict", "restrict", "path"]),
+            "#142 P9: --sensor-loop restringe a busca de DLLs e depois fixa o PATH, antes do loop; sem uma das duas, sai com código 5 sem rodar o loop: " + string.Join(", ", calls));
+
+        // B1, item 4: o PATH do loop é só System32, Windows e System32\Wbem, das pastas que o Windows informa, nunca do ambiente.
+        var windows = OperatingSystem.IsWindows() ? @"C:\Windows" : "/Windows";
+        var system32 = Path.Combine(windows, "System32");
+        var fixedPath = string.Join(Path.PathSeparator, system32, windows, Path.Combine(system32, "Wbem"));
+        string? assigned = null, notAssigned = null;
+        var fixedOk = SensorLoopEntry.FixPath(system32 + Path.DirectorySeparatorChar, windows, value => assigned = value);
+        var fixedBad = SensorLoopEntry.FixPath("", windows, value => notAssigned = value) || SensorLoopEntry.FixPath(system32, "Windows", value => notAssigned = value)
+            || SensorLoopEntry.FixPath(null, windows, value => notAssigned = value) || SensorLoopEntry.FixPath("System32", windows, value => notAssigned = value);
+        check(fixedOk && assigned == fixedPath && !fixedBad && notAssigned == null && SensorLoopEntry.SystemPath(system32, windows) == fixedPath,
+            "#142 B1: o PATH fixado no --sensor-loop é System32;Windows;System32\\Wbem; sem uma pasta completa do Windows, não fixa (e o loop sai com 5): " + assigned);
+        if (OperatingSystem.IsWindows())
+        {
+            var saved = Environment.GetEnvironmentVariable("PATH");
+            try
+            {
+                Environment.SetEnvironmentVariable("PATH", @"C:\Users\Public\plantado;" + saved);
+                var real = SensorLoopEntry.FixPath();
+                var expected = string.Join(';', Environment.GetFolderPath(Environment.SpecialFolder.System), Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "Wbem"));
+                check(real && Environment.GetEnvironmentVariable("PATH") == expected, "#142 B1: no Windows, o PATH do processo vira exatamente " + expected + " (o PATH herdado some)");
+            }
+            finally { Environment.SetEnvironmentVariable("PATH", saved); }
+        }
         var import = typeof(NativeDllSearch).GetMethod("SetDefaultDllDirectories", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
         var dll = import?.GetCustomAttributes(typeof(System.Runtime.InteropServices.DllImportAttribute), false).OfType<System.Runtime.InteropServices.DllImportAttribute>().FirstOrDefault();
         var code = Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Code");
@@ -87,8 +112,13 @@ internal static class LiveSensorChecks
         var restrict = reader[reader.IndexOf("public static bool Restrict()", StringComparison.Ordinal)..];
         restrict = restrict[..restrict.IndexOf("\n    }", StringComparison.Ordinal)];
         check(dll != null && string.Equals(dll.Value, "kernel32.dll", StringComparison.OrdinalIgnoreCase) && NativeDllSearch.Flags == 0x0A00
-            && restrict.Contains("SetDefaultDllDirectories(Flags)") && reader.Contains("public static int Run(string[] args) => Run(args, NativeDllSearch.Restrict, SystemSensorReader.RunLoop);"),
-            "#142 P9: a restrição é SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32) do kernel32, e a entrada do modo usa ela antes do RunLoop");
+            && restrict.Contains("SetDefaultDllDirectories(Flags)") && reader.Contains("public static int Run(string[] args) => Run(args, NativeDllSearch.Restrict, FixPath, SystemSensorReader.RunLoop);"),
+            "#142 P9: a restrição é SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32) do kernel32, e a entrada do modo usa ela e o PATH fixo antes do RunLoop");
+        var entry = reader[reader.IndexOf("public static class SensorLoopEntry", StringComparison.Ordinal)..reader.IndexOf("public static class NativeDllSearch", StringComparison.Ordinal)];
+        check(entry.Contains("FixPath(Environment.GetFolderPath(Environment.SpecialFolder.System), Environment.GetFolderPath(Environment.SpecialFolder.Windows),")
+            && entry.Contains("Environment.SetEnvironmentVariable(\"PATH\", value)") && !entry.Contains("GetEnvironmentVariable") && !entry.Contains("ExpandEnvironmentVariables")
+            && !entry.Contains("SystemRoot") && !entry.Contains("windir", StringComparison.OrdinalIgnoreCase),
+            "#142 B1: o PATH fixo vem de Environment.GetFolderPath(System/Windows), sem ler %SystemRoot%, %windir% ou outra variável do ambiente");
         var program = File.ReadAllText(Path.Combine(code, "Program.cs")).ReplaceLineEndings("\n");
         var app = File.ReadAllText(Path.Combine(code, "App.xaml.cs"));
         var project = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Project", "Nexo.Support.csproj"));
@@ -98,6 +128,12 @@ internal static class LiveSensorChecks
         check(project.Contains("<StartupObject>Nexo.Support.Program</StartupObject>") && firstStatement.StartsWith("if (args.Length > 0 && string.Equals(args[0], SystemSensorReader.LoopArgument, StringComparison.Ordinal)) return SensorLoopEntry.Run(args);", StringComparison.Ordinal)
             && !main.Contains("new App") && !main.Contains("InitializeComponent") && program.Contains("new App()") && !app.Contains("SystemSensorReader.LoopArgument") && !app.Contains("RunLoop"),
             "#142 P9: o desvio do --sensor-loop é a primeira instrução do Main próprio (StartupObject), antes de o App e o InitializeComponent do WPF existirem; o OnStartup não tem mais esse desvio");
+        // B1, item 3: o WPF exige STA no thread do Main, e o código de saída do app volta pelo Main.
+        var attribute = program[..program.IndexOf("public static int Main(string[] args)", StringComparison.Ordinal)].TrimEnd().Split('\n')[^1].Trim();
+        var runApp = program[program.IndexOf("private static int RunApp()", StringComparison.Ordinal)..];
+        runApp = runApp[..runApp.IndexOf("\n    }", StringComparison.Ordinal)];
+        check(attribute == "[STAThread]" && main.TrimEnd().EndsWith("return RunApp();", StringComparison.Ordinal) && runApp.TrimEnd().EndsWith("return app.Run();", StringComparison.Ordinal),
+            "#142 B1: o Main próprio tem [STAThread] logo acima dele e devolve o código do app (return RunApp(); → return app.Run();): " + attribute);
     }
 
     private sealed class FakeLive : ILiveSensorSystem
@@ -621,10 +657,41 @@ internal static class LiveSensorChecks
             && !SystemSensorReader.Outdated("1.7.0", null, "1.7.0", "1.7.0+f627483") && !SystemSensorReader.Outdated("1.7.0", "1.7.0+f627483", "1.7.0", "")
             && WindowsLiveSensorSystem.CurrentBuild() is { Length: > 0 },
             "#142 P9: \"Atualizar leitor\" aparece com outra versão ou, na mesma versão, com outra compilação (ProductVersion com +commit diferente); sem a compilação de um dos lados, vale só a versão");
-        var window = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "MainWindow.xaml.cs"));
+        var window = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "MainWindow.xaml.cs")).ReplaceLineEndings("\n");
+        var reader = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Code", "SystemSensorReader.cs")).ReplaceLineEndings("\n");
         check(window.Contains("var outdated = SystemSensorReader.Outdated(installedVersion, WindowsLiveSensorSystem.InstalledBuild(), AppVersion.Current, WindowsLiveSensorSystem.CurrentBuild());")
             && window.Contains("if (outdated)"),
             "#142 P9: a Saúde do PC decide o \"Atualizar leitor\" pela versão e pela compilação do Nexo.exe instalado");
+        // B1, item 2: com extração no Nexo aberto (single-file e outra pasta na lista de busca nativa), Ativar e Atualizar recusam
+        // antes da confirmação e do UAC, pela mesma regra do loop; Desativar continua.
+        var appFolder = Path.Combine(Path.GetTempPath(), "Users", "u", "AppData", "Local", "Programs", "Nexo");
+        var extractedFolder = Path.Combine(Path.GetTempPath(), ".net", "Nexo", "f+bA_GNFZ5QUP6JUF_VSGKn3KwesrDI=");
+        string Dirs(params string[] folders) => string.Join(Path.PathSeparator, folders) + Path.PathSeparator;
+        string?[] extracted = [Dirs(extractedFolder, appFolder), Dirs(appFolder + Path.DirectorySeparatorChar, extractedFolder), Dirs(appFolder + "-x"), Dirs(appFolder, "extract"), null, ""];
+        var allowed = new List<string>();
+        foreach (var action in new[] { "install", "update" })
+            foreach (var dirs in extracted)
+                if (SystemSensorReader.CopyRefusal(action, true, dirs, appFolder) is not { } message || !message.StartsWith(SystemSensorReader.ExtractedBuildRefusal, StringComparison.Ordinal))
+                    allowed.Add(action + " · " + dirs);
+        check(allowed.Count == 0, "#142 B1: Ativar e Atualizar recusam o Nexo aberto com extração (pasta extraída, vizinha, relativa ou lista ausente)" + (allowed.Count > 0 ? " · aceitos: " + string.Join(" | ", allowed) : ""));
+        var refusal = SystemSensorReader.CopyRefusal("update", true, Dirs(appFolder, extractedFolder), appFolder) ?? "";
+        check(refusal.Contains("Esta compilação do Nexo não suporta o leitor de sensores do sistema") && refusal.Contains("Reinstale o Nexo com a versão atual") && refusal.Contains("Nada foi alterado")
+            && refusal.Contains(extractedFolder),
+            "#142 B1: a recusa diz que esta compilação não suporta o leitor, pede a reinstalação com a versão atual e mostra a pasta extraída: " + refusal);
+        check(SystemSensorReader.CopyRefusal("install", true, Dirs(appFolder + Path.DirectorySeparatorChar), appFolder) == null && SystemSensorReader.CopyRefusal("update", true, Dirs(appFolder, appFolder + Path.DirectorySeparatorChar), appFolder + Path.DirectorySeparatorChar) == null
+            && SystemSensorReader.CopyRefusal("install", false, Dirs(appFolder, extractedFolder), appFolder) == null && SystemSensorReader.CopyRefusal("remove", true, Dirs(extractedFolder), appFolder) == null
+            && SystemSensorReader.CopyRefusal("install") == null,
+            "#142 B1: sem extração (só a pasta do Nexo), na pasta do build (não single-file) e no Desativar, nada é recusado; o Nexo.Checks em si não é recusado");
+        var change = window[window.IndexOf("private async Task ChangeLiveReader(", StringComparison.Ordinal)..];
+        change = change[..change.IndexOf("\n    }", StringComparison.Ordinal)];
+        var refuseAt = change.IndexOf("if (SystemSensorReader.CopyRefusal(action) is { } refusal) { liveReaderStatus = refusal; RefreshMonitoredPage(); return; }", StringComparison.Ordinal);
+        var confirmAt = change.IndexOf("ConfirmChange(", StringComparison.Ordinal);
+        var elevatedAt = change.IndexOf("RunElevatedAsync", StringComparison.Ordinal);
+        var sources = reader[reader.IndexOf("public static (string Source, IReadOnlyList<string> Files) Sources()", StringComparison.Ordinal)..];
+        sources = sources[(sources.IndexOf('{') + 1)..].TrimStart();
+        check(refuseAt > 0 && confirmAt > refuseAt && elevatedAt > confirmAt && change.IndexOf("Sources()", StringComparison.Ordinal) > refuseAt
+            && sources.StartsWith("if (SystemSensorReader.CopyRefusal(\"install\") is { } refusal) throw new InvalidOperationException(refusal);", StringComparison.Ordinal),
+            "#142 B1: a recusa da extração vem antes da confirmação, da lista de arquivos e de qualquer chamada elevada; a lista de arquivos também recusa");
         var canceled = await SystemSensorReader.ApplyAsync((_, _) => Task.FromException<string>(new Win32Exception(1223)), "install", "s", CancellationToken.None);
         var done = await SystemSensorReader.ApplyAsync((_, _) => Task.FromResult("{\"success\":true,\"data\":{\"Task\":\"Nexo Sensores\"}}"), "install", "s", CancellationToken.None);
         var removed = await SystemSensorReader.ApplyAsync((_, _) => Task.FromResult("{\"success\":true}"), "remove", "s", CancellationToken.None);

@@ -92,8 +92,8 @@ public static class SystemSensorReader
     /// <summary>
     /// O "Atualizar leitor" aparece com versão diferente ou, na mesma versão, com outra compilação: o ProductVersion do Nexo.exe
     /// (a versão informativa, que o SDK do .NET 8 completa com "+commit" num checkout git) diferente da do Nexo aberto. Assim, uma
-    /// cópia antiga da mesma versão (a da tarefa com cmd.exe, #142 P9) também pode ser trocada. Sem o "+commit" nas duas, vale só a
-    /// versão, como antes.
+    /// cópia antiga da mesma versão (a da tarefa com cmd.exe, #142 P9) também pode ser trocada. Se a compilação faltar em um dos
+    /// lados (ProductVersion vazio no instalado ou no aberto), vale só a versão, como antes.
     /// </summary>
     public static bool Outdated(string installedVersion, string? installedBuild, string currentVersion, string? currentBuild) =>
         installedVersion != currentVersion || (!string.IsNullOrWhiteSpace(installedBuild) && !string.IsNullOrWhiteSpace(currentBuild) && !string.Equals(installedBuild.Trim(), currentBuild.Trim(), StringComparison.Ordinal));
@@ -155,10 +155,33 @@ public static class SystemSensorReader
     public static bool SingleFile => string.IsNullOrEmpty(typeof(SystemSensorReader).Assembly.Location);
     public const string NativeSearchProperty = "NATIVE_DLL_SEARCH_DIRECTORIES";
 
+    public const string ExtractedBuildRefusal = "Esta compilação do Nexo não suporta o leitor de sensores do sistema: ela extrai arquivos para uma pasta temporária ao abrir, e o leitor, como SYSTEM, recusaria a cópia (a tarefa sairia sempre com o código 2). Reinstale o Nexo com a versão atual do NexoSetup e tente de novo. Nada foi alterado.";
+
+    /// <summary>
+    /// Recusa do "Ativar temperatura ao vivo" e do "Atualizar leitor" antes da confirmação e do UAC (#142, B1): o Nexo aberto é
+    /// single-file e a lista de pastas de busca nativa do processo da interface tem outra pasta além da dele (a extração do
+    /// IncludeNativeLibrariesForSelfExtract), a mesma regra do --sensor-loop (Extracted). A cópia levaria o mesmo executável, e a
+    /// tarefa registrada sairia sempre com 2, depois de o host já ter extraído no %TEMP% do SYSTEM. Desativar nunca é recusado.
+    /// Devolve a mensagem ou null.
+    /// </summary>
+    public static string? CopyRefusal(string action, bool singleFile, string? nativeSearchDirectories, string appFolder)
+    {
+        if (action == "remove" || !singleFile) return null;
+        string folder;
+        try { folder = Path.IsPathFullyQualified(appFolder) ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(appFolder)) : ""; }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { folder = ""; }
+        if (folder.Length == 0) return ExtractedBuildRefusal + " (pasta do Nexo aberto indisponível)";
+        return Extracted(nativeSearchDirectories, folder) is { } extracted ? ExtractedBuildRefusal + " (pasta extraída: " + extracted + ")" : null;
+    }
+
+    /// <summary>A recusa acima para o Nexo aberto: single-file, NATIVE_DLL_SEARCH_DIRECTORIES do processo e a pasta do executável.</summary>
+    public static string? CopyRefusal(string action) =>
+        CopyRefusal(action, SingleFile, AppContext.GetData(NativeSearchProperty) as string, AppContext.BaseDirectory);
+
     /// <summary>
     /// Códigos: 2 recusado (argumentos, caminho ou arquivos extraídos do single-file), 3 não é SYSTEM, 4 pasta não confiável,
-    /// 5 a busca de DLLs não foi restringida (SensorLoopEntry), 6 o sensor não abriu; 0 outra instância já roda. Chamado só pelo
-    /// SensorLoopEntry, depois do SetDefaultDllDirectories.
+    /// 5 a busca de DLLs não foi restringida ou o PATH não foi fixado (SensorLoopEntry), 6 o sensor não abriu; 0 outra instância já roda. Chamado só pelo
+    /// SensorLoopEntry, depois do SetDefaultDllDirectories e do PATH fixo.
     /// </summary>
     public static int RunLoop(string[] args) =>
         RunLoop(args, Environment.ProcessPath, InstallFolder, SingleFile, AppContext.GetData(NativeSearchProperty) as string);
@@ -372,9 +395,11 @@ public static class SystemSensorReader
     /// <summary>
     /// Arquivos copiados: no Nexo publicado (single-file), o Nexo.exe e as .dll nativas do primeiro nível; na pasta do build, os .exe
     /// e .dll do primeiro nível mais o Nexo.runtimeconfig.json e o Nexo.deps.json. Subpastas (runtimes, ThirdParty) não vão: o modo
-    /// de leitura não as usa. O single-file publicado sem IncludeNativeLibrariesForSelfExtract (o comando do README) deixa as nativas
-    /// do WPF (wpfgfx_cor3.dll, PresentationNative_cor3.dll…) ao lado do .exe; sem elas na pasta protegida, o Nexo.exe como SYSTEM
-    /// as procuraria pela ordem de busca de DLL do Windows, que chega às pastas do PATH (@qa).
+    /// de leitura não as usa. Os dois builds publicados, o do README e o oficial (scripts/Build-CloudRelease.ps1, o nexo-app.zip do
+    /// NexoSetup), são single-file sem IncludeNativeLibrariesForSelfExtract: nada é extraído, e as nativas do WPF
+    /// (wpfgfx_cor3.dll, PresentationNative_cor3.dll…) ficam ao lado do .exe; sem elas na pasta protegida, o Nexo.exe como SYSTEM
+    /// as procuraria pela ordem de busca de DLL do Windows, que chega às pastas do PATH (@qa). Um build com extração é recusado
+    /// antes do UAC (CopyRefusal) e pelo próprio --sensor-loop (código 2).
     /// </summary>
     public static IReadOnlyList<string> FilesToCopy(bool singleFile, IEnumerable<string> names)
     {
@@ -615,6 +640,7 @@ public sealed class WindowsLiveSensorSystem : ILiveSensorSystem
     /// <summary>Arquivos do Nexo em execução para a cópia (pasta do app, só o primeiro nível).</summary>
     public static (string Source, IReadOnlyList<string> Files) Sources()
     {
+        if (SystemSensorReader.CopyRefusal("install") is { } refusal) throw new InvalidOperationException(refusal);
         var source = Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
         return (source, SystemSensorReader.FilesToCopy(SystemSensorReader.SingleFile, Directory.EnumerateFiles(source).Select(Path.GetFileName).OfType<string>()));
     }
@@ -627,14 +653,36 @@ public sealed class WindowsLiveSensorSystem : ILiveSensorSystem
 /// Entrada do modo --sensor-loop (#142, P9), chamada pelo Program.Main antes de qualquer tipo do WPF. A tarefa executa o Nexo.exe
 /// direto, sem cmd.exe e sem PATH fixo na linha de comando: a primeira coisa do processo é restringir a busca de DLLs à pasta do
 /// executável e ao System32 (SetDefaultDllDirectories), antes de carregar qualquer DLL nativa (WPF, LibreHardwareMonitor, PawnIO).
-/// Sem campos estáticos, para não disparar o inicializador do SystemSensorReader antes da restrição.
+/// Em seguida, o PATH do processo passa a ser só %SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem, resolvido pelo
+/// Windows (Environment.GetFolderPath) e nunca pelo ambiente herdado: a defesa que o cmd.exe dava, agora para o que ainda consulta
+/// o PATH (processos filhos, buscas sem caminho fora do LoadLibrary). Sem campos estáticos, para não disparar o inicializador do
+/// SystemSensorReader antes da restrição.
 /// </summary>
 public static class SensorLoopEntry
 {
-    public static int Run(string[] args) => Run(args, NativeDllSearch.Restrict, SystemSensorReader.RunLoop);
+    public static int Run(string[] args) => Run(args, NativeDllSearch.Restrict, FixPath, SystemSensorReader.RunLoop);
 
-    /// <summary>Código 5 quando a busca não foi restringida; senão, o código do loop.</summary>
-    internal static int Run(string[] args, Func<bool> restrictDllSearch, Func<string[], int> loop) => restrictDllSearch() ? loop(args) : 5;
+    /// <summary>Código 5 quando a busca não foi restringida ou o PATH não foi fixado; senão, o código do loop.</summary>
+    internal static int Run(string[] args, Func<bool> restrictDllSearch, Func<bool> fixPath, Func<string[], int> loop) =>
+        restrictDllSearch() && fixPath() ? loop(args) : 5;
+
+    /// <summary>O PATH fixo a partir das pastas System32 e Windows; null se alguma não for um caminho completo.</summary>
+    internal static string? SystemPath(string? system, string? windows)
+    {
+        if (string.IsNullOrEmpty(system) || string.IsNullOrEmpty(windows) || !Path.IsPathFullyQualified(system) || !Path.IsPathFullyQualified(windows)) return null;
+        system = Path.TrimEndingDirectorySeparator(system);
+        return string.Join(Path.PathSeparator, system, Path.TrimEndingDirectorySeparator(windows), Path.Combine(system, "Wbem"));
+    }
+
+    internal static bool FixPath() => FixPath(Environment.GetFolderPath(Environment.SpecialFolder.System), Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+        value => Environment.SetEnvironmentVariable("PATH", value));
+
+    internal static bool FixPath(string? system, string? windows, Action<string> setPath)
+    {
+        if (SystemPath(system, windows) is not { } path) return false;
+        setPath(path);
+        return true;
+    }
 }
 
 /// <summary>

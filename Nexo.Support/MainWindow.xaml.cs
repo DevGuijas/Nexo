@@ -1313,6 +1313,8 @@ public partial class MainWindow : Window
     private async Task ChangeLiveReader(string action, string installedVersion = "")
     {
         if (liveReaderRunning) return;
+        // #142, B1: um Nexo aberto com extração do single-file não ativa nem atualiza; a tarefa registrada sairia sempre com 2.
+        if (SystemSensorReader.CopyRefusal(action) is { } refusal) { liveReaderStatus = refusal; RefreshMonitoredPage(); return; }
         var (title, details) = action switch
         {
             "remove" => (SystemSensorReader.DeactivateTitle, SystemSensorReader.DeactivateDetails),
