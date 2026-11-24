@@ -47,6 +47,8 @@ public interface IPawnIoInstallSystem
     Task<int?> RunElevated(string file, CancellationToken token);
     bool DriverInstalled();
     string WorkDirectory();
+    /// <summary>Primeiro link (reparse point) no arquivo ou em qualquer pasta acima dele, ou null.</summary>
+    string? Linked(string file);
 }
 
 /// <summary>
@@ -101,13 +103,24 @@ public static class PawnIoSetup
                 if (held.Length != Size) return Integrity($"o arquivo tem {held.Length} bytes, e o esperado é {Size}");
                 var hash = Convert.ToHexString(await SHA256.HashDataAsync(held, token)).ToLowerInvariant();
                 if (!string.Equals(hash, expectedSha256, StringComparison.Ordinal)) return Integrity("o SHA-256 não é o da release oficial");
+                // Com o arquivo aberto, as pastas acima dele não podem ser renomeadas; uma junção ou link no caminho ainda poderia
+                // ser reapontada antes do UAC, e o processo elevado abriria outro arquivo pelo mesmo caminho. Link no caminho: nada roda.
+                if (system.Linked(file) is { } link)
+                    return new("link", $"O caminho do instalador passa por um link ou junção ({link}). Por segurança, o arquivo foi apagado e nada foi executado.");
                 progress?.Report("Conferindo a assinatura digital do instalador...");
-                var (status, signer) = await system.Signature(file, token);
+                string status, signer;
+                try { (status, signer) = await system.Signature(file, token); }
+                catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or Win32Exception)
+                {
+                    return new("signature", "Não foi possível conferir a assinatura digital do instalador (" + Short(ex.Message) + "). O arquivo foi apagado e nada foi executado.");
+                }
                 subject = signer;
                 if (!string.Equals(status, "Valid", StringComparison.Ordinal))
                     return new("signature", $"A assinatura digital do instalador não é válida (estado: {(status.Length == 0 ? "desconhecido" : status)}). O arquivo foi apagado e nada foi executado.", Signer: signer);
                 progress?.Report("Aguardando a autorização de administrador (UAC) e o assistente do PawnIO...");
-                var exit = await system.RunElevated(file, token);
+                int? exit;
+                try { exit = await system.RunElevated(file, token); }
+                catch (Win32Exception ex) { return new("failed", "O Windows não abriu o instalador do PawnIO (" + Short(ex.Message) + "). Nada foi executado.", Signer: subject); }
                 if (exit == null) return new("canceled", "A autorização de administrador foi cancelada. O PawnIO não foi instalado.", Signer: subject);
                 if (system.DriverInstalled())
                     return new("installed", $"PawnIO {Version} instalado. Assinatura válida de: {Signer(subject)}. Para desinstalar: {Uninstall}.", exit, subject);
@@ -117,7 +130,7 @@ public static class PawnIoSetup
         }
         catch (HttpRequestException ex) { return Offline(ex.Message); }
         catch (TaskCanceledException ex) when (!token.IsCancellationRequested) { return Offline(ex.Message); }
-        catch (IOException ex) { return new("failed", "Não foi possível gravar ou ler o instalador na pasta temporária do Nexo: " + ex.Message); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return new("failed", "Não foi possível gravar ou ler o instalador na pasta temporária do Nexo: " + Short(ex.Message)); }
         finally
         {
             try { if (File.Exists(file)) File.Delete(file); if (Directory.Exists(directory)) Directory.Delete(directory, false); }
@@ -125,11 +138,12 @@ public static class PawnIoSetup
         }
     }
 
+    private static string Short(string detail) => detail.Length <= 200 ? detail : detail[..200];
     private static string Signer(string subject) => subject.Length == 0 ? "assinante não informado" : subject;
     private static PawnIoInstallResult Integrity(string reason) =>
         new("integrity", "O instalador baixado não confere com a release oficial " + Version + ": " + reason + ". O arquivo foi apagado e nada foi executado.");
     private static PawnIoInstallResult Offline(string detail) =>
-        new("network", "Sem conexão com o GitHub para baixar o PawnIO. Nada foi instalado. Detalhe: " + (detail.Length <= 200 ? detail : detail[..200]));
+        new("network", "Sem conexão com o GitHub para baixar o PawnIO. Nada foi instalado. Detalhe: " + Short(detail));
 
     // Redirecionamento só para github.com e os hosts de arquivos do GitHub, por HTTPS; o resto é recusado antes de qualquer pedido.
     private static async Task<PawnIoInstallResult?> Download(IPawnIoInstallSystem system, string file, CancellationToken token)
@@ -199,4 +213,12 @@ public sealed class WindowsPawnIoInstallSystem : IPawnIoInstallSystem
 
     public bool DriverInstalled() => PawnIoDriver.Installed();
     public string WorkDirectory() => Path.Combine(Path.GetTempPath(), "Nexo", "PawnIO", Guid.NewGuid().ToString("N"));
+
+    // Do arquivo até a raiz do volume: %TEMP% pode apontar para qualquer pasta do usuário, então a cadeia inteira é conferida.
+    public string? Linked(string file)
+    {
+        for (var path = Path.GetFullPath(file); !string.IsNullOrEmpty(path); path = Path.GetDirectoryName(path))
+            if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint)) return path;
+        return null;
+    }
 }

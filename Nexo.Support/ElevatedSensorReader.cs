@@ -39,7 +39,7 @@ public static class ElevatedSensorReader
     private static readonly TimeSpan ClockSkew = TimeSpan.FromMinutes(1);
     public const string Source = HardwareSensors.TemperatureSource + ", processo separado com administrador";
     public static string Root { get; } = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "NexoSupport", "sensors");
-    private static readonly Regex FileName = new(@"^reading-[0-9a-f]{32}\.json$", RegexOptions.CultureInvariant);
+    private static readonly Regex FileName = new(@"^reading-[0-9a-f]{32}\.json\z", RegexOptions.CultureInvariant);
     private static readonly CultureInfo PtBr = CultureInfo.GetCultureInfo("pt-BR");
 
     public static string NewOutputPath(string root) => Path.Combine(root, "reading-" + Guid.NewGuid().ToString("N") + ".json");

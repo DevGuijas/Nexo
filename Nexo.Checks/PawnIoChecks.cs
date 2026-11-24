@@ -28,12 +28,29 @@ internal static class PawnIoChecks
         public bool Signed { get; private set; }
         public bool ExistedWhenRun { get; private set; }
         public List<Uri> Requests { get; } = [];
+        public string? Link { get; set; }
+        public Exception? SignFails { get; set; }
+        public Exception? RunFails { get; set; }
         public string? File { get; private set; }
         public Task<HttpResponseMessage> Send(Uri url, CancellationToken token) { Requests.Add(url); return Task.FromResult(Respond(url)); }
-        public Task<(string Status, string Subject)> Signature(string file, CancellationToken token) { Signed = true; File = file; return Task.FromResult(Sign); }
-        public Task<int?> RunElevated(string file, CancellationToken token) { Ran = true; File = file; ExistedWhenRun = System.IO.File.Exists(file); return Task.FromResult(Exit); }
+        public Task<(string Status, string Subject)> Signature(string file, CancellationToken token) { Signed = true; File = file; return SignFails is { } fail ? Task.FromException<(string, string)>(fail) : Task.FromResult(Sign); }
+        public Task<int?> RunElevated(string file, CancellationToken token) { File = file; if (RunFails is { } fail) return Task.FromException<int?>(fail); Ran = true; ExistedWhenRun = System.IO.File.Exists(file); return Task.FromResult(Exit); }
+        public string? Linked(string file) { File = file; return Link; }
         public bool DriverInstalled() => Ran ? InstalledAfter : InstalledBefore;
         public string WorkDirectory() => Directory;
+    }
+
+    private sealed class Endless(long limit) : Stream
+    {
+        public long Served { get; private set; }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            var n = (int)Math.Min(count, limit - Served); Served += n; return n;
+        }
+        public override bool CanRead => true; public override bool CanSeek => false; public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException(); public override long Position { get => Served; set => throw new NotSupportedException(); }
+        public override void Flush() { } public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException(); public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private static HttpResponseMessage Ok(byte[] body, long? length = null)
@@ -73,12 +90,19 @@ internal static class PawnIoChecks
         var lying = new FakeInstall { Directory = Work(), Respond = _ => { var r = Ok(body[..^10]); r.Content.Headers.ContentLength = null; return r; } };
         result = await PawnIoSetup.InstallAsync(lying, null, CancellationToken.None);
         check(result.State == "integrity" && !lying.Ran && !Directory.Exists(lying.Directory), "#142 PawnIO: arquivo recebido menor que o esperado (sem Content-Length) para e apaga");
+        // QA #142: corpo sem fim e sem Content-Length; o download para logo depois do tamanho fixado, sem encher o disco.
+        var endless = new Endless(PawnIoSetup.Size * 3);
+        var flood = new FakeInstall { Directory = Work(), Respond = _ => { var r = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(endless) }; r.Content.Headers.ContentLength = null; return r; } };
+        result = await PawnIoSetup.InstallAsync(flood, null, CancellationToken.None);
+        check(result.State == "integrity" && result.Message.Contains("maior que o esperado") && endless.Served <= PawnIoSetup.Size + 81920 && !flood.Ran && !Directory.Exists(flood.Directory),
+            "#142 PawnIO: download maior que o fixado para no limite (" + endless.Served + " bytes lidos) e apaga o arquivo");
         var longer = new FakeInstall { Directory = Work(), Respond = _ => { var r = Ok([.. body, 1, 2]); r.Content.Headers.ContentLength = null; return r; } };
         result = await PawnIoSetup.InstallAsync(longer, null, CancellationToken.None);
         check(result.State == "integrity" && !longer.Ran, "#142 PawnIO: arquivo maior que o esperado para durante o download");
 
         // Para chegar à assinatura e ao UAC sem o binário real, a sobrecarga interna recebe o hash dos bytes simulados;
         // a pública usa sempre o SHA-256 fixado (o caso acima).
+        bool linkOk = false, errorsOk = false;
         var good = await Pinned();
         async Task<(bool invalid, bool ok, PawnIoInstallResult uac, PawnIoInstallResult failed, PawnIoInstallResult absent)> Pinned()
         {
@@ -99,15 +123,28 @@ internal static class PawnIoChecks
             var failed = await PawnIoSetup.InstallAsync(failing, null, CancellationToken.None, bodyHash);
             var closed = new FakeInstall { Directory = Work(), Exit = 0, Respond = _ => Ok(body) };
             var absent = await PawnIoSetup.InstallAsync(closed, null, CancellationToken.None, bodyHash);
+            // QA #142: junção no caminho, assinatura que não pôde ser conferida e falha do Windows ao abrir o instalador.
+            var junction = new FakeInstall { Directory = Work(), InstalledAfter = true, Link = @"C:\Users\u\AppData\Local\Temp\Nexo", Respond = _ => Ok(body) };
+            var linked = await PawnIoSetup.InstallAsync(junction, null, CancellationToken.None, bodyHash);
+            linkOk = linked.State == "link" && linked.Message.Contains("junção") && !junction.Signed && !junction.Ran && !File.Exists(junction.File!) && !Directory.Exists(junction.Directory);
+            var unsure = new FakeInstall { Directory = Work(), InstalledAfter = true, SignFails = new InvalidOperationException("O Windows não concluiu a operação."), Respond = _ => Ok(body) };
+            var signFailed = await PawnIoSetup.InstallAsync(unsure, null, CancellationToken.None, bodyHash);
+            var blocked = new FakeInstall { Directory = Work(), InstalledAfter = true, RunFails = new System.ComponentModel.Win32Exception(225), Respond = _ => Ok(body) };
+            var runFailed = await PawnIoSetup.InstallAsync(blocked, null, CancellationToken.None, bodyHash);
+            errorsOk = signFailed.State == "signature" && signFailed.Message.Contains("nada foi executado") && !unsure.Ran && !File.Exists(unsure.File!)
+                && runFailed.State == "failed" && runFailed.Message.Contains("Nada foi executado") && !blocked.Ran && !File.Exists(blocked.File!);
             return (invalid, ok, uac, failed, absent);
         }
+        check(linkOk, "#142 PawnIO: link ou junção no caminho do instalador para antes da assinatura e do UAC, e o arquivo é apagado");
+        check(errorsOk, "#142 PawnIO: assinatura que não pôde ser conferida e Windows que não abre o instalador viram estado claro, sem executar");
         check(good.invalid, "#142 PawnIO: assinatura inválida para antes do UAC e apaga o arquivo; redirecionamento para o host de arquivos do GitHub é aceito");
         check(good.ok, "#142 PawnIO: driver presente depois do instalador → instalado, com o assinante e o caminho de desinstalação; o arquivo é apagado no fim");
         check(good.uac.State == "canceled" && good.uac.Message.Contains("cancelada") && good.uac.ExitCode == null, "#142 PawnIO: UAC cancelado vira estado claro, sem código de saída");
         check(good.failed.State == "failed" && good.failed.Message.Contains("1603") && good.failed.ExitCode == 1603, "#142 PawnIO: instalador com erro mostra o código de saída");
         check(good.absent.State == "not_installed" && good.absent.Message.Contains("não foi encontrado"), "#142 PawnIO: instalador sem erro e driver ausente não é dado como instalado");
 
-        foreach (var target in new[] { "https://evil.example.com/PawnIO_setup.exe", "http://objects.githubusercontent.com/a", "https://github.com.evil.example/a", "https://user@github.com/a", "https://objects.githubusercontent.com:8443/a" })
+        foreach (var target in new[] { "https://evil.example.com/PawnIO_setup.exe", "http://objects.githubusercontent.com/a", "https://github.com.evil.example/a", "https://user@github.com/a", "https://objects.githubusercontent.com:8443/a",
+            "http://github.com:443/a", "https://evilgithub.com/a", "https://objects.githubusercontent.com.evil.example/a" })
         {
             var hop = new FakeInstall { Directory = Work() };
             hop.Respond = url => url == PawnIoSetup.Url ? Redirect(target) : Ok(body);
@@ -150,6 +187,8 @@ internal static class PawnIoChecks
             ["--read-sensors", Path.Combine(root, "reading-" + new string('A', 32) + ".json")],
             ["--read-sensors", "reading-" + new string('a', 32) + ".json"],
             ["--read-sensors", ""],
+            ["--read-sensors", good + "\n"],
+            ["--read-sensors", good + ":fluxo"],
         ];
         var accepted = refused.Where(args => ElevatedSensorReader.ValidateArguments(args, root, out _) == null).Select(args => string.Join(" ", args)).ToList();
         check(accepted.Count == 0, "#142 leitor elevado: recusa argumentos extras, outro modo, caminho fora da pasta protegida, subpasta, \"..\" e nome fora do formato"
