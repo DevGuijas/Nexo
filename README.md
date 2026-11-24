@@ -219,6 +219,8 @@ dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-con
 dotnet run --project Nexo.Setup.Checks -c Release
 ```
 
+O `scripts/Build-CloudRelease.ps1` gera o `nexo-app.zip` do instalador com as mesmas opções desse `dotnet publish`: single-file sem `IncludeNativeLibrariesForSelfExtract`, com as DLLs nativas do WPF ao lado do `Nexo.exe`. Nenhum dos dois extrai arquivos ao abrir, e o leitor de sensores do sistema (#142) depende disso.
+
 `--diagnostics` consulta o Windows real. `--agent-live` usa o modelo instalado e verifica chamadas reais e recusa de correções, sem autorizar alterações. A suíte PowerShell substitui comandos de rede por simuladores e testa aplicação, falha, cancelamento e timeout com restauração.
 
 `--hardware-live` inventaria hardware gráfico presente e consulta ofertas online compatíveis em modo somente leitura. **Operações que alteram hardware, serviços ou drivers ainda precisam de validação em máquina/VM de teste.** Neste PC, os testes de integração foram de leitura; não foram modificadas configurações, filas ou drivers. `Nexo.exe --screenshot` gera prévias WPF com dados isolados.
