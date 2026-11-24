@@ -31,6 +31,8 @@ public interface ILiveSensorSystem
     /// <summary>Conteúdo do arquivo, ou null quando ele não existe.</summary>
     string? ReadText(string file, int maxBytes);
     DateTimeOffset BootTime();
+    /// <summary>Quando a cópia do leitor foi gravada (ativação ou atualização), ou null sem ela.</summary>
+    DateTimeOffset? InstalledTime();
 }
 
 /// <summary>
@@ -250,7 +252,16 @@ public static class SystemSensorReader
         {
             if (!system.Installed()) return new("off", "");
             var text = system.ReadText(LiveFile, MaxBytes);
-            if (text == null) return new("waiting", WaitingText);
+            if (text == null)
+            {
+                // Sem nenhum live.json, "aguardando" vale só nos 2 min depois da inicialização ou da ativação; depois disso o leitor
+                // não gravou nada (tarefa que sai com código 2, 3, 4 ou 6, ou que nem abre) e a tela diz que ele não respondeu (@qa).
+                var boot = system.BootTime();
+                var since = system.InstalledTime() is { } installed && installed > boot ? installed : boot;
+                return now - since > BootGrace
+                    ? new("stale", "leitor de sensores sem resposta desde " + since.ToLocalTime().ToString("HH:mm", PtBr) + ", sem nenhuma leitura gravada")
+                    : new("waiting", WaitingText);
+            }
             if (text.Length > MaxBytes) return Ignored("maior que o limite de " + MaxBytes + " bytes");
             if (system.Untrusted(LiveFile) is { } reason) return Ignored(reason);
             return Parse(text, now, system.BootTime());
@@ -327,12 +338,17 @@ public static class SystemSensorReader
     // ---------- instalação, atualização e remoção (elevadas) ----------
 
     /// <summary>
-    /// Arquivos copiados: no Nexo publicado (single-file), só o Nexo.exe; na pasta do build, os .exe e .dll do primeiro nível mais o
-    /// Nexo.runtimeconfig.json e o Nexo.deps.json. Subpastas (runtimes, ThirdParty) não vão: o modo de leitura não as usa.
+    /// Arquivos copiados: no Nexo publicado (single-file), o Nexo.exe e as .dll nativas do primeiro nível; na pasta do build, os .exe
+    /// e .dll do primeiro nível mais o Nexo.runtimeconfig.json e o Nexo.deps.json. Subpastas (runtimes, ThirdParty) não vão: o modo
+    /// de leitura não as usa. O single-file publicado sem IncludeNativeLibrariesForSelfExtract (o comando do README) deixa as nativas
+    /// do WPF (wpfgfx_cor3.dll, PresentationNative_cor3.dll…) ao lado do .exe; sem elas na pasta protegida, o Nexo.exe como SYSTEM
+    /// as procuraria pela ordem de busca de DLL do Windows, que chega às pastas do PATH (@qa).
     /// </summary>
     public static IReadOnlyList<string> FilesToCopy(bool singleFile, IEnumerable<string> names)
     {
-        if (singleFile) return [Executable];
+        if (singleFile)
+            return [Executable, .. names.Where(name => CopyName.IsMatch(name) && !name.Contains("..", StringComparison.Ordinal) && name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).Take(400)];
         var list = names.Where(name => CopyName.IsMatch(name) && !name.Contains("..", StringComparison.Ordinal)
                 && (name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
                     || name.Equals("Nexo.runtimeconfig.json", StringComparison.OrdinalIgnoreCase) || name.Equals("Nexo.deps.json", StringComparison.OrdinalIgnoreCase)))
@@ -451,9 +467,14 @@ public static class SystemSensorReader
           if($nxFiles -notcontains $old.Name -and -not ($old.Attributes -band [IO.FileAttributes]::ReparsePoint)){ Remove-Item -LiteralPath $old.FullName -Force }
         }
         # (c) Tarefa do sistema: SYSTEM, na inicialização, reinício em falha e sem limite de tempo. O cmd.exe do System32 (/d, sem
-        # AutoRun) só fixa a extração das bibliotecas nativas do single-file dentro da pasta protegida antes de abrir o Nexo.exe.
-        $nxCmd=[IO.Path]::Combine([Environment]::SystemDirectory,'cmd.exe')
-        $nxArguments='/d /c set "DOTNET_BUNDLE_EXTRACT_BASE_DIR=' + $nxExtract + '" && "' + $nxExe + '" --sensor-loop'
+        # AutoRun) fixa o PATH nas pastas do Windows (uma DLL que faltar nunca é procurada numa pasta do PATH que um usuário grave) e
+        # a extração das bibliotecas nativas do single-file dentro da pasta protegida antes de abrir o Nexo.exe. Caminho com % ou aspas
+        # mudaria a linha do cmd.exe: é recusado.
+        $nxSystem=[Environment]::SystemDirectory
+        $nxCmd=[IO.Path]::Combine($nxSystem,'cmd.exe')
+        $nxPath=$nxSystem + ';' + [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows) + ';' + [IO.Path]::Combine($nxSystem,'Wbem')
+        if(($nxPath + $nxExtract + $nxExe) -match '[%"]'){throw 'O caminho do leitor tem % ou aspas e não pode ir para a tarefa. Nada foi registrado.'}
+        $nxArguments='/d /c set "PATH=' + $nxPath + '" && set "DOTNET_BUNDLE_EXTRACT_BASE_DIR=' + $nxExtract + '" && "' + $nxExe + '" --sensor-loop'
         $action=New-ScheduledTaskAction -Execute $nxCmd -Argument $nxArguments -WorkingDirectory $nxTarget
         $trigger=New-ScheduledTaskTrigger -AtStartup
         $principal=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
@@ -514,6 +535,14 @@ public sealed class WindowsLiveSensorSystem : ILiveSensorSystem
     public bool Installed() => File.Exists(Path.Combine(SystemSensorReader.InstallFolder, SystemSensorReader.Executable));
     public string? Untrusted(string file) => new WindowsElevatedSensorSystem().Untrusted(file);
     public DateTimeOffset BootTime() => DateTimeOffset.UtcNow - TimeSpan.FromMilliseconds(Environment.TickCount64);
+
+    // O Nexo.exe da cópia é gravado pelo script elevado (cópia nova, trocada por Move): a data dele é a da ativação ou da atualização.
+    public DateTimeOffset? InstalledTime()
+    {
+        var file = Path.Combine(SystemSensorReader.InstallFolder, SystemSensorReader.Executable);
+        try { return File.Exists(file) ? new DateTimeOffset(File.GetLastWriteTimeUtc(file), TimeSpan.Zero) : null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+    }
 
     public string? ReadText(string file, int maxBytes)
     {

@@ -14,6 +14,8 @@ public static class HardwareSensors
     public const string StorageSource = "Windows Storage (Get-PhysicalDisk)";
     public const double MaxPlausibleCelsius = 125;
     /// <summary>Sensor que só devolve zero: no PC com o PawnIO instalado, é o acesso negado ao Nexo sem administrador (#142).</summary>
+    /// <summary>Início do aviso da temperatura em HealthSnapshot.Warnings, que o DiagnosticEngine leva às limitações do relatório.</summary>
+    public const string TemperatureWarning = "Temperatura da CPU: ";
     public const string ZeroDetail = "O sensor retornou zero, sem temperatura válida; a leitura foi descartada. Mesmo instalado, o driver pode estar sem permissão de acesso ao hardware para o Nexo.";
     private static readonly string[] PackageSensors = ["CPU Package", "Package", "Core (Tdie)", "Core (Tctl/Tdie)"];
     private static readonly string[] AlertStatuses = ["Degraded", "Stressed", "Predictive Failure", "Error", "Non-Recoverable Error", "No Contact", "Lost Communication", "Aborted", "Supporting Entity in Error", "Failed Media", "Split", "Stale Metadata", "IO Error", "Unrecognized Metadata", "Transient Error", "Not Usable"];
@@ -109,7 +111,7 @@ public static class HardwareSensors
             ? ReadTemperature(temperature, time)
             : new TemperatureReading("error", Source: TemperatureSource, Time: time, Detail: "Resposta sem dados de temperatura.");
         snapshot.CpuTemperatureC = snapshot.CpuTemperature.State == "read" ? snapshot.CpuTemperature.Celsius : null;
-        if (snapshot.CpuTemperature.State is "error" or "invalid") snapshot.Warnings.Add("Temperatura da CPU: " + snapshot.CpuTemperature.Detail);
+        if (snapshot.CpuTemperature.State is "error" or "invalid") snapshot.Warnings.Add(TemperatureWarning + snapshot.CpuTemperature.Detail);
     }
 
     public static void ReadStorage(JsonElement root, HealthSnapshot snapshot, DateTimeOffset fallbackTime)
@@ -126,7 +128,7 @@ public static class HardwareSensors
     {
         snapshot.CpuTemperature = new TemperatureReading("error", Source: TemperatureSource, Time: time, Detail: detail);
         snapshot.CpuTemperatureC = null;
-        snapshot.Warnings.Add("Temperatura da CPU: " + detail);
+        snapshot.Warnings.Add(TemperatureWarning + detail);
     }
 
     public static void StorageUnavailable(HealthSnapshot snapshot, DateTimeOffset time, string detail)

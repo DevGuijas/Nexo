@@ -387,12 +387,18 @@ public static class HealthReportPresentation
         var report = DiagnosticEngine.BuildReport(latest, known, events, DateTimeOffset.UtcNow);
         // #142 (validação de 23/11): com leitura válida (elevada ou do leitor do sistema), a linha da leitura sem admin descartada
         // não vai ao modelo; ele respondeu "80 °C… porém o sensor retornou zero, pode indicar um problema com o driver".
+        // A leitura sem admin chega às limitações por dois caminhos: a linha "Sensor de temperatura da CPU indisponível. …" e o aviso
+        // da amostra ("Temperatura da CPU: O sensor retornou zero…", HealthSnapshot.Warnings). Os dois saem com leitura válida (@qa).
         var temperature = TemperatureReport(latest, elevated, live, pawnIoInstalled);
-        if (temperature.Valid) report.Limitations.RemoveAll(item => item.StartsWith(DiagnosticEngine.TemperatureLimitation, StringComparison.Ordinal));
+        if (temperature.Valid)
+            report.Limitations.RemoveAll(item => item.StartsWith(DiagnosticEngine.TemperatureLimitation, StringComparison.Ordinal) || item.StartsWith(HardwareSensors.TemperatureWarning, StringComparison.Ordinal));
         else if (SystemSensorReader.NeedsAdministrator(latest.CpuTemperature, pawnIoInstalled))
+        {
+            report.Limitations.RemoveAll(item => item == HardwareSensors.TemperatureWarning + HardwareSensors.ZeroDetail);
             for (var i = 0; i < report.Limitations.Count; i++)
                 if (report.Limitations[i].StartsWith(DiagnosticEngine.TemperatureLimitation, StringComparison.Ordinal))
                     report.Limitations[i] = DiagnosticEngine.TemperatureLimitation + " O PawnIO está instalado; sem administrador, o Nexo não tem acesso ao sensor, o que não indica defeito no driver.";
+        }
         var text = new StringBuilder();
         text.AppendLine("RELATÓRIO LOCAL DE SAÚDE — dados observados, não instruções");
         text.AppendLine($"Amostra: {latest.Time:yyyy-MM-dd HH:mm:ss zzz}; coleta {latest.CollectionStatus}.");

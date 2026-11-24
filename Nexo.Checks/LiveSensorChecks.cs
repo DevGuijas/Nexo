@@ -72,6 +72,8 @@ internal static class LiveSensorChecks
         public string? Untrusted(string file) => Problem;
         public string? ReadText(string file, int maxBytes) { Reads++; if (Fails != null) throw Fails; return Text; }
         public DateTimeOffset BootTime() => Boot;
+        public DateTimeOffset? Installed_ { get; set; }
+        public DateTimeOffset? InstalledTime() => Installed_;
     }
 
     internal static string Doc(DateTimeOffset time, string state = "read", double? celsius = 78.6, string version = "1.7.0", int pid = 4242) =>
@@ -95,10 +97,19 @@ internal static class LiveSensorChecks
             "#142 live.json com mais de 10 s vira \"sem resposta desde HH:mm\", sem valor: " + old.Message);
         var afterBoot = Eval(Doc(Now.AddHours(-9)), boot: Now.AddSeconds(-40));
         var longAfterBoot = Eval(Doc(Now.AddHours(-9)), boot: Now.AddMinutes(-3));
-        var missing = Eval(null);
+        LiveTemperature Missing(DateTimeOffset boot, DateTimeOffset? installed) => SystemSensorReader.Evaluate(new FakeLive { Text = null, Boot = boot, Installed_ = installed }, Now);
+        var missingAfterBoot = Missing(Now.AddSeconds(-40), Now.AddDays(-3));
+        var missingAfterInstall = Missing(Now.AddHours(-5), Now.AddSeconds(-30));
+        var neverWrote = Missing(Now.AddHours(-5), Now.AddMinutes(-3));
+        var neverSinceBoot = Missing(Now.AddMinutes(-3), Now.AddDays(-3));
         check(afterBoot is { State: "waiting", Celsius: null } && afterBoot.Message == SystemSensorReader.WaitingText && longAfterBoot.State == "stale"
-            && missing is { State: "waiting", Celsius: null },
-            "#142 logo depois de ligar o PC (arquivo de antes da inicialização, até 2 min) ou sem arquivo: \"aguardando o leitor…\"; depois disso, \"sem resposta\"");
+            && missingAfterBoot is { State: "waiting", Celsius: null } && missingAfterInstall is { State: "waiting", Celsius: null }
+            && neverWrote is { State: "stale", Celsius: null } && neverWrote.Message == "leitor de sensores sem resposta desde " + Now.AddMinutes(-3).ToLocalTime().ToString("HH:mm", PtBr) + ", sem nenhuma leitura gravada"
+            && neverSinceBoot.State == "stale" && Missing(Now.AddHours(-5), null).State == "stale",
+            "#142 logo depois de ligar o PC ou de ativar o leitor (até 2 min), com arquivo de antes da inicialização ou sem arquivo: \"aguardando o leitor…\"; depois disso, \"sem resposta\", também quando o leitor nunca gravou o live.json: "
+            + neverWrote.Message);
+        var minimum = SystemSensorReader.Evaluate(new FakeLive { Text = Doc(DateTimeOffset.MinValue), Boot = Now.AddHours(-1) }, Now);
+        check(minimum.Celsius == null && minimum.State is "ignored" or "stale", "#142 live.json com horário 0001-01-01 não derruba a tela na conversão para o fuso local: " + minimum.State);
         var off = Eval(Doc(Now), installed: false);
         check(off is { State: "off", Celsius: null }, "#142 sem o leitor instalado, o live.json não vale (estado \"off\")");
         var owner = Eval(Doc(Now), problem: "C:\\ProgramData\\NexoSupport\\sensors\\live.json: dono não confiável (S-1-5-21-1-2-3-1001)");
@@ -121,12 +132,19 @@ internal static class LiveSensorChecks
             "#142 o live.json tem tamanho limitado (detalhe cortado), abaixo de " + SystemSensorReader.MaxBytes + " bytes: o arquivo não cresce");
     }
 
-    private static HealthSnapshot Zero(DateTimeOffset time) => new()
+    // A amostra sai do mesmo caminho da coleta (HardwareSensors.ReadTemperature), que também grava o aviso "Temperatura da CPU: O
+    // sensor retornou zero…" em Warnings, e esse aviso vai às limitações do relatório (@qa: montada à mão, a amostra não tinha o aviso).
+    private static HealthSnapshot Zero(DateTimeOffset time)
     {
-        Time = time, CpuPercent = 12, MemoryUsedPercent = 40, CollectionStatus = "complete",
-        CpuTemperature = new TemperatureReading("invalid", Source: HardwareSensors.TemperatureSource, Time: time, Detail: HardwareSensors.ZeroDetail),
-        StorageHealth = "healthy", Storage = new StorageReading("healthy", HardwareSensors.StorageSource, time, 1, [new("1", "AMD-RAID Array 1", "SSD", "RAID", "Healthy", ["OK"], "healthy")])
-    };
+        var snapshot = new HealthSnapshot
+        {
+            Time = time, CpuPercent = 12, MemoryUsedPercent = 40, CollectionStatus = "complete",
+            StorageHealth = "healthy", Storage = new StorageReading("healthy", HardwareSensors.StorageSource, time, 1, [new("1", "AMD-RAID Array 1", "SSD", "RAID", "Healthy", ["OK"], "healthy")])
+        };
+        using var document = System.Text.Json.JsonDocument.Parse(EmbeddedCpuTemperature.SensorsJson([new CpuSensorValue("Core (Tctl/Tdie)", "/amdcpu/0/temperature/2", 0)]));
+        HardwareSensors.ReadTemperature(document.RootElement, snapshot, time);
+        return snapshot;
+    }
 
     private static void Screens(Action<bool, string> check)
     {
@@ -146,12 +164,12 @@ internal static class LiveSensorChecks
         // A Início é a tela de abertura: com o live.json fresco, o texto já está na 1ª montagem, mesmo sem a 1ª leitura do monitor.
         var fresh = SystemSensorReader.Evaluate(new FakeLive { Text = Doc(Now.AddSeconds(-1)) }, Now);
         var first = SystemSensorReader.TemperatureText(null, fresh, true);
-        var waiting = SystemSensorReader.TemperatureText(null, SystemSensorReader.Evaluate(new FakeLive { Text = null }, Now), true);
+        var waiting = SystemSensorReader.TemperatureText(null, SystemSensorReader.Evaluate(new FakeLive { Text = null, Boot = Now.AddSeconds(-30) }, Now), true);
         var stale = SystemSensorReader.TemperatureText(zero, SystemSensorReader.Evaluate(new FakeLive { Text = Doc(Now.AddMinutes(-5)) }, Now), true);
         check(first is { Tone: "Success" } && first.Value.Text.StartsWith("Temperatura da CPU: 78,6 °C") && first.Value.Text.Contains("leitor de sensores do sistema")
             && waiting is { Tone: "Neutral" } && waiting.Value.Text == "Temperatura: aguardando o leitor…" && !waiting.Value.Text.Contains("indisponível")
             && stale!.Value.Text.Contains("sem resposta desde") && !stale.Value.Text.Contains("descartada"),
-            "#142 ao montar a Início com live.json fresco simulado, a temperatura já está no texto (" + first?.Text + "); sem arquivo, \"aguardando o leitor…\", nunca \"indisponível\"");
+            "#142 ao montar a Início com live.json fresco simulado, a temperatura já está no texto (" + first?.Text + "); sem arquivo logo depois de ligar o PC, \"aguardando o leitor…\", nunca \"indisponível\"");
 
         var code = Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Code");
         var home = File.ReadAllText(Path.Combine(code, "HomePage.cs"));
@@ -199,7 +217,8 @@ internal static class LiveSensorChecks
         var neither = FromStore(sample, null, null, true);
         var control = FromStore(sample, null, null, false);
         string Line(string report) => report.Split('\n').First(line => line.StartsWith("Temperatura da CPU: ", StringComparison.Ordinal));
-        check(control.Contains("retornou zero"), "#142 relatório (controle): sem leitura válida e sem o PawnIO, a linha descartada aparece, então a ausência abaixo é real");
+        check(control.Contains("retornou zero") && control.Contains("Limitação: " + HardwareSensors.TemperatureWarning + "O sensor retornou zero"),
+            "#142 relatório (controle): sem leitura válida e sem o PawnIO, a linha descartada aparece, inclusive o aviso da amostra nas limitações, então a ausência abaixo é real");
         check(Line(withLive).StartsWith("Temperatura da CPU: 79 °C, sensor Core _Tctl/Tdie_, fonte " + SystemSensorReader.ReportSource + ", lida às ")
             && !withLive.Contains("retornou zero") && !withLive.Contains("descartada") && !withLive.Contains("Limitação: " + DiagnosticEngine.TemperatureLimitation),
             "#142 relatório: com o leitor do sistema fresco, a temperatura leva a origem e o horário, e a linha da leitura sem admin descartada não vai ao modelo: " + Line(withLive));
@@ -239,9 +258,11 @@ internal static class LiveSensorChecks
     {
         var source = Path.Combine(Path.GetTempPath(), "Nexo-src");
         var files = SystemSensorReader.FilesToCopy(false, ["Nexo.exe", "Nexo.dll", "Nexo.deps.json", "Nexo.runtimeconfig.json", "LibreHardwareMonitorLib.dll", "Nexo.pdb", "notas.txt", "a'b.dll", "..x.dll", "x.dll.config"]);
-        check(SystemSensorReader.FilesToCopy(true, ["Nexo.exe", "Nexo.dll"]).SequenceEqual(["Nexo.exe"])
+        var single = SystemSensorReader.FilesToCopy(true, ["Nexo.exe", "wpfgfx_cor3.dll", "PresentationNative_cor3.dll", "Nexo.pdb", "notas.txt", "a'b.dll", "..x.dll", "Nexo.runtimeconfig.json"]);
+        check(SystemSensorReader.FilesToCopy(true, ["Nexo.exe"]).SequenceEqual(["Nexo.exe"]) && single.SequenceEqual(["Nexo.exe", "PresentationNative_cor3.dll", "wpfgfx_cor3.dll"])
             && files.SequenceEqual(["LibreHardwareMonitorLib.dll", "Nexo.deps.json", "Nexo.dll", "Nexo.exe", "Nexo.runtimeconfig.json"]),
-            "#142 cópia: só o Nexo.exe no single-file; no build, só .exe, .dll e os JSON do runtime do primeiro nível: " + string.Join(", ", files));
+            "#142 cópia: no single-file, o Nexo.exe e as .dll nativas deixadas ao lado dele (publicação sem IncludeNativeLibrariesForSelfExtract), para o SYSTEM nunca as procurar fora da pasta protegida; no build, só .exe, .dll e os JSON do runtime do primeiro nível: "
+            + string.Join(", ", single) + " | " + string.Join(", ", files));
         var missing = false;
         try { SystemSensorReader.FilesToCopy(false, ["Nexo.exe"]); } catch (InvalidOperationException) { missing = true; }
         var badName = false;
@@ -264,7 +285,8 @@ internal static class LiveSensorChecks
             "#142 script de instalação: tarefa \"Nexo Sensores\" como SYSTEM, na inicialização, com reinício e sem limite, rodando --sensor-loop da pasta em Arquivos de Programas, sem variável de ambiente do usuário");
         check(At(install, "Use-ProtectedDirectory $nxTarget") > 0 && At(install, "Use-ProtectedDirectory $nxTarget") < At(install, "Stop-NexoSensorLoop\n")
             && At(install, "Stop-NexoSensorLoop\n") < At(install, "foreach($name in $nxFiles)") && At(install, "foreach($name in $nxFiles)") < At(install, "Register-ScheduledTask -TaskName")
-            && install.Contains("[IO.FileAccess]::Read,[IO.FileShare]::Read)") && install.Contains("$sha.ComputeHash($nxIn)") && install.Contains("$nxIn.CopyTo($output)")
+            && install.Contains("$nxIn=New-Object System.IO.FileStream($from,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)") && install.Contains("$sha.ComputeHash($nxIn)") && install.Contains("$nxIn.CopyTo($output)")
+            && install.Contains("if($actual -ne $expected){ Remove-Item -LiteralPath $temporary -Force; throw")
             && At(remove, "Assert-NexoTree $nxTarget") < At(remove, "Unregister-ScheduledTask") && remove.Contains("Remove-NexoTree $nxTarget"),
             "#142 scripts: a pasta é conferida antes de parar, copiar ou registrar; o hash sai do mesmo handle aberto sem escrita que é copiado; a remoção confere os links antes de mexer na tarefa");
 
@@ -354,8 +376,9 @@ internal static class LiveSensorChecks
             var sha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(exeBytes));
             check(copied && output.Contains("OK:") && output.Contains("Nexo.exe " + sha) && output.Contains("START:Nexo Sensores")
                 && output.Contains("\"TaskName\":\"Nexo Sensores\"") && output.Contains("\"AtStartup\":true") && output.Contains("\"UserId\":\"SYSTEM\"") && output.Contains("\"Limit\":\"00:00:00\"")
-                && output.Contains("\"RestartCount\":999") && output.Contains("--sensor-loop") && output.Contains(Path.Combine(target, "Nexo.exe").Replace("\\", "\\\\")) && output.Contains("cmd.exe"),
-                "#142 script real (cmdlets falsos): copia com SHA-256 igual ao da origem, registra \"Nexo Sensores\" (SYSTEM, AtStartup, sem limite, reinício) e inicia: " + Short(output));
+                && output.Contains("\"RestartCount\":999") && output.Contains("--sensor-loop") && output.Contains(Path.Combine(target, "Nexo.exe").Replace("\\", "\\\\")) && output.Contains("cmd.exe")
+                && Regex.IsMatch(output, @"/d /c set \\""PATH=[^%""]*?\\"" (?:&&|\\u0026\\u0026) set \\""DOTNET_BUNDLE_EXTRACT_BASE_DIR="),
+                "#142 script real (cmdlets falsos): copia com SHA-256 igual ao da origem, registra \"Nexo Sensores\" (SYSTEM, AtStartup, sem limite, reinício, PATH fixo nas pastas do Windows) e inicia: " + Short(output));
 
             foreach (var (name, setup, expected) in new[]
             {
@@ -374,6 +397,47 @@ internal static class LiveSensorChecks
                     "#142 script real: pasta de destino existente com " + name switch { "loose" => "ACL frouxa", "inherit" => "herança", "owner" => "dono de usuário", _ => "reparse point" }
                     + " é recusada antes de copiar ou registrar a tarefa: " + Short(result));
             }
+
+            // @qa: as demais recusas e a troca, cada uma pelo script real.
+            bool Untouched(string result) => Regex.IsMatch(result, @"^REG:(null)?\s*$", RegexOptions.Multiline) && Regex.IsMatch(result, @"^START:\s*$", RegexOptions.Multiline);
+            var parentLoose = Case("parent-loose");
+            var parentResult = await Pwsh(shell, Install(parentLoose, "$script:acl[" + Literal(Path.Combine(parentLoose, "Nexo")) + "]=@{Owner='S-1-5-32-544';Protected=$true;Rules=@([pscustomobject]@{Sid='S-1-5-32-545';Rights=0x10000;Type='Allow';Propagation=0})}\n"));
+            check(parentResult.Contains("ERRO:") && parentResult.Contains("ACE de escrita") && !File.Exists(Path.Combine(Target(parentLoose), "Nexo.exe")) && Untouched(parentResult),
+                "#142 script real: a pasta-pai %ProgramFiles%\\Nexo com ACE de escrita (exclusão) para Usuários é recusada, porque com ela daria para renomear Sensors e trocar o leitor: " + Short(parentResult));
+            var fileLoose = Case("file-loose");
+            var fileResult = await Pwsh(shell, Install(fileLoose, "$script:acl[" + Literal(Path.Combine(Target(fileLoose), "Nexo.dll")) + "]=@{Owner='S-1-5-32-544';Protected=$true;Rules=@([pscustomobject]@{Sid='S-1-5-32-545';Rights=0x2;Type='Allow';Propagation=0})}\n"));
+            check(fileResult.Contains("ERRO:") && fileResult.Contains("ACE de escrita") && Untouched(fileResult),
+                "#142 script real: arquivo copiado que não fica protegido depois da troca para a instalação antes de registrar a tarefa: " + Short(fileResult));
+            var update = Case("update");
+            var updateTarget = Target(update);
+            Directory.CreateDirectory(Path.Combine(updateTarget, "extract", "abc"));
+            File.WriteAllText(Path.Combine(updateTarget, "extract", "abc", "wpfgfx_cor3.dll"), "antiga");
+            File.WriteAllText(Path.Combine(updateTarget, "Antigo.dll"), "antiga");
+            File.WriteAllText(Path.Combine(updateTarget, "Nexo.exe"), "antiga");
+            var updated = await Pwsh(shell, Install(update, ""));
+            check(updated.Contains("OK:") && !Directory.Exists(Path.Combine(updateTarget, "extract")) && !File.Exists(Path.Combine(updateTarget, "Antigo.dll"))
+                && File.ReadAllBytes(Path.Combine(updateTarget, "Nexo.exe")).SequenceEqual(exeBytes) && updated.Contains("START:Nexo Sensores"),
+                "#142 script real (Atualizar leitor): a extração antiga e os arquivos que não fazem mais parte do leitor saem, e o Nexo.exe é o novo: " + Short(updated));
+            var self = await Pwsh(shell, Prepare(SystemSensorReader.InstallScript(Target(update), files, ProtectedFolderScript.Text + Fakes), update, Path.Combine(root, "live.json")));
+            check(self.Contains("ERRO:") && self.Contains("já é a cópia do leitor") && Untouched(self), "#142 script real: o Nexo aberto da própria cópia do leitor não se copia sobre ela: " + Short(self));
+            var linkSource = Path.Combine(root, "user", "Atalho");
+            var linkBase = Path.Combine(root, "base-link");
+            var canLinkSource = true;
+            try { Directory.CreateSymbolicLink(linkSource, source); Directory.CreateSymbolicLink(linkBase, Case("base-real")); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { canLinkSource = false; }
+            if (canLinkSource)
+            {
+                var fromLink = await Pwsh(shell, Prepare(SystemSensorReader.InstallScript(linkSource, files, ProtectedFolderScript.Text + Fakes), Case("source-link"), Path.Combine(root, "live.json")));
+                var baseLink = await Pwsh(shell, Install(linkBase, ""));
+                check(fromLink.Contains("ERRO:") && fromLink.Contains("é um link") && Untouched(fromLink) && baseLink.Contains("ERRO:") && baseLink.Contains("Arquivos de Programas é um link") && Untouched(baseLink),
+                    "#142 script real: origem que é link e Arquivos de Programas que é link são recusados antes de copiar: " + Short(fromLink) + " | " + Short(baseLink));
+                var inner = Case("install-link");
+                Directory.CreateDirectory(Path.Combine(Target(inner), "extract"));
+                Directory.CreateSymbolicLink(Path.Combine(Target(inner), "extract", "x"), Path.Combine(root, "outside-install"));
+                var innerResult = await Pwsh(shell, Install(inner, ""));
+                check(innerResult.Contains("ERRO:") && innerResult.Contains("Nada foi removido") && Untouched(innerResult),
+                    "#142 script real: link dentro da pasta do leitor para a instalação na conferência, antes de parar a tarefa: " + Short(innerResult));
+            }
+            else Console.WriteLine("IGNORADO: #142 instalação com link (o sistema não deixou criar o link de teste)");
 
             // Remoção: um link dentro da pasta para tudo, sem tocar no destino dele; sem link, a pasta e a tarefa somem.
             var linked = Case("remove-link");
