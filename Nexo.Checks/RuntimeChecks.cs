@@ -125,7 +125,8 @@ internal static class RuntimeChecks
             && items.Where(i => i.VcYear is 2012 or 2013).All(i => i.Signer == RuntimeCatalog.MicrosoftSignerMopr) && items.Where(i => i.VcYear is not (2012 or 2013)).All(i => i.Signer == RuntimeCatalog.MicrosoftSigner),
             "#150 catálogo: só o v14 que falta vem marcado; os antigos e o DirectX vêm desmarcados; assinante Microsoft por item");
         string[] refusedHosts = ["http://download.microsoft.com/a.exe", "https://download.microsoft.com.evil.example/a.exe", "https://evil.example/a.exe", "https://user@aka.ms/a",
-            "https://aka.ms:8443/a", "https://microsoft.com/a.exe", "https://evilaka.ms/a", "https://download.visualstudio.microsoft.com.evil/a", "ftp://download.microsoft.com/a"];
+            "https://aka.ms:8443/a", "https://microsoft.com/a.exe", "https://evilaka.ms/a", "https://download.visualstudio.microsoft.com.evil/a", "ftp://download.microsoft.com/a",
+            "http://download.microsoft.com:443/a.exe", "https://download.microsoft.com./a.exe"];
         check(refusedHosts.All(u => !RuntimeCatalog.AllowedHost(new Uri(u))) && RuntimeCatalog.AllowedHost(new Uri("https://download.visualstudio.microsoft.com/download/pr/x/VC_redist.x64.exe")),
             "#150 hosts: só HTTPS na porta 443, sem usuário, com host exato da lista da Microsoft");
     }
@@ -190,7 +191,8 @@ internal static class RuntimeChecks
         probe.Registry[@"True|SOFTWARE\dotnet\Setup\InstalledVersions\x64\sharedfx\Microsoft.WindowsDesktop.App|6.0.36"] = 1;
         var scan = RuntimeInspector.Scan(probe);
         var old = new FakeProbe(); old.Registry[@"False|SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full|Release"] = 528040;
-        check(scan.DotNetFramework.StartsWith("4.8.1") && RuntimeInspector.DotNetFramework(old).StartsWith("4.8 ") && RuntimeInspector.DotNetFramework(new FakeProbe()) == "não encontrado"
+        var win10 = new FakeProbe(); win10.Registry[@"False|SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full|Release"] = 528372;
+        check(scan.DotNetFramework.StartsWith("4.8.1") && RuntimeInspector.DotNetFramework(old).StartsWith("4.8 ") && RuntimeInspector.DotNetFramework(win10).StartsWith("4.8 (") && RuntimeInspector.DotNetFramework(new FakeProbe()) == "não encontrado"
             && scan.DesktopRuntimes.SequenceEqual(["6.0.36 (x64)", "8.0.11 (x64)"]) && scan.Items.All(s => s.Item.Id != "netfx"),
             "#150 .NET: Framework pelo Release de NDP\\v4\\Full e Desktop Runtime pelas chaves do instalador, só informativos (não entram na instalação)");
         var text = RuntimePresentation.ScanText(scan);
@@ -204,7 +206,7 @@ internal static class RuntimeChecks
         var source = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Code", "RuntimeSetup.cs"));
         var reader = Regex.Match(source, @"public sealed class WindowsRuntimeSystem.*?public Task<HttpResponseMessage> Send", RegexOptions.Singleline).Value;
         check(methods.SequenceEqual(["FileExists", "UninstallNames", "Value", "ValueNames", "get_Is64BitWindows", "get_SystemFolder", "get_Wow64Folder"])
-            && reader.Length > 0 && Regex.Matches(reader, @"OpenSubKey\([^)]*, false\)").Count == 4 && !Regex.IsMatch(source, @"CreateSubKey|SetValue|DeleteValue|DeleteSubKey|File\.(?:Write|Delete|Move|Copy)[^;]*SystemFolder"),
+            && reader.Length > 0 && Regex.Matches(reader, @"OpenSubKey\([^)]*, false\)").Count == 4 && Regex.IsMatch(reader, @"UninstallNames\(\)\s*\{[^}]*new\[\] \{ false, true \}") && !Regex.IsMatch(source, @"CreateSubKey|SetValue|DeleteValue|DeleteSubKey|File\.(?:Write|Delete|Move|Copy)[^;]*SystemFolder"),
             "#150 verificação só de leitura: a interface tem só leituras e o registro é aberto sem escrita");
         var probe = new FakeProbe(); probe.SetV14("x64"); probe.AllDirectX(); probe.Names.Add("Microsoft Visual C++ 2010  x86 Redistributable - 10.0.40219");
         var before = JsonSerializer.Serialize(new { probe.Registry, probe.Names, probe.Files });
@@ -288,16 +290,23 @@ internal static class RuntimeChecks
         var newer = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 1638 };
         var failed = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 1603 };
         var silent = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 0 };
+        var started = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 1641 };
+        var errorButPresent = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 1603 };
+        errorButPresent.AfterRun = _ => errorButPresent.SetV14("x64");
         var rebootResult = (await RuntimeInstaller.InstallAsync(reboot, [v14], null, null, CancellationToken.None))[0];
         var newerResult = (await RuntimeInstaller.InstallAsync(newer, [v14], null, null, CancellationToken.None))[0];
         var failedResult = (await RuntimeInstaller.InstallAsync(failed, [v14], null, null, CancellationToken.None))[0];
         var silentResult = (await RuntimeInstaller.InstallAsync(silent, [v14], null, null, CancellationToken.None))[0];
+        var startedResult = (await RuntimeInstaller.InstallAsync(started, [v14], null, null, CancellationToken.None))[0];
+        var presentResult = (await RuntimeInstaller.InstallAsync(errorButPresent, [v14], null, null, CancellationToken.None))[0];
         check(rebootResult.Outcome == RuntimeOutcome.RebootPending && rebootResult.ExitCode == 3010 && rebootResult.Message.Contains("não reinicia")
-            && RuntimePresentation.Result([rebootResult]).Contains("Reinicie o PC quando puder"), "#150 instalação: código 3010 → reinício pendente, sem reinício automático");
+            && RuntimePresentation.Result([rebootResult]).Contains("Reinicie o PC quando puder") && startedResult.Outcome == RuntimeOutcome.RebootPending && startedResult.ExitCode == 1641,
+            "#150 instalação: códigos 3010 e 1641 → reinício pendente, sem reinício automático");
         check(newerResult.Outcome == RuntimeOutcome.AlreadyInstalled && newerResult.ExitCode == 1638 && newerResult.Label == "Já instalado", "#150 instalação: código 1638 → já instalado");
         check(failedResult.Outcome == RuntimeOutcome.Failed && failedResult.ExitCode == 1603 && failedResult.Message.Contains("1603")
-            && silentResult.Outcome == RuntimeOutcome.Failed && silentResult.Message.Contains("não aparece como instalado"),
-            "#150 instalação: código de erro mostra o código; saída 0 sem o componente na verificação não é dada como instalada");
+            && silentResult.Outcome == RuntimeOutcome.Failed && silentResult.Message.Contains("não aparece como instalado")
+            && presentResult.Outcome == RuntimeOutcome.Failed && presentResult.ExitCode == 1603 && presentResult.Message.Contains("mas o componente aparece como instalado"),
+            "#150 instalação: código de erro mostra o código, mesmo com o componente presente depois; saída 0 sem o componente na verificação não é dada como instalada");
 
         // DirectX fixado (hash dos bytes simulados pela sobrecarga interna), com /Q e as DLLs conferidas depois.
         var dxOk = new FakeSystem { Root = temp, Respond = _ => Ok(dxBody) };
@@ -362,6 +371,16 @@ internal static class RuntimeChecks
             "Eu te ajudo a instalar o vcredist agora mesmo.",
             "O jogo pede o xinput1_3.dll. Posso baixar o xinput para você.",
             "Gostaria que eu reparasse o C++ deste PC?",
+            // @qa (f7bcb21): a negação ou a orientação no começo não esconde a oferta seguinte; "eu instalo", download e instalador.
+            "Não consigo abrir o jogo por aqui, mas posso instalar o Visual C++ para você.",
+            "Não vou mexer no antivírus, mas vou instalar o DirectX agora.",
+            "Posso explicar o erro e já instalar o Visual C++ x64 para você.",
+            "Posso mostrar o que falta e depois baixar o DirectX para você.",
+            "Posso instalá-lo para você, o Visual C++ 2015-2022.",
+            "Se quiser, eu instalo o Visual C++ agora.",
+            "Posso fazer o download do DirectX para você.",
+            "Posso executar o instalador do DirectX.",
+            "Posso rodar o vc_redist.x64.exe para você.",
         ];
         string[] accepted =
         [
@@ -375,6 +394,17 @@ internal static class RuntimeChecks
             "O .NET Framework 4.8 já vem com o Windows.",
             "Posso consultar os eventos do jogo que não abre.",
             "Posso desinstalar a versão anterior do driver NVIDIA.",
+            // @qa (f7bcb21): substantivo e adjetivo não são oferta; a orientação que rege a instalação passa.
+            "Posso verificar a versão instalada do .NET no relatório.",
+            "Posso consultar o log de instalação do Visual C++ no Visualizador de Eventos.",
+            "Posso analisar o erro de instalação do DirectX se você me mandar o código.",
+            "Vou ser breve, mas repare que o DirectX 12 já vem com o Windows.",
+            "Posso ajudar a entender por que o FPS fica baixo com o DirectX 12.",
+            "Posso conferir se há atualização do .NET no Windows Update.",
+            "Vou listar os pacotes instalados do Visual C++ que aparecem no relatório.",
+            "Posso explicar o que é e como instalar o Visual C++ pelo cartão Componentes do Windows para jogos e programas.",
+            "Posso indicar o cartão onde você pode instalar o DirectX, em Ferramentas.",
+            "Posso analisar o erro do instalador do DirectX que apareceu na tela.",
         ];
         var wrongRefused = refused.Where(text => Validate(text) != AgentProtocol.RuntimeInstallReason).Select(text => text + " → " + Validate(text)).ToArray();
         var wrongAccepted = accepted.Where(text => Validate(text) == AgentProtocol.RuntimeInstallReason || AgentProtocol.OffersRuntimeInstall(AgentProtocol.Normalize(text))).ToArray();
