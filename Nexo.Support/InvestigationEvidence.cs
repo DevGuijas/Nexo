@@ -304,6 +304,7 @@ public sealed class InvestigationEvidence
             TemperatureSourceReason => SendsToTaskManagerForTemperature,
             AgentProtocol.PendingActionReason => part => AgentProtocol.PendingActionPhrase(part) != null,
             AgentProtocol.AppRemovalReason => AgentProtocol.AppRemovalPassage,
+            AgentProtocol.RuntimeInstallReason => AgentProtocol.OffersRuntimeInstall,
             _ => null
         };
         var parts = Regex.Split(message, @"(?<=[!?;\n])|(?<=\.)(?=\s|$)").Select(part => part.Trim()).Where(part => part.Length > 0).ToArray();
