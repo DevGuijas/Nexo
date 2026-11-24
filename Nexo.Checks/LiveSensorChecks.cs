@@ -338,7 +338,8 @@ internal static class LiveSensorChecks
         var path = Path.Combine(Path.GetTempPath(), "nexo-live-check-" + Guid.NewGuid().ToString("N") + ".ps1");
         try
         {
-            var wrapped = "try {\n$nxResult=@(. {\n" + body + "\n})\nWrite-Output ('OK:' + ($nxResult[-1] | ConvertTo-Json -Compress -Depth 4))\n} catch { Write-Output ('ERRO:' + $_.Exception.Message) }\n"
+            // No Windows, sem isto o pwsh escreve na página de código do console e os acentos chegam trocados (CI de 24/11).
+            var wrapped = "[Console]::OutputEncoding=[Text.Encoding]::UTF8\ntry {\n$nxResult=@(. {\n" + body + "\n})\nWrite-Output ('OK:' + ($nxResult[-1] | ConvertTo-Json -Compress -Depth 4))\n} catch { Write-Output ('ERRO:' + $_.Exception.Message) }\n"
                 + "Write-Output ('REG:' + ($script:reg | ConvertTo-Json -Compress -Depth 4))\nWrite-Output ('START:' + $script:started)\nWrite-Output ('UNREG:' + $script:unreg)\n";
             File.WriteAllText(path, wrapped, new UTF8Encoding(true));
             var start = new ProcessStartInfo(shell) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true, StandardOutputEncoding = Encoding.UTF8 };
