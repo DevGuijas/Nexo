@@ -53,6 +53,7 @@ Observações:
 Só o Subject e o `Valid` não bastam: uma raiz extra instalada no PC, por adware ou por um proxy TLS, emitiria um certificado com o mesmo Subject, e o Windows o daria como `Valid`. Por isso, na mesma chamada do PowerShell do `Get-AuthenticodeSignature`, o Nexo monta a cadeia do `SignerCertificate` com `X509Chain` e exige que o certificado raiz tenha a impressão digital SHA-1 esperada para o item (campo `Root` do catálogo). A comparação é exata, sem diferenciar maiúsculas de minúsculas. Se a raiz for outra, o item para em "Assinatura não confiável", antes do UAC.
 
 - A cadeia usa `RevocationMode` `NoCheck`, para não depender de rede. O `Valid` do Authenticode já vem da conferência do Windows, e nenhum outro ponto do Nexo consulta revogação no PC do usuário (o `Online` existe só no script de assinatura do release).
+- A cadeia usa `VerificationFlags` `IgnoreNotTimeValid`, porque a raiz de 2001 e as folhas do 2012 e do 2013 estão vencidas. O resultado do `Build` e cada `ChainStatus` vão na saída do PowerShell, e o Nexo exige `Build` verdadeiro. Ele só tolera os estados `NotTimeValid`, `RevocationStatusUnknown` e `OfflineRevocation`. Qualquer outro, como `PartialChain`, `NotSignatureValid` ou `UntrustedRoot`, descarta a raiz, e o item para em "Assinatura não confiável", com o estado na mensagem, antes do UAC. A falta do `Build` ou do `ChainStatus` na saída também recusa o item.
 - Os certificados embutidos no arquivo entram como auxiliares (`ExtraStore`). A raiz precisa vir do repositório do Windows e ter a impressão digital fixada.
 
 | Raiz | SHA-1 | Itens |
@@ -99,12 +100,13 @@ Códigos de saída:
   1. A confirmação lista item a item o que vai ser instalado e de onde vem.
   2. Cada item é baixado só de `aka.ms`, `download.microsoft.com` ou `download.visualstudio.microsoft.com`, por HTTPS na porta 443, sem redirecionamento automático. Cada salto é conferido antes do pedido, com no máximo 5 redirecionamentos.
   3. O tamanho é limitado durante o download: o fixado, ou 64 MB no v14.
-  4. O arquivo vai para `%TEMP%\Nexo\Runtimes\<guid>` e fica aberto sem compartilhar escrita até o instalador terminar. Um link ou junção no caminho é recusado.
-  5. A pasta `<guid>` ganha uma DACL protegida, sem herança, aplicada pelo próprio Nexo, sem admin (veja "Pasta do instalador").
-  6. O Nexo confere o SHA-256 (quando fixado), o Authenticode `Valid` com o assinante esperado e a raiz da cadeia.
-  7. Com o arquivo ainda aberto, o Nexo confere que a pasta contém só o instalador, e só então pede o UAC.
-  8. Depois do instalador, a verificação confere o componente.
-  9. Um UAC cancelado encerra a fila: os itens seguintes ficam "Não iniciado". O cancelamento do cartão vale entre itens; um instalador já iniciado termina antes.
+  4. O Nexo cria a pasta `%TEMP%\Nexo\Runtimes\<guid>` e, nela, o arquivo do instalador vazio, já aberto para escrita sem compartilhamento.
+  5. Logo em seguida, antes do download, a pasta ganha uma DACL protegida, sem herança, aplicada pelo próprio Nexo, sem admin (veja "Pasta do instalador"). Se ela não puder ser aplicada, nada é baixado.
+  6. O download grava direto no arquivo aberto. Depois, o Nexo o reabre só para leitura, sem compartilhar escrita nem exclusão, até o instalador terminar. Um link ou junção no caminho é recusado.
+  7. O Nexo confere o SHA-256 (quando fixado), o Authenticode `Valid` com o assinante esperado, a cadeia montada e a raiz da cadeia.
+  8. Com o arquivo ainda aberto, o Nexo confere que a pasta contém só o instalador, e só então pede o UAC.
+  9. Depois do instalador, a verificação confere o componente.
+  10. Um UAC cancelado encerra a fila: os itens seguintes ficam "Não iniciado". O cancelamento do cartão vale entre itens; um instalador já iniciado termina antes.
 - **Resultado por item:** Ok, Já instalado, Reinício pendente, Falha (com código), UAC cancelado, Integridade, Assinatura, Assinatura não confiável, Endereço recusado, Sem download, Link no caminho, Pasta do instalador alterada ou Não iniciado. Ele vai:
   - para o cartão;
   - para `runtimes-audit.ndjson` na pasta do Nexo, com a URL final, os bytes, o SHA-256 calculado, o assinante, o código de saída e, se sobrou, a pasta temporária (`Leftover`);
@@ -113,17 +115,21 @@ Códigos de saída:
 
 ## Pasta do instalador
 
-A pasta `%TEMP%\Nexo\Runtimes\<guid>` herdaria a ACL do `%TEMP%`. Um processo da mesma conta poderia gravar uma DLL ali antes do UAC, e os instaladores antigos (2005 e 2008, pacotes IExpress) carregam DLLs da própria pasta, já como administrador. Por isso, depois do download e antes do `runas`, o Nexo aplica à pasta uma DACL protegida, sem herança:
+A pasta `%TEMP%\Nexo\Runtimes\<guid>` herdaria a ACL do `%TEMP%`. Um processo da mesma conta poderia gravar uma DLL ali antes do UAC, e os instaladores antigos (2005 e 2008, pacotes IExpress) carregam DLLs da própria pasta, já como administrador. Por isso, logo depois de criar a pasta e o instalador vazio, e antes do download, o Nexo aplica à pasta uma DACL protegida, sem herança:
 
 - `OWNER RIGHTS` (`S-1-3-4`) com `ReadAndExecute`, `Delete` e `DeleteSubdirectoriesAndFiles`. Isso tira do dono o `WRITE_DAC` e o `WRITE_OWNER` implícitos e impede criar arquivos e pastas;
 - `SYSTEM` e Administradores com controle total;
 - nenhuma ACE para o usuário atual.
 
-O dono ainda pode definir a DACL nesse momento; depois dela, perde o `WRITE_DAC`. As ACEs são herdáveis, e o Windows as propaga ao instalador já gravado. Com o arquivo ainda aberto e travado, o Nexo lista a pasta: arquivos e subpastas, inclusive ocultos e de sistema, e os fluxos alternativos (ADS) da pasta e do instalador. Se houver qualquer coisa além do instalador, o item para em "Pasta do instalador alterada" e nada é executado.
+O dono ainda pode definir a DACL nesse momento; depois dela, perde o `WRITE_DAC`. As ACEs são herdáveis, e o Windows as propaga ao instalador já criado. O handle de escrita do Nexo foi aberto antes da DACL, e o Windows confere o acesso na abertura: o download continua gravando nele. Terminado o download, o Nexo fecha esse handle e reabre o arquivo só para leitura com `FileShare.Read`. O `Get-AuthenticodeSignature` e o `runas` leem o arquivo com esse compartilhamento, o que um handle de escrita impediria. Se outro processo tiver o arquivo aberto para escrita, a reabertura falha; se algo o alterou entre o fechamento e a reabertura, o SHA-256 ou a assinatura acusam. Com o arquivo ainda aberto e travado, o Nexo lista a pasta: arquivos e subpastas, inclusive ocultos e de sistema, e os fluxos alternativos (ADS) da pasta e do instalador. Se houver qualquer coisa além do instalador, o item para em "Pasta do instalador alterada" e nada é executado.
 
 No fim, o Nexo apaga o arquivo e a pasta com a ACE de `Delete` do `OWNER RIGHTS`. Se não conseguir, por exemplo quando sobrou um arquivo plantado, a pasta fica e o caminho vai para `runtimes-audit.ndjson`, sem erro para o usuário.
 
-Risco residual: depois do UAC, o instalador elevado extrai os próprios arquivos no `%TEMP%`. Esse risco é o mesmo de rodar o instalador da Microsoft a partir da pasta Downloads, e fica fora do alcance do Nexo.
+Riscos residuais:
+
+- Entre o `CreateDirectory` e a DACL ainda há uma janela. Ela só contém a criação do instalador vazio, sem download, mas não tem duração garantida. Um processo da mesma conta que abra um handle na pasta nessa janela, com `FILE_ADD_FILE` ou `WRITE_DAC`, mantém esse acesso depois da troca da DACL, porque o Windows confere o acesso na abertura. Com ele, poderia gravar um arquivo na pasta depois da listagem e antes do `runas`. O nome da pasta é um GUID novo, e o instalador já nasce aberto sem compartilhamento, então esse processo não consegue abrir o próprio instalador para gravar. A listagem logo antes do UAC pega o que tiver sido gravado até ali.
+- Um processo da mesma conta já consegue injetar código no próprio Nexo, que roda com o mesmo usuário. A DACL não protege contra isso; ela fecha só o caminho da DLL plantada ao lado do instalador elevado.
+- Depois do UAC, o instalador elevado extrai os próprios arquivos no `%TEMP%`. Esse risco é o mesmo de rodar o instalador da Microsoft a partir da pasta Downloads, e fica fora do alcance do Nexo.
 
 ## Como atualizar quando a Microsoft trocar um arquivo
 
@@ -146,7 +152,9 @@ O v14 não precisa de atualização enquanto o link permanente continuar entrega
 - a verificação sem alterar nada;
 - o hash diferente, os tamanhos, os hosts fora da lista, os laços de redirecionamento e o assinante diferente;
 - a raiz da cadeia por item, com a saída simulada do PowerShell e o script real num pwsh com `Get-AuthenticodeSignature` falso;
-- a ordem DACL → assinatura → listar → runas e a recusa com arquivo, subpasta ou ADS a mais na pasta; no Windows, a DACL real (o dono não cria arquivo nem troca a DACL, e apaga tudo no fim);
+- a cadeia com a saída simulada: `Build` verdadeiro com `NotTimeValid` ou revogação desconhecida é aceito; `PartialChain`, `NotSignatureValid`, `UntrustedRoot`, `Build` falso ou ausente e `ChainStatus` ausente são recusados;
+- a ordem instalador vazio → DACL → download → hash → assinatura → listar → runas, a DACL recusada sem download e a recusa com arquivo, subpasta ou ADS a mais na pasta;
+- no Windows, a DACL real: o handle aberto antes dela continua gravando; o dono não cria arquivo, pasta nem fluxo (na pasta e no instalador), não troca a DACL e não grava no instalador fechado; e o Nexo apaga tudo no fim. Num processo elevado, como o runner do GitHub, os Administradores têm controle total na DACL, e essas recusas aparecem como `IGNORADO`; a listagem e o resto rodam sempre;
 - os códigos 3010, 1641, 1638 com e sem o componente depois, de erro e 0 sem o componente;
 - o UAC cancelado, os itens antigos desmarcados e a trava do modelo.
 
