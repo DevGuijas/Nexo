@@ -56,7 +56,10 @@ if ($LASTEXITCODE -ne 0) { throw 'Falha ao publicar o aplicativo.' }
 foreach ($native in $nativeBesideExe) {
     if (!(Test-Path -LiteralPath (Join-Path $appStage $native) -PathType Leaf)) { throw "A publicação não deixou $native ao lado do Nexo.exe; o pacote não seria aceito pelo leitor de sensores." }
 }
-# Só o Nexo.exe recebe a assinatura da equipe. As DLLs nativas ao lado dele vêm do runtime da Microsoft, já assinadas por ela.
+# Só o Nexo.exe recebe a assinatura da equipe; as DLLs nativas ao lado dele não são reassinadas. Só as do WPF (*_cor3.dll) vêm do
+# runtime da Microsoft, já assinadas por ela. A e_sqlite3.dll (pacote SQLitePCLRaw.lib.e_sqlite3) não tem assinatura, e a
+# libMonoPosixHelper.dll e a MonoPosixHelper.dll vêm do pacote Mono.Posix.NETStandard (dependência do LibreHardwareMonitorLib), não
+# do runtime. A integridade de todas é a do ZIP, cujo SHA-256 vai no latest.json assinado, e cada uma tem a sua linha no SHA256SUMS.txt.
 & (Join-Path $PSScriptRoot 'Sign-NexoArtifacts.ps1') -Paths (Join-Path $appStage 'Nexo.exe') -Thumbprint $CodeSigningThumbprint -TimestampServer $TimestampServer
 if (Test-Path -LiteralPath $appArchive) { Remove-Item -LiteralPath $appArchive -Force }
 [System.IO.Compression.ZipFile]::CreateFromDirectory($appStage, $appArchive, [System.IO.Compression.CompressionLevel]::Optimal, $false)

@@ -324,6 +324,24 @@ internal static class LiveSensorChecks
             "Posso explicar como ativar a temperatura ao vivo.", "A CPU está a 79 °C, pelo leitor de sensores do sistema."];
         var refused = allowed.Where(text => evidence.ValidateStatement(text, false) == InvestigationEvidence.LiveReaderOfferReason).ToList();
         check(refused.Count == 0, "#142/#135: orientar o usuário, a negação e citar a leitura passam" + (refused.Count > 0 ? " · recusados: " + string.Join(" | ", refused) : ""));
+        // Merge com a #150: a trava dos componentes do Windows (AgentProtocol, antes) e a do leitor e do PawnIO (InvestigationEvidence,
+        // depois) recusam cada uma só a própria oferta, e a resposta que orienta para os dois cartões passa nas duas.
+        string? Protocol(string text) => AgentProtocol.Validate("finish_support", System.Text.Json.JsonSerializer.SerializeToElement(new { }), text);
+        var readerOffers = offers.Concat(["Posso instalar o PawnIO para você.", "Quer que eu instale o driver PawnIO?"]).ToArray();
+        var runtimeLeak = readerOffers.Where(text => Protocol(text) == AgentProtocol.RuntimeInstallReason || AgentProtocol.OffersRuntimeInstall(AgentProtocol.Normalize(text))).ToList();
+        var notReader = readerOffers.Where(text => Protocol(text) == null && evidence.ValidateStatement(text, false) is not (InvestigationEvidence.LiveReaderOfferReason or InvestigationEvidence.SensorDriverOfferReason)).ToList();
+        string[] runtimeOffers = ["Posso instalar o Visual C++ para você.", "Vou baixar o DirectX agora.", "Quer que eu atualize o .NET Framework?"];
+        var runtimeMissed = runtimeOffers.Where(text => Protocol(text) != AgentProtocol.RuntimeInstallReason).ToList();
+        var readerLeak = runtimeOffers.Where(text => evidence.ValidateStatement(text, false) is InvestigationEvidence.LiveReaderOfferReason or InvestigationEvidence.SensorDriverOfferReason).ToList();
+        string[] both = ["Você pode instalar o Visual C++ pelo cartão Componentes do Windows para programas, em Ferramentas, e ativar a temperatura ao vivo na Saúde do PC, pelo botão Ativar temperatura ao vivo.",
+            "Não posso instalar o DirectX nem ativar a temperatura ao vivo por aqui; use o cartão Componentes do Windows para programas, em Ferramentas, e o botão na Saúde do PC."];
+        var bothRefused = both.Where(text => Protocol(text) == AgentProtocol.RuntimeInstallReason || evidence.ValidateStatement(text, false) is InvestigationEvidence.LiveReaderOfferReason or InvestigationEvidence.SensorDriverOfferReason)
+            .Select(text => text + " → " + (Protocol(text) ?? evidence.ValidateStatement(text, false))).ToList();
+        check(runtimeLeak.Count == 0 && notReader.Count == 0 && runtimeMissed.Count == 0 && readerLeak.Count == 0 && bothRefused.Count == 0,
+            "#142 + #150: a trava dos componentes do Windows e a do leitor/PawnIO convivem, cada uma com o próprio motivo, e a orientação para os dois cartões passa"
+            + (runtimeLeak.Count > 0 ? " · leitor como componente: " + string.Join(" | ", runtimeLeak) : "") + (notReader.Count > 0 ? " · leitor aceito: " + string.Join(" | ", notReader) : "")
+            + (runtimeMissed.Count > 0 ? " · componente aceito: " + string.Join(" | ", runtimeMissed) : "") + (readerLeak.Count > 0 ? " · componente como leitor: " + string.Join(" | ", readerLeak) : "")
+            + (bothRefused.Count > 0 ? " · orientação recusada: " + string.Join(" | ", bothRefused) : ""));
         var guidance = evidence.RepeatedGuidance(InvestigationEvidence.LiveReaderOfferReason, "A CPU está a 79 °C. Posso ativar a temperatura ao vivo para você.");
         check(guidance.Contains("Posso ativar a temperatura ao vivo para você."), "#142: na repetição, a trava cita o trecho da oferta a remover");
     }
@@ -364,6 +382,12 @@ internal static class LiveSensorChecks
         var app = At("$sums.Add(\"$appHash  nexo-app.zip\")");
         check(sums > 0 && others > sums && app > others && script.Contains("'SHA256SUMS.txt') -Value $sums -Encoding ascii"),
             "#142 B1: o SHA256SUMS.txt lista o Nexo.exe, cada outro arquivo do ZIP (as DLLs nativas ao lado dele) e o próprio ZIP");
+        // @qa (L2): a linha de cada arquivo leva o caminho completo dentro do ZIP ($entry.FullName), e não só o nome: dois arquivos
+        // com o mesmo nome em pastas diferentes (ThirdParty\…) não podem virar linhas iguais nem ser confundidos com os da raiz.
+        var entries = others > 0 && app > others ? script[others..app] : "";
+        check(entries.Contains("$sums.Add([Convert]::ToHexString([System.Security.Cryptography.SHA256]::HashData($stream)) + '  ' + $entry.FullName)")
+            && !Regex.IsMatch(entries, @"\$(?:entry|_)\.Name\b") && script.Contains("| Sort-Object FullName))"),
+            "#142 B1 (@qa L2): cada linha do SHA256SUMS.txt usa o caminho completo da entrada no ZIP (FullName), nunca só o Name");
     }
 
     private static async Task Scripts(Action<bool, string> check)
