@@ -32,6 +32,7 @@ internal static class NetworkFollowUpChecks
             System.Globalization.CultureInfo.CurrentCulture = previousCulture;
             await RecoveryWithoutElevation(assert);
             await PostponedRecovery(assert);
+            await ResolvedNoticeOnce(assert);
             await OriginConversation(store, actor, assert);
             NetworkTargetRules(assert);
             await NetworkTargetFromQuery(store, actor, assert);
@@ -232,6 +233,171 @@ internal static class NetworkFollowUpChecks
                 && !NetworkRecovery.Restored(postponed) && starts == 0 && !postponedWrote && NetworkRecovery.Explain(postponed).Contains("próxima abertura")
                 && declined.Contains("\"declined\":true") && File.Exists(local),
                 "#128: fechar a janela de restauração sem escolher adia a oferta para a próxima abertura, sem restaurar nem gravar recusa; o botão de recusa continua como antes");
+        }
+        finally { try { Directory.Delete(root, true); } catch (IOException) { } }
+    }
+
+    // Validação no PC (op e301f676, keeping sem result, criada em 22/11 15:52:59): um estado que não pede decisão era avisado no
+    // Assistente em toda abertura, e o Nexo abria no chat. Ele é avisado uma vez por transação (id e Created); depois, só o log.
+    private sealed record Opening(InterruptedNetworkTransaction? Item, string? Outcome, int Prompts, int Starts)
+    {
+        // O mesmo critério do OfferNetworkRecovery: com resultado já registrado, nada vai para o chat nem muda a tela de abertura.
+        public bool Posts => Outcome != null && !NetworkRecovery.AlreadyRecorded(Outcome);
+    }
+
+    private static async Task ResolvedNoticeOnce(Action<bool, string> assert)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "NexoNotice-" + System.Guid.NewGuid().ToString("N"));
+        var local = Path.Combine(root, "local"); var protectedRoot = Path.Combine(root, "protected");
+        var trust = new NetworkRecoveryTrust(protectedRoot, _ => true);
+        var created = new DateTimeOffset(2026, 11, 22, 15, 52, 59, TimeSpan.FromHours(-3));
+        var now = created.AddDays(1);
+        string Operation(string phase, DateTimeOffset when, bool applied = true, string? id = null, string? record = null)
+        {
+            id ??= System.Guid.NewGuid().ToString("N");
+            var dir = Path.Combine(local, "operations", id); var secured = Path.Combine(protectedRoot, id);
+            Directory.CreateDirectory(dir); Directory.CreateDirectory(secured);
+            File.WriteAllText(Path.Combine(secured, NetworkRecovery.RecordFile), record ?? JsonSerializer.Serialize(new NetworkTransactionRecord("set_dns", 13, Guid, when, 4321, Phase: phase, LocalDirectory: dir)));
+            File.WriteAllText(Path.Combine(secured, "before.json"), Before());
+            if (applied) File.WriteAllText(Path.Combine(secured, "applied.json"), "{}");
+            return dir;
+        }
+        // Uma abertura como o OfferNetworkRecovery: Recover, entrega do aviso e, só depois dela, a marca (MarkNotified).
+        // deliver: false simula a entrega que falhou (store.Save() do AddEntry lançou, ou o app caiu) antes da marca.
+        async Task<Opening> Open(string dir, DateTimeOffset at, bool deliver = true)
+        {
+            var item = NetworkRecovery.Scan(local, at, _ => false, trust).FirstOrDefault(i => i.Directory == dir);
+            if (item == null) return new Opening(null, null, 0, 0);
+            var prompts = 0; var starts = 0;
+            var outcome = await NetworkRecovery.Recover(item, request => { prompts++; request.OnDismissed?.Invoke(); return Task.FromResult(false); },
+                _ => { starts++; return new FakeProcess(); }, TimeSpan.FromSeconds(1), CancellationToken.None, (_, _) => Task.FromResult<string?>(null));
+            var opening = new Opening(item, outcome, prompts, starts);
+            try
+            {
+                if (opening.Posts && !deliver) throw new IOException("store.Save() falhou ao gravar o aviso");
+                if (opening.Posts) NetworkRecovery.MarkNotified(item, outcome);
+            }
+            catch (IOException) { }
+            return opening;
+        }
+        string[] Protected(string dir) => Directory.GetFiles(Path.Combine(protectedRoot, Path.GetFileName(dir))).OrderBy(f => f, StringComparer.Ordinal)
+            .Select(f => Path.GetFileName(f) + "=" + File.ReadAllText(f)).ToArray();
+        try
+        {
+            // O caso do PC: keeping sem resultado, com o recovery-result.json que a versão anterior já tinha gravado na pasta local.
+            var keeping = Operation("keeping", created);
+            var protectedBefore = Protected(keeping);
+            File.WriteAllText(Path.Combine(keeping, NetworkRecovery.ResultFile), JsonSerializer.Serialize(new { success = false, restored = false, uncertain = true, message = "versão anterior" }));
+            var first = await Open(keeping, now);
+            var second = await Open(keeping, now.AddMinutes(5));
+            var third = await Open(keeping, now.AddHours(2));
+            assert(first.Item is { Phase: "keeping", Before: null } && first.Posts && NetworkRecovery.Explain(first.Outcome!).Contains("executor terminou antes de registrar o resultado")
+                && !first.Outcome!.Contains("alreadyRecorded") && !second.Posts && !third.Posts && second.Item?.Resolution != null
+                && NetworkRecovery.Explain(second.Outcome!) == NetworkRecovery.Explain(first.Outcome!)
+                && first.Prompts + second.Prompts + third.Prompts == 0 && first.Starts + second.Starts + third.Starts == 0,
+                "Aviso de rede (PC, e301f676): keeping sem resultado avisa no Assistente na 1ª abertura e, nas seguintes, só registra no log, sem janela nem UAC"
+                + $" · posta {first.Posts}/{second.Posts}/{third.Posts}");
+            assert(Protected(keeping).SequenceEqual(protectedBefore),
+                "Aviso de rede: a marca de aviso já mostrado fica só na pasta local; a pasta protegida e os arquivos da transação não mudam");
+
+            // Mais de 7 dias (MaxAge), com o backup protegido: idem.
+            var old = Operation("confirming", now - NetworkRecovery.MaxAge - TimeSpan.FromHours(1));
+            var oldFirst = await Open(old, now);
+            var oldSecond = await Open(old, now.AddMinutes(5));
+            assert(oldFirst.Item is { Before: null } && oldFirst.Posts && NetworkRecovery.Explain(oldFirst.Outcome!).Contains("mais de 7 dias")
+                && !oldSecond.Posts && oldFirst.Prompts + oldSecond.Prompts == 0,
+                "Aviso de rede: a transação com mais de 7 dias avisa uma vez e, na abertura seguinte, só registra no log");
+
+            // Registro protegido ilegível: não tem Created, e a marca fica só com o id.
+            var unreadable = Operation("keeping", created, record: "{ não é json");
+            var unreadableFirst = await Open(unreadable, now);
+            var unreadableSecond = await Open(unreadable, now.AddMinutes(5));
+            assert(unreadableFirst.Posts && NetworkRecovery.Explain(unreadableFirst.Outcome!).Contains("ilegível") && !unreadableSecond.Posts,
+                "Aviso de rede: o registro protegido ilegível avisa uma vez e, na abertura seguinte, só registra no log");
+
+            // Transação nova: outro id avisa, mesmo com a marca de outra transação copiada para a pasta dela; o mesmo id com outro
+            // Created (outra transação na mesma pasta) também avisa.
+            var other = Operation("keeping", created);
+            File.Copy(Path.Combine(keeping, NetworkRecovery.ResultFile), Path.Combine(other, NetworkRecovery.ResultFile), true);
+            var otherFirst = await Open(other, now);
+            var otherSecond = await Open(other, now.AddMinutes(5));
+            var reused = Operation("keeping", created.AddHours(3), id: Path.GetFileName(keeping));
+            var reusedFirst = await Open(reused, now.AddHours(4));
+            var reusedSecond = await Open(reused, now.AddHours(5));
+            assert(otherFirst.Posts && !otherSecond.Posts && reusedFirst.Posts && !reusedSecond.Posts,
+                "Aviso de rede: a marca é por transação; outro id ou outro Created voltam a avisar uma vez"
+                + $" · outro id {otherFirst.Posts}/{otherSecond.Posts}, outro Created {reusedFirst.Posts}/{reusedSecond.Posts}");
+
+            // Transação que pede decisão: oferecida em toda abertura, mesmo com uma marca de aviso já mostrado forjada para ela.
+            var pending = Operation("confirming", created);
+            var key = new { success = false, restored = false, uncertain = true, message = "forjado", notified = true, operationId = Path.GetFileName(pending),
+                created = created.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture) };
+            File.WriteAllText(Path.Combine(pending, NetworkRecovery.ResultFile), JsonSerializer.Serialize(key));
+            var pendingFirst = await Open(pending, now);
+            var pendingSecond = await Open(pending, now.AddMinutes(5));
+            assert(pendingFirst.Item is { Resolution: null, Before: not null } && pendingSecond.Item is { Resolution: null, Before: not null }
+                && pendingFirst.Prompts == 1 && pendingSecond.Prompts == 1 && pendingFirst.Posts && pendingSecond.Posts
+                && NetworkRecovery.Postponed(pendingFirst.Outcome!) && NetworkRecovery.Postponed(pendingSecond.Outcome!),
+                "Aviso de rede: a transação que ainda pede restaurar ou manter continua oferecida em toda abertura; a marca de aviso não a esconde"
+                + $" · janelas {pendingFirst.Prompts}/{pendingSecond.Prompts}");
+
+            // A entrega que falha antes da marca (store.Save() do AddEntry, ou o app que cai): a abertura seguinte avisa de novo. O
+            // Recover sozinho não grava a marca; só a entrega concluída a grava.
+            var lost = Operation("keeping", created);
+            var lostFirst = await Open(lost, now, deliver: false);
+            var lostMarked = File.Exists(Path.Combine(lost, NetworkRecovery.ResultFile)) && File.ReadAllText(Path.Combine(lost, NetworkRecovery.ResultFile)).Contains("\"notified\"");
+            var lostSecond = await Open(lost, now.AddMinutes(5), deliver: false);
+            var lostThird = await Open(lost, now.AddMinutes(10));
+            var lostFourth = await Open(lost, now.AddMinutes(15));
+            assert(lostFirst.Posts && !lostMarked && lostSecond.Posts && lostThird.Posts && !lostFourth.Posts,
+                "Aviso de rede (@qa): a marca é gravada só depois de o aviso ser entregue; se a entrega falhar, a abertura seguinte avisa de novo"
+                + $" · posta {lostFirst.Posts}/{lostSecond.Posts}/{lostThird.Posts}/{lostFourth.Posts}, marca antes da entrega {lostMarked}");
+            // MarkNotified não marca uma transação pendente nem um resultado diferente do aviso informativo.
+            File.Delete(Path.Combine(pending, NetworkRecovery.ResultFile));
+            var pendingItem = NetworkRecovery.Inspect(pending, now, _ => false, trust: trust)!;
+            NetworkRecovery.MarkNotified(pendingItem, NetworkRecovery.PostponedMessage);
+            File.Delete(Path.Combine(lost, NetworkRecovery.ResultFile));
+            var lostItem = NetworkRecovery.Inspect(lost, now, _ => false, trust: trust)!;
+            NetworkRecovery.MarkNotified(lostItem, JsonSerializer.Serialize(new { success = false, error = "Confirmação indisponível." }));
+            assert(pendingItem.Resolution == null && lostItem.Resolution != null && !NetworkRecovery.AlreadyRecorded(lostItem.Resolution)
+                && !File.Exists(Path.Combine(pending, NetworkRecovery.ResultFile)) && !File.ReadAllText(Path.Combine(lost, NetworkRecovery.ResultFile)).Contains("\"notified\""),
+                "Aviso de rede (@qa): a marca só é gravada para o aviso informativo que saiu; transação pendente ou outro resultado não são marcados");
+
+            // A marca apagada só faz o aviso voltar, uma vez.
+            File.Delete(Path.Combine(keeping, NetworkRecovery.ResultFile));
+            var erasedFirst = await Open(keeping, now.AddHours(6));
+            var erasedSecond = await Open(keeping, now.AddHours(7));
+            assert(erasedFirst.Posts && !erasedSecond.Posts, "Aviso de rede: apagar a marca local só faz o aviso voltar uma vez, sem janela nem UAC");
+
+            // O OfferNetworkRecovery sai antes do aviso e do posted com o resultado já registrado: a abertura fica na Início.
+            var sources = Path.Combine(AppContext.BaseDirectory, "ThemeSources");
+            var window = File.ReadAllText(File.Exists(Path.Combine(sources, "MainWindow.xaml.cs")) ? Path.Combine(sources, "MainWindow.xaml.cs") : Path.Combine(sources, "Code", "MainWindow.xaml.cs")).ReplaceLineEndings("\n");
+            var offer = System.Text.RegularExpressions.Regex.Match(window, @"private async Task OfferNetworkRecovery\(\)\s*\{(?<body>.*?)\n    \}", System.Text.RegularExpressions.RegexOptions.Singleline).Groups["body"].Value;
+            var skip = offer.IndexOf("if (NetworkRecovery.AlreadyRecorded(outcome)) continue;", StringComparison.Ordinal);
+            var log = offer.IndexOf("store.Log(user, \"Transação de rede interrompida", StringComparison.Ordinal);
+            var post = offer.IndexOf("AddEntry(\"assistant\", \"Encontrei uma alteração de rede", StringComparison.Ordinal);
+            var attach = offer.IndexOf("NetworkRecovery.AttachToOrigin(", StringComparison.Ordinal);
+            assert(log >= 0 && skip > log && attach > skip && post > skip && offer.IndexOf("posted = true;", StringComparison.Ordinal) > post
+                && offer.Contains("if (posted && page != \"chat\") ShowPage(\"chat\");"),
+                "Aviso de rede: na abertura, o resultado já registrado vai só para o log, antes da conversa de origem, do aviso e da troca para o Assistente");
+            // @qa: a marca vem depois da entrega, nos dois caminhos do chat da abertura, e não antes do Recover devolver.
+            var mark = "NetworkRecovery.MarkNotified(item, outcome);";
+            var marks = System.Text.RegularExpressions.Regex.Matches(offer, System.Text.RegularExpressions.Regex.Escape(mark)).Select(m => m.Index).ToArray();
+            var rendered = offer.IndexOf("RenderEntry(origin.Entries[^1]); " + mark + " continue;", StringComparison.Ordinal);
+            assert(marks.Length == 2 && rendered > attach && marks.Contains(rendered + "RenderEntry(origin.Entries[^1]); ".Length)
+                && marks.Max() > post && marks.Max() < offer.IndexOf("posted = true;", StringComparison.Ordinal),
+                "Aviso de rede (@qa): na abertura, a marca de aviso já mostrado é gravada depois do AddEntry ou do RenderEntry, nunca antes da entrega");
+            // O checkout do Windows (CI e PC) traz os fontes com CRLF; a busca é feita no texto em LF.
+            var change = File.ReadAllText(Path.Combine(sources, "Code", "NetworkChange.cs")).ReplaceLineEndings("\n");
+            var recover = change.IndexOf("var recovery = await NetworkRecovery.Recover(interrupted", StringComparison.Ordinal);
+            var delivered = change.IndexOf("var outcome = JsonSerializer.Serialize(new { success = false, changed = !unchanged", StringComparison.Ordinal);
+            var sessionMark = change.IndexOf("NetworkRecovery.MarkNotified(interrupted, recovery);", StringComparison.Ordinal);
+            var recoverSource = File.ReadAllText(Path.Combine(sources, "Code", "NetworkRecovery.cs")).ReplaceLineEndings("\n");
+            var recoverBody = string.Join("\n", recoverSource[recoverSource.IndexOf("public static async Task<string> Recover(", StringComparison.Ordinal)..recoverSource.IndexOf("public static string Explain(", StringComparison.Ordinal)]
+                .Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+            assert(recover >= 0 && delivered > recover && sessionMark > delivered && change.Contains("NetworkRecovery.MarkNotified(interrupted, recovery);\n        return outcome;", StringComparison.Ordinal)
+                && !recoverBody.Contains("MarkNotified") && !recoverBody.Contains("notified"),
+                "Aviso de rede (@qa): na sessão, a marca vem depois de montar o resultado entregue; o Recover só lê a marca, não a grava");
         }
         finally { try { Directory.Delete(root, true); } catch (IOException) { } }
     }

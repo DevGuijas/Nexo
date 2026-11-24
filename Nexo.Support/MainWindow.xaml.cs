@@ -76,6 +76,18 @@ public partial class MainWindow : Window
     private Button? debloatUndoView;
     private Button? debloatCancelView;
     private readonly object debloatAuditSync = new();
+    // Componentes do Windows para programas (#150).
+    private CancellationTokenSource? runtimeCancellation;
+    private bool runtimeRunning;
+    private string runtimeStatus = "Nenhuma verificação iniciada nesta sessão.";
+    private RuntimeScan? runtimeScan;
+    private readonly Dictionary<string, CheckBox> runtimeChecks = new();
+    private StackPanel? runtimeListView;
+    private TextBlock? runtimeProgressView;
+    private Button? runtimeScanView;
+    private Button? runtimeInstallView;
+    private Button? runtimeCancelView;
+    private readonly object runtimeAuditSync = new();
     public MainWindow(Store store)
     {
         InitializeComponent(); Title = "Nexo " + AppVersion.Current + " • Suporte inteligente"; this.store = store; support = new SupportService(store);
@@ -110,7 +122,7 @@ public partial class MainWindow : Window
                 pending.Close();
                 return;
             }
-            if (officeRunning || optimizationRunning || debloatRunning)
+            if (officeRunning || optimizationRunning || debloatRunning || runtimeRunning)
             {
                 e.Cancel = true;
                 exitRequested = false;
@@ -910,15 +922,18 @@ public partial class MainWindow : Window
                 catch (Exception ex) { outcome = System.Text.Json.JsonSerializer.Serialize(new { success = false, error = ex.Message }); }
                 var message = NetworkRecovery.Explain(outcome);
                 store.Log(user, "Transação de rede interrompida (" + Path.GetFileName(item.Directory) + "): " + message);
-                // A conferência sem elevação já foi avisada numa abertura anterior: só o registro (#128).
+                // A conferência sem elevação (#128) ou um estado que não pede decisão (keeping sem resultado, mais de 7 dias) já foi avisado
+                // numa abertura anterior: só o registro, sem aviso no chat e sem trocar a tela de abertura.
                 if (NetworkRecovery.AlreadyRecorded(outcome)) continue;
                 // #128: o resultado também vai para a conversa em que a alteração começou, com a linha de fatos.
                 Conversation? origin = null;
                 try { origin = NetworkRecovery.AttachToOrigin(store, user, item.Directory, outcome, DateTimeOffset.Now); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { store.Log(user, "Resultado da recuperação de rede não anexado à conversa de origem: " + ex.Message); }
-                if (origin != null && ReferenceEquals(origin, conversation)) { RenderEntry(origin.Entries[^1]); continue; }
+                // A marca de aviso já mostrado só é gravada depois de o aviso estar no chat: se a entrega falhar, ele volta na próxima abertura.
+                if (origin != null && ReferenceEquals(origin, conversation)) { RenderEntry(origin.Entries[^1]); NetworkRecovery.MarkNotified(item, outcome); continue; }
                 AddEntry("assistant", "Encontrei uma alteração de rede que não terminou.\n\n" + message
                     + (origin != null ? "\n\nO resultado também foi registrado no atendimento “" + origin.Title + "”." : ""), NetworkRecovery.Restored(outcome) ? "result" : "error");
+                NetworkRecovery.MarkNotified(item, outcome);
                 posted = true;
             }
         }
@@ -1110,6 +1125,11 @@ public partial class MainWindow : Window
         if (debloatCancelView != null) debloatCancelView.IsEnabled = debloatRunning;
         foreach (var check in debloatChecks.Values) check.IsEnabled = !debloatRunning && check.Tag is not DebloatAvailability.AlreadyApplied;
         if (debloatRiskView != null) debloatRiskView.IsEnabled = !debloatRunning;
+        if (runtimeProgressView != null) runtimeProgressView.Text = runtimeStatus;
+        if (runtimeScanView != null) runtimeScanView.IsEnabled = !runtimeRunning;
+        if (runtimeInstallView != null) runtimeInstallView.IsEnabled = !runtimeRunning && runtimeChecks.Count > 0;
+        if (runtimeCancelView != null) runtimeCancelView.IsEnabled = runtimeRunning;
+        foreach (var check in runtimeChecks.Values) check.IsEnabled = !runtimeRunning;
     }
     private void Tools()
     {
@@ -1187,11 +1207,13 @@ public partial class MainWindow : Window
         optimizePanel.Children.Add(Text("Se a etapa de disco já começou, o Nexo aguarda seu término para informar o resultado. A manutenção executada não é revertida pelo cancelamento.", 11, "Subtle"));
         var optimizeCard = Card(optimizePanel); PageContent.Children.Add(optimizeCard);
         var debloatCard = Card(DebloatCard()); PageContent.Children.Add(debloatCard);
+        var runtimeCard = Card(RuntimeCard()); PageContent.Children.Add(runtimeCard);
+        var pawnIoCard = Card(PawnIoPanel()); PageContent.Children.Add(pawnIoCard);
         overview.Children.Add(ToolCard(1, "Instalação", "Instalar Office", "Office LTSC 2024 com o aviso de licença por volume.", "Microsoft · Office LTSC 2024", officeCard));
         overview.Children.Add(ToolCard(2, "Manutenção", "Otimizar PC", "Temporários antigos e manutenção nativa dos discos.", "Temporários · disco", optimizeCard));
         overview.Children.Add(ToolCard(3, "Privacidade · aparência", "Apps pré-instalados e ajustes do Windows", "Apps que vêm com o Windows e ajustes, aplicados só depois da sua confirmação.", "Apps · serviços · ajustes", debloatCard));
-        var pawnIoCard = Card(PawnIoPanel()); PageContent.Children.Add(pawnIoCard);
-        overview.Children.Add(ToolCard(4, "Sensores · driver de terceiros", "Instalar PawnIO (driver oficial)", "Driver da leitura de temperatura da CPU, instalado pelo assistente oficial depois da sua confirmação.", "namazso · GPL-2.0 · " + PawnIoSetup.Version, pawnIoCard));
+        overview.Children.Add(ToolCard(4, "Programas · bibliotecas", RuntimePresentation.CardTitle, "Visual C++, DirectX e .NET: o que falta neste PC, instalado só pelos instaladores oficiais da Microsoft.", "VC++ · DirectX · .NET", runtimeCard));
+        overview.Children.Add(ToolCard(5, "Sensores · driver de terceiros", "Instalar PawnIO (driver oficial)", "Driver da leitura de temperatura da CPU, instalado pelo assistente oficial depois da sua confirmação.", "namazso · GPL-2.0 · " + PawnIoSetup.Version, pawnIoCard));
         UpdateToolsView();
     }
     // Situação da ferramenta numa faixa própria, com o rótulo em mono.
@@ -1542,6 +1564,107 @@ public partial class MainWindow : Window
             });
         }
         catch (OperationalStoreException ex) { debloatStatus += "\nO registro no histórico operacional falhou: " + ex.Message; }
+    }
+    // Componentes do Windows (#150): só pelo menu, nunca pelo modelo. Verificar só lê o registro e os arquivos; Instalar pede
+    // confirmação com a lista e um UAC por item.
+    private StackPanel RuntimeCard()
+    {
+        var panel = new StackPanel();
+        panel.Children.Add(SectionHeading("tools", RuntimePresentation.CardTitle));
+        panel.Children.Add(Text("Muitos programas não abrem quando falta um Visual C++ Redistributable ou uma DLL do DirectX antigo (d3dx9_43.dll, xinput1_3.dll). Primeiro o Nexo verifica o que existe neste PC, sem alterar nada; depois instala só o que você marcar.", 13, "Secondary"));
+        panel.Children.Add(Text(RuntimePresentation.CardNotice, 12, "Secondary"));
+        runtimeProgressView = Text(runtimeStatus, 13, "Ink");
+        panel.Children.Add(ToolStatus(runtimeProgressView));
+        runtimeListView = new StackPanel();
+        panel.Children.Add(runtimeListView);
+        RenderRuntimeList();
+        var actions = new WrapPanel();
+        runtimeScanView = Action("Verificar este PC", async (_, _) => await GuardAsync(ScanRuntimes), icon: "search");
+        runtimeInstallView = Action("Instalar selecionados", async (_, _) => await GuardAsync(InstallRuntimes), true);
+        runtimeCancelView = Action("Cancelar próximas etapas", (_, _) => runtimeCancellation?.Cancel());
+        actions.Children.Add(runtimeScanView); actions.Children.Add(runtimeInstallView); actions.Children.Add(runtimeCancelView);
+        panel.Children.Add(actions);
+        panel.Children.Add(Text("Um instalador já iniciado termina antes de o cancelamento valer. Se algum pedir reinício, o Nexo avisa e não reinicia o PC.", 11, "Subtle"));
+        return panel;
+    }
+
+    private void RenderRuntimeList()
+    {
+        if (runtimeListView == null) return;
+        runtimeListView.Children.Clear(); runtimeChecks.Clear();
+        if (runtimeScan == null) return;
+        foreach (var group in runtimeScan.Items.Where(s => s.State != RuntimeState.NotApplicable).GroupBy(s => s.Item.Kind))
+        {
+            var heading = Text(group.Key == RuntimeKind.DirectX ? "DirectX" : "Visual C++ Redistributable", 13); heading.FontWeight = FontWeights.SemiBold; heading.Margin = new Thickness(0, 10, 0, 4);
+            runtimeListView.Children.Add(heading);
+            foreach (var status in group)
+            {
+                var line = RuntimePresentation.StatusLine(status);
+                if (status.State == RuntimeState.Missing)
+                {
+                    var check = new CheckBox { Content = line, IsChecked = RuntimeCatalog.DefaultSelected(status), Margin = new Thickness(0, 4, 0, 0) };
+                    AutomationProperties.SetName(check, line);
+                    runtimeChecks[status.Item.Id] = check;
+                    runtimeListView.Children.Add(check);
+                }
+                else { var installed = Text(line, 12, "Secondary"); installed.Margin = new Thickness(22, 4, 0, 0); runtimeListView.Children.Add(installed); }
+                var detail = Text(status.Detail, 11, "Subtle"); detail.Margin = new Thickness(22, 0, 0, 2); runtimeListView.Children.Add(detail);
+            }
+        }
+    }
+
+    private async Task ScanRuntimes()
+    {
+        if (runtimeRunning) return;
+        runtimeRunning = true; runtimeStatus = "Verificando o registro e os arquivos do Windows. Nada é alterado nesta etapa."; UpdateToolsView();
+        try
+        {
+            runtimeScan = await Task.Run(() => RuntimeInspector.Scan(new WindowsRuntimeSystem()));
+            runtimeStatus = RuntimePresentation.ScanText(runtimeScan);
+        }
+        finally { runtimeRunning = false; RenderRuntimeList(); UpdateToolsView(); }
+    }
+
+    private async Task InstallRuntimes()
+    {
+        if (runtimeRunning || runtimeScan == null) return;
+        var items = runtimeScan.Missing.Where(s => runtimeChecks.TryGetValue(s.Item.Id, out var check) && check.IsChecked == true).Select(s => s.Item).ToArray();
+        if (items.Length == 0) { runtimeStatus = "Nenhum item selecionado."; UpdateToolsView(); return; }
+        if (MessageBox.Show(this, RuntimePresentation.ConfirmQuestion(items), "Confirmar instalação dos componentes", MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes) return;
+        runtimeCancellation = new CancellationTokenSource(); runtimeRunning = true;
+        runtimeStatus = "Iniciando..."; UpdateToolsView();
+        try
+        {
+            var auditPath = Path.Combine(store.Root, "runtimes-audit.ndjson");
+            var progress = new Progress<string>(message => { if (runtimeRunning) { runtimeStatus = message; UpdateToolsView(); } });
+            var results = await RuntimeInstaller.InstallAsync(new WindowsRuntimeSystem(), items, progress, item =>
+            {
+                lock (runtimeAuditSync) File.AppendAllText(auditPath, JsonSerializer.Serialize(item) + Environment.NewLine);
+            }, runtimeCancellation.Token);
+            runtimeRunning = false;
+            runtimeStatus = RuntimePresentation.Result(results);
+            RecordRuntimes(results);
+            runtimeScan = null;
+        }
+        finally { runtimeRunning = false; runtimeCancellation.Dispose(); runtimeCancellation = null; RenderRuntimeList(); UpdateToolsView(); }
+    }
+
+    private void RecordRuntimes(IReadOnlyList<RuntimeInstallResult> results)
+    {
+        var summary = RuntimeInstaller.Summary(results);
+        try { store.Log(user, "Componentes do Windows (Ferramentas): " + summary + " · " + string.Join("; ", results.Select(r => r.Item.Id + " " + r.Outcome + (r.ExitCode is { } code ? " (" + code + ")" : "")))); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        if (healthStore == null) return;
+        try
+        {
+            healthStore.SaveIntervention(new InterventionRecord
+            {
+                Action = "Instalar componentes do Windows (Ferramentas)", Target = string.Join(", ", results.Select(r => r.Item.Id)), Authorized = true, Risk = "baixo",
+                State = RuntimeInstaller.State(results), RebootRequired = results.Any(r => r.Outcome == RuntimeOutcome.RebootPending),
+                After = JsonSerializer.Serialize(results.Select(r => new { r.Item.Id, Outcome = r.Outcome.ToString(), r.ExitCode, r.Signer, r.Sha256, r.Message })), Summary = summary,
+            });
+        }
+        catch (OperationalStoreException ex) { runtimeStatus += "\nO registro no histórico operacional falhou: " + ex.Message; }
     }
     // Aparência (#143): o tema muda na hora e a preferência fica no data.json deste perfil.
     private Border AppearanceCard()
