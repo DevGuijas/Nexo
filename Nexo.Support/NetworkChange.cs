@@ -138,7 +138,10 @@ public static class NetworkChange
         var hostile = unchanged ? trust.ChainProblem?.Invoke(trust.ProtectedRoot) : null;
         var error = hostile != null ? NetworkRecovery.HostileChainMessage(hostile) : "Executor encerrado sem resultado. " + NetworkRecovery.Explain(recovery);
         if (hostile != null) return JsonSerializer.Serialize(new { success = false, changed = (bool?)null, reverted = false, error, protectedFolderProblem = true, backup, recoveryFolder = dir });
-        return JsonSerializer.Serialize(new { success = false, changed = !unchanged, reverted = NetworkRecovery.Restored(recovery), phase = interrupted.Phase, error, backup, recoveryFolder = dir, recovery = recoveryResult.RootElement.Clone() });
+        var outcome = JsonSerializer.Serialize(new { success = false, changed = !unchanged, reverted = NetworkRecovery.Restored(recovery), phase = interrupted.Phase, error, backup, recoveryFolder = dir, recovery = recoveryResult.RootElement.Clone() });
+        // O resultado informativo (keeping sem resultado, por exemplo) sai aqui para a conversa: a abertura seguinte só o registra no log.
+        NetworkRecovery.MarkNotified(interrupted, recovery);
+        return outcome;
     }
 
     // #98: o executor grava a mesma mensagem para "restaurar" escolhido na janela, prazo esgotado e cancelamento. Só o
