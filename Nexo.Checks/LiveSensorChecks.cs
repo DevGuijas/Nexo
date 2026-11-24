@@ -578,6 +578,16 @@ internal static class LiveSensorChecks
 
     private static async Task Apply(Action<bool, string> check)
     {
+        // P9: na mesma versão, outra compilação (ProductVersion "1.7.0+commit") também mostra o "Atualizar leitor".
+        check(SystemSensorReader.Outdated("1.7.0", "1.7.0+ce231d4", "1.7.0", "1.7.0+f627483") && SystemSensorReader.Outdated("1.6.3", "1.6.3+aaa", "1.7.0", "1.7.0+aaa")
+            && !SystemSensorReader.Outdated("1.7.0", "1.7.0+f627483", "1.7.0", "1.7.0+f627483") && !SystemSensorReader.Outdated("1.7.0", "1.7.0", "1.7.0", "1.7.0")
+            && !SystemSensorReader.Outdated("1.7.0", null, "1.7.0", "1.7.0+f627483") && !SystemSensorReader.Outdated("1.7.0", "1.7.0+f627483", "1.7.0", "")
+            && WindowsLiveSensorSystem.CurrentBuild() is { Length: > 0 },
+            "#142 P9: \"Atualizar leitor\" aparece com outra versão ou, na mesma versão, com outra compilação (ProductVersion com +commit diferente); sem a compilação de um dos lados, vale só a versão");
+        var window = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "MainWindow.xaml.cs"));
+        check(window.Contains("var outdated = SystemSensorReader.Outdated(installedVersion, WindowsLiveSensorSystem.InstalledBuild(), AppVersion.Current, WindowsLiveSensorSystem.CurrentBuild());")
+            && window.Contains("if (outdated)"),
+            "#142 P9: a Saúde do PC decide o \"Atualizar leitor\" pela versão e pela compilação do Nexo.exe instalado");
         var canceled = await SystemSensorReader.ApplyAsync((_, _) => Task.FromException<string>(new Win32Exception(1223)), "install", "s", CancellationToken.None);
         var done = await SystemSensorReader.ApplyAsync((_, _) => Task.FromResult("{\"success\":true,\"data\":{\"Task\":\"Nexo Sensores\"}}"), "install", "s", CancellationToken.None);
         var removed = await SystemSensorReader.ApplyAsync((_, _) => Task.FromResult("{\"success\":true}"), "remove", "s", CancellationToken.None);

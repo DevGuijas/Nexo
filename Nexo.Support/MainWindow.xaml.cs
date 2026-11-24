@@ -1283,9 +1283,9 @@ public partial class MainWindow : Window
     {
         var panel = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
         var installedVersion = WindowsLiveSensorSystem.InstalledVersion() ?? (live.Version.Length > 0 ? live.Version : "desconhecida");
-        var outdated = installedVersion != AppVersion.Current;
+        var outdated = SystemSensorReader.Outdated(installedVersion, WindowsLiveSensorSystem.InstalledBuild(), AppVersion.Current, WindowsLiveSensorSystem.CurrentBuild());
         panel.Children.Add(Text("Leitor de sensores do sistema (tarefa \"" + SystemSensorReader.TaskName + "\", SYSTEM) · versão " + installedVersion
-            + (outdated ? " · este Nexo é a " + AppVersion.Current : ""), 12, "Secondary"));
+            + (outdated ? (installedVersion == AppVersion.Current ? " · este Nexo é outra compilação da " : " · este Nexo é a ") + AppVersion.Current : ""), 12, "Secondary"));
         if (liveReaderStatus != null) panel.Children.Add(StatusLine(liveReaderStatus, "Neutral"));
         var actions = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };
         if (outdated)

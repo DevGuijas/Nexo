@@ -88,6 +88,15 @@ public static class SystemSensorReader
         "O Windows vai pedir autorização de administrador (UAC) uma vez.",
         "O PawnIO continua instalado; para removê-lo, use " + PawnIoSetup.Uninstall + ".");
     public const string UpdateTitle = "Atualizar leitor de sensores";
+
+    /// <summary>
+    /// O "Atualizar leitor" aparece com versão diferente ou, na mesma versão, com outra compilação: o ProductVersion do Nexo.exe
+    /// (a versão informativa, que o SDK do .NET 8 completa com "+commit" num checkout git) diferente da do Nexo aberto. Assim, uma
+    /// cópia antiga da mesma versão (a da tarefa com cmd.exe, #142 P9) também pode ser trocada. Sem o "+commit" nas duas, vale só a
+    /// versão, como antes.
+    /// </summary>
+    public static bool Outdated(string installedVersion, string? installedBuild, string currentVersion, string? currentBuild) =>
+        installedVersion != currentVersion || (!string.IsNullOrWhiteSpace(installedBuild) && !string.IsNullOrWhiteSpace(currentBuild) && !string.Equals(installedBuild.Trim(), currentBuild.Trim(), StringComparison.Ordinal));
     public static string UpdateDetails(string installed) => string.Join('\n',
         "Troca a cópia do leitor em " + FolderLabel + " (versão " + installed + ") pela deste Nexo (" + AppVersion.Current + "), conferindo o SHA-256 de cada arquivo, e reinicia a tarefa \"" + TaskName + "\".",
         "O Windows vai pedir autorização de administrador (UAC) uma vez.");
@@ -589,6 +598,19 @@ public sealed class WindowsLiveSensorSystem : ILiveSensorSystem
         try { return File.Exists(file) && Version.TryParse(FileVersionInfo.GetVersionInfo(file).FileVersion, out var version) ? AppVersion.Format(version) : null; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException) { return null; }
     }
+
+    /// <summary>Versão informativa (ProductVersion) do Nexo.exe instalado, ou null sem o leitor.</summary>
+    public static string? InstalledBuild()
+    {
+        var file = Path.Combine(SystemSensorReader.InstallFolder, SystemSensorReader.Executable);
+        try { return File.Exists(file) ? FileVersionInfo.GetVersionInfo(file).ProductVersion : null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FileNotFoundException) { return null; }
+    }
+
+    /// <summary>Versão informativa do Nexo aberto (a mesma que o SDK grava no ProductVersion do Nexo.exe).</summary>
+    public static string? CurrentBuild() =>
+        typeof(SystemSensorReader).Assembly.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion;
 
     /// <summary>Arquivos do Nexo em execução para a cópia (pasta do app, só o primeiro nível).</summary>
     public static (string Source, IReadOnlyList<string> Files) Sources()
