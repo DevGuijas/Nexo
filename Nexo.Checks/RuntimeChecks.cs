@@ -19,6 +19,8 @@ internal static class RuntimeChecks
         Informative(check);
         ReadOnly(check);
         await Install(check);
+        await Signature(check);
+        WindowsFolder(check);
         Guard(check);
         Card(check);
     }
@@ -55,6 +57,15 @@ internal static class RuntimeChecks
         public required string Root { get; init; }
         public Func<Uri, HttpResponseMessage> Respond { get; set; } = _ => new HttpResponseMessage(HttpStatusCode.NotFound);
         public (string, string) Sign { get; set; } = ("Valid", RuntimeCatalog.MicrosoftSigner);
+        public string SignRoot { get; set; } = RuntimeCatalog.MicrosoftRoot2011;
+        // Ordem das etapas que importam para a pasta: "DACL", "assinatura", "listar", "runas".
+        public List<string> Events { get; } = [];
+        // Simulam o que outro processo da mesma conta gravou na pasta antes da DACL: arquivos, subpastas e fluxos alternativos.
+        public List<string> PlantFiles { get; } = [];
+        public List<string> PlantFolders { get; } = [];
+        public List<string> Streams { get; } = [];
+        public bool ProtectFails { get; set; }
+        public bool HeldWhenListed { get; private set; } = true;
         public Func<string, int?> Exit { get; set; } = _ => 0;
         public Action<string>? AfterRun { get; set; }
         public List<Uri> Requests { get; } = [];
@@ -66,10 +77,27 @@ internal static class RuntimeChecks
         public bool WriteBlockedWhenRun { get; private set; } = true;
         public string? Link { get; set; }
         public Task<HttpResponseMessage> Send(Uri url, CancellationToken token) { Requests.Add(url); return Task.FromResult(Respond(url)); }
-        public Task<(string Status, string Subject)> Signature(string file, CancellationToken token) { Signed.Add(file); return Task.FromResult(Sign); }
+        public Task<RuntimeSignature> Signature(string file, CancellationToken token) { Signed.Add(file); Events.Add("assinatura"); return Task.FromResult(new RuntimeSignature(Sign.Item1, Sign.Item2, SignRoot)); }
+        public void ProtectDirectory(string directory)
+        {
+            foreach (var name in PlantFiles) File.WriteAllText(Path.Combine(directory, name), "planted");
+            foreach (var name in PlantFolders) Directory.CreateDirectory(Path.Combine(directory, name));
+            if (ProtectFails) throw new UnauthorizedAccessException("Acesso negado.");
+            Events.Add("DACL");
+        }
+        public IReadOnlyList<string> DirectoryEntries(string directory)
+        {
+            Events.Add("listar");
+            // O instalador segue aberto sem compartilhar escrita enquanto a pasta é listada.
+            foreach (var file in Directory.EnumerateFiles(directory))
+                try { using var _ = new FileStream(file, FileMode.Open, FileAccess.Write, FileShare.ReadWrite); if (Path.GetExtension(file) == ".exe") HeldWhenListed = false; }
+                catch (IOException) { }
+            return [.. Directory.EnumerateFileSystemEntries(directory).Select(Path.GetFileName).Select(n => n!), .. Streams];
+        }
         public Task<int?> RunElevated(string file, string arguments, CancellationToken token)
         {
             var name = Path.GetFileName(file);
+            Events.Add("runas");
             Ran.Add(name); Arguments.Add(arguments);
             ExistedWhenRun &= File.Exists(file);
             // O arquivo segue aberto pelo Nexo sem compartilhar escrita: outro processo não consegue gravar nele.
@@ -124,6 +152,9 @@ internal static class RuntimeChecks
         check(Item("vc14-x64").DefaultWhenMissing && Item("vc14-x86").DefaultWhenMissing && items.Where(i => i.VcYear is > 0 and < 2015).All(i => !i.DefaultWhenMissing) && !Item("directx").DefaultWhenMissing
             && items.Where(i => i.VcYear is 2012 or 2013).All(i => i.Signer == RuntimeCatalog.MicrosoftSignerMopr) && items.Where(i => i.VcYear is not (2012 or 2013)).All(i => i.Signer == RuntimeCatalog.MicrosoftSigner),
             "#150 catálogo: só o v14 que falta vem marcado; os antigos e o DirectX vêm desmarcados; assinante Microsoft por item");
+        check(items.Where(i => i.VcYear is 2012 or 2013).All(i => i.Root == RuntimeCatalog.MicrosoftRoot2001) && items.Where(i => i.VcYear is not (2012 or 2013)).All(i => i.Root == RuntimeCatalog.MicrosoftRoot2011)
+            && RuntimeCatalog.MicrosoftRoot2011 == "8F43288AD272F3103B6FB1428485EA3014C0BCFE" && RuntimeCatalog.MicrosoftRoot2001 == "CDD4EEAE6000AC7F40C3802C171E30148030C072",
+            "#150 catálogo: raiz esperada por item (Microsoft Root Certificate Authority 2011 no v14, 2005, 2008, 2010 e DirectX; a de 2001 no 2012 e 2013)");
         string[] refusedHosts = ["http://download.microsoft.com/a.exe", "https://download.microsoft.com.evil.example/a.exe", "https://evil.example/a.exe", "https://user@aka.ms/a",
             "https://aka.ms:8443/a", "https://microsoft.com/a.exe", "https://evilaka.ms/a", "https://download.visualstudio.microsoft.com.evil/a", "ftp://download.microsoft.com/a",
             "http://download.microsoft.com:443/a.exe", "https://download.microsoft.com./a.exe"];
@@ -288,6 +319,8 @@ internal static class RuntimeChecks
             "#150 instalação: v14 pelo link permanente, assinatura Microsoft, UAC com /install /passive /norestart, arquivo sem escrita de terceiros e conferido depois");
         var reboot = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 3010 };
         var newer = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 1638 };
+        newer.AfterRun = _ => newer.SetV14("x64");
+        var newerAbsent = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 1638 };
         var failed = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 1603 };
         var silent = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 0 };
         var started = new FakeSystem { Root = temp, Respond = Chain, Exit = _ => 1641 };
@@ -295,6 +328,7 @@ internal static class RuntimeChecks
         errorButPresent.AfterRun = _ => errorButPresent.SetV14("x64");
         var rebootResult = (await RuntimeInstaller.InstallAsync(reboot, [v14], null, null, CancellationToken.None))[0];
         var newerResult = (await RuntimeInstaller.InstallAsync(newer, [v14], null, null, CancellationToken.None))[0];
+        var newerAbsentResult = (await RuntimeInstaller.InstallAsync(newerAbsent, [v14], null, null, CancellationToken.None))[0];
         var failedResult = (await RuntimeInstaller.InstallAsync(failed, [v14], null, null, CancellationToken.None))[0];
         var silentResult = (await RuntimeInstaller.InstallAsync(silent, [v14], null, null, CancellationToken.None))[0];
         var startedResult = (await RuntimeInstaller.InstallAsync(started, [v14], null, null, CancellationToken.None))[0];
@@ -302,7 +336,16 @@ internal static class RuntimeChecks
         check(rebootResult.Outcome == RuntimeOutcome.RebootPending && rebootResult.ExitCode == 3010 && rebootResult.Message.Contains("não reinicia")
             && RuntimePresentation.Result([rebootResult]).Contains("Reinicie o PC quando puder") && startedResult.Outcome == RuntimeOutcome.RebootPending && startedResult.ExitCode == 1641,
             "#150 instalação: códigos 3010 e 1641 → reinício pendente, sem reinício automático");
-        check(newerResult.Outcome == RuntimeOutcome.AlreadyInstalled && newerResult.ExitCode == 1638 && newerResult.Label == "Já instalado", "#150 instalação: código 1638 → já instalado");
+        // @qa achado baixo 6: no 1641 o instalador já iniciou o reinício; o texto não manda "reiniciar quando puder".
+        var startedText = RuntimePresentation.Result([startedResult]);
+        check(startedResult.Message.Contains("já iniciou o reinício do Windows") && !startedResult.Message.Contains("quando puder")
+            && startedText.Contains("já iniciou o reinício do Windows") && !startedText.Contains("Reinicie o PC quando puder")
+            && RuntimePresentation.Result([rebootResult, startedResult]).Contains("Reinicie o PC quando puder"),
+            "#150 instalação: 1641 diz que o instalador já iniciou o reinício do Windows; 3010 segue com \"reinicie quando puder\"");
+        check(newerResult.Outcome == RuntimeOutcome.AlreadyInstalled && newerResult.ExitCode == 1638 && newerResult.Label == "Já instalado", "#150 instalação: código 1638 com o componente conferido depois → já instalado");
+        check(newerAbsentResult.Outcome == RuntimeOutcome.Failed && newerAbsentResult.ExitCode == 1638 && newerAbsentResult.Label == "Falha" && newerAbsentResult.Message.StartsWith("Falha (1638)")
+            && newerAbsent.Ran.Count == 1 && Clean(),
+            "#150 instalação: código 1638 sem o componente na verificação depois → Falha (1638), não \"Já instalado\"");
         check(failedResult.Outcome == RuntimeOutcome.Failed && failedResult.ExitCode == 1603 && failedResult.Message.Contains("1603")
             && silentResult.Outcome == RuntimeOutcome.Failed && silentResult.Message.Contains("não aparece como instalado")
             && presentResult.Outcome == RuntimeOutcome.Failed && presentResult.ExitCode == 1603 && presentResult.Message.Contains("mas o componente aparece como instalado"),
@@ -316,11 +359,18 @@ internal static class RuntimeChecks
             "#150 instalação: DirectX pelo dxwebsetup.exe fixado, com /Q, e as DLLs conferidas depois");
         var vc2013Body = new byte[vc2013.Size!.Value]; new Random(2013).NextBytes(vc2013Body);
         var vc2013Hash = Convert.ToHexString(SHA256.HashData(vc2013Body)).ToLowerInvariant();
-        var old = new FakeSystem { Root = temp, Respond = _ => Ok(vc2013Body), Sign = ("Valid", RuntimeCatalog.MicrosoftSignerMopr) };
+        var old = new FakeSystem { Root = temp, Respond = _ => Ok(vc2013Body), Sign = ("Valid", RuntimeCatalog.MicrosoftSignerMopr), SignRoot = RuntimeCatalog.MicrosoftRoot2001 };
         old.AfterRun = _ => old.Names.Add("Microsoft Visual C++ 2013 Redistributable (x64) - 12.0.40664");
         results = await RuntimeInstaller.InstallAsync(old, [vc2013], null, null, CancellationToken.None, item => item.Id == "vc2013-x64" ? vc2013Hash : item.Sha256);
         check(results[0].Outcome == RuntimeOutcome.Ok && old.Requests.Count == 1 && old.Requests[0].Host == "download.visualstudio.microsoft.com",
-            "#150 instalação: VC++ 2013 fixado pela URL direta, com o assinante MOPR da Microsoft");
+            "#150 instalação: VC++ 2013 fixado pela URL direta, com o assinante MOPR da Microsoft e a raiz de 2001");
+        var oldOtherRoot = new FakeSystem { Root = temp, Respond = _ => Ok(vc2013Body), Sign = ("Valid", RuntimeCatalog.MicrosoftSignerMopr) };
+        results = await RuntimeInstaller.InstallAsync(oldOtherRoot, [vc2013], null, null, CancellationToken.None, item => item.Id == "vc2013-x64" ? vc2013Hash : item.Sha256);
+        check(results[0].Outcome == RuntimeOutcome.Untrusted && oldOtherRoot.Ran.Count == 0 && Clean(),
+            "#150 raiz: cada item tem a sua; o 2013 com a raiz de 2011 é recusado");
+
+        await Folder(check, temp, Chain, v14, Clean);
+        await Roots(check, temp, Chain, v14, Clean);
 
         // UAC cancelado: estado claro e os itens seguintes não começam.
         var cancel = new FakeSystem { Root = temp, Respond = url => url.Host == "aka.ms" ? Redirect("https://download.visualstudio.microsoft.com/x/" + url.Segments[^1]) : Ok(v14Body), Exit = name => name == "vc_redist.x64.exe" ? null : 0 };
@@ -352,6 +402,134 @@ internal static class RuntimeChecks
         check(question.Contains("• " + v14.Title) && question.Contains("• " + dx.Title) && question.Contains("aka.ms") && question.Contains("SHA-256 fixado") && question.Contains("UAC") && question.Contains("não reinicia"),
             "#150 confirmação: lista item a item o que vai ser instalado, a origem, a assinatura e o UAC");
         try { Directory.Delete(temp, true); } catch (IOException) { }
+    }
+
+    // @qa risco médio 1: DLL plantada ao lado do instalador antes do UAC.
+    private static async Task Folder(Action<bool, string> check, string temp, Func<Uri, HttpResponseMessage> chain, RuntimeItem v14, Func<bool> clean)
+    {
+        var ok = new FakeSystem { Root = temp, Respond = chain };
+        ok.AfterRun = _ => ok.SetV14("x64");
+        var results = await RuntimeInstaller.InstallAsync(ok, [v14], null, null, CancellationToken.None);
+        check(results[0].Outcome == RuntimeOutcome.Ok && ok.Events.SequenceEqual(["DACL", "assinatura", "listar", "runas"]) && (!OperatingSystem.IsWindows() || ok.HeldWhenListed) && clean(),
+            "#150 pasta: DACL protegida → assinatura → listar a pasta com o instalador aberto → runas, e a pasta é apagada no fim");
+        foreach (var (label, plant) in new (string, Action<FakeSystem>)[]
+        {
+            ("DLL ao lado do instalador", f => f.PlantFiles.Add("version.dll")),
+            ("arquivo oculto qualquer", f => f.PlantFiles.Add(".a")),
+            ("subpasta", f => f.PlantFolders.Add("sub")),
+            ("fluxo alternativo no instalador", f => f.Streams.Add("vc_redist.x64.exe:payload:$DATA")),
+            ("fluxo alternativo na pasta", f => f.Streams.Add(":payload:$DATA")),
+        })
+        {
+            var planted = new FakeSystem { Root = temp, Respond = chain };
+            plant(planted);
+            var audits = new List<RuntimeAudit>();
+            results = await RuntimeInstaller.InstallAsync(planted, [v14], null, audits.Add, CancellationToken.None);
+            var dir = planted.Dirs.Single();
+            var leftover = planted.PlantFiles.Count + planted.PlantFolders.Count > 0;
+            check(results[0].Outcome == RuntimeOutcome.FolderChanged && results[0].Label == "Pasta do instalador alterada" && results[0].Message.StartsWith("Pasta do instalador alterada")
+                && planted.Ran.Count == 0 && planted.Events.SequenceEqual(["DACL", "assinatura", "listar"]) && !File.Exists(Path.Combine(dir, v14.FileName))
+                && (leftover ? Directory.Exists(dir) && audits.Single().Leftover.StartsWith(dir) && !results[0].Message.Contains(dir) : !Directory.Exists(dir) && audits.Single().Leftover == ""),
+                "#150 pasta: " + label + " → \"pasta do instalador alterada\" antes do UAC; o instalador é apagado e a pasta que sobra vai só à auditoria");
+            try { Directory.Delete(dir, true); } catch (DirectoryNotFoundException) { }
+        }
+        var refused = new FakeSystem { Root = temp, Respond = chain, ProtectFails = true };
+        results = await RuntimeInstaller.InstallAsync(refused, [v14], null, null, CancellationToken.None);
+        check(results[0].Outcome == RuntimeOutcome.Failed && results[0].Message.Contains("proteger a pasta") && refused.Signed.Count == 0 && refused.Ran.Count == 0 && clean(),
+            "#150 pasta: se a DACL não puder ser aplicada, nada é executado");
+    }
+
+    // @qa risco médio 2: o v14 sem hash dependia só do Subject; agora a raiz da cadeia também precisa ser a esperada.
+    private static async Task Roots(Action<bool, string> check, string temp, Func<Uri, HttpResponseMessage> chain, RuntimeItem v14, Func<bool> clean)
+    {
+        foreach (var (label, root) in new[] { ("raiz de um proxy TLS", "0123456789ABCDEF0123456789ABCDEF01234567"), ("raiz vazia", ""), ("raiz de 2001 no v14", RuntimeCatalog.MicrosoftRoot2001),
+            ("raiz com um caractere a mais", RuntimeCatalog.MicrosoftRoot2011 + "0"), ("raiz parcial", RuntimeCatalog.MicrosoftRoot2011[..39]) })
+        {
+            var rogue = new FakeSystem { Root = temp, Respond = chain, SignRoot = root };
+            var result = (await RuntimeInstaller.InstallAsync(rogue, [v14], null, null, CancellationToken.None))[0];
+            check(result.Outcome == RuntimeOutcome.Untrusted && result.Label == "Assinatura não confiável" && result.Message.StartsWith("Assinatura não confiável")
+                && result.Signer == RuntimeCatalog.MicrosoftSigner && rogue.Ran.Count == 0 && !rogue.Events.Contains("listar") && clean(),
+                "#150 raiz: Subject da Microsoft com " + label + " → assinatura não confiável, antes do UAC");
+        }
+        var lower = new FakeSystem { Root = temp, Respond = chain, SignRoot = RuntimeCatalog.MicrosoftRoot2011.ToLowerInvariant() };
+        lower.AfterRun = _ => lower.SetV14("x64");
+        var ok = (await RuntimeInstaller.InstallAsync(lower, [v14], null, null, CancellationToken.None))[0];
+        check(ok.Outcome == RuntimeOutcome.Ok, "#150 raiz: comparação exata sem diferenciar maiúsculas de minúsculas");
+    }
+
+    // A saída simulada do PowerShell e o próprio script, com Get-AuthenticodeSignature falso, no pwsh (Windows ou NEXO_CHECKS_PWSH).
+    private static async Task Signature(Action<bool, string> check)
+    {
+        var valid = WindowsRuntimeSystem.ParseSignature("{\"Status\":\"Valid\",\"Subject\":\"" + RuntimeCatalog.MicrosoftSigner + "\",\"Root\":\"8F43288AD272F3103B6FB1428485EA3014C0BCFE\"}");
+        var noRoot = WindowsRuntimeSystem.ParseSignature("{\"Status\":\"Valid\",\"Subject\":\"" + RuntimeCatalog.MicrosoftSigner + "\"}");
+        var nullRoot = WindowsRuntimeSystem.ParseSignature("{\"Status\":\"NotSigned\",\"Subject\":null,\"Root\":null}");
+        check(valid == new RuntimeSignature("Valid", RuntimeCatalog.MicrosoftSigner, RuntimeCatalog.MicrosoftRoot2011) && noRoot.Root == "" && nullRoot == new RuntimeSignature("NotSigned", "", "")
+            && WindowsRuntimeSystem.ParseSignature("aviso\n") == new RuntimeSignature("", "", ""),
+            "#150 assinatura: a saída do PowerShell traz estado, Subject e a raiz; sem raiz, ela fica vazia e o item é recusado");
+        var script = WindowsRuntimeSystem.SignatureScript(@"C:\Temp\x'y.exe");
+        var wrapped = SupportService.PowershellCommand(script);
+        check(script.Contains("Get-AuthenticodeSignature -LiteralPath 'C:\\Temp\\x''y.exe'") && script.Contains("X509Chain") && script.Contains("X509RevocationMode]::NoCheck")
+            && script.Contains("$c.Build($s.SignerCertificate)") && script.Contains("ChainElements[$c.ChainElements.Count-1].Certificate.Thumbprint") && wrapped.StartsWith(PowerShellModulePath.Guard),
+            "#150 assinatura: a cadeia sai da mesma chamada do Get-AuthenticodeSignature, sem revogação pela rede e com o guard da #131");
+        var shell = OperatingSystem.IsWindows() ? "powershell.exe" : Environment.GetEnvironmentVariable("NEXO_CHECKS_PWSH");
+        if (string.IsNullOrWhiteSpace(shell)) return;
+        const string fake = "$k=[System.Security.Cryptography.RSA]::Create(2048); $r=New-Object System.Security.Cryptography.X509Certificates.CertificateRequest('CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US',$k,[System.Security.Cryptography.HashAlgorithmName]::SHA256,[System.Security.Cryptography.RSASignaturePadding]::Pkcs1)"
+            + "; $cert=$r.CreateSelfSigned([DateTimeOffset]::Now.AddDays(-1),[DateTimeOffset]::Now.AddDays(1)); [Console]::Error.WriteLine('THUMB='+$cert.Thumbprint)"
+            + "; function global:Get-AuthenticodeSignature { param([string]$LiteralPath) if($LiteralPath -like '*unsigned*'){[pscustomobject]@{Status='NotSigned';SignerCertificate=$null}}else{[pscustomobject]@{Status='Valid';SignerCertificate=$cert}} }; ";
+        async Task<(string Out, string Err)> Run(string file)
+        {
+            var start = new System.Diagnostics.ProcessStartInfo(shell) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, StandardOutputEncoding = System.Text.Encoding.UTF8 };
+            foreach (var a in new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(SupportService.PowershellCommand(fake + WindowsRuntimeSystem.SignatureScript(file)))) }) start.ArgumentList.Add(a);
+            using var process = System.Diagnostics.Process.Start(start)!;
+            var output = process.StandardOutput.ReadToEndAsync(); var error = process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+            return (await output, await error);
+        }
+        var self = await Run(Path.Combine(Path.GetTempPath(), "nexo-sem-arquivo.exe"));
+        var parsed = WindowsRuntimeSystem.ParseSignature(self.Out);
+        var thumb = Regex.Match(self.Err, "THUMB=([0-9A-F]{40})").Groups[1].Value;
+        check(parsed.Status == "Valid" && parsed.Subject == RuntimeCatalog.MicrosoftSigner && thumb.Length == 40 && parsed.Root == thumb && parsed.Root != RuntimeCatalog.MicrosoftRoot2011,
+            "#150 assinatura (pwsh): certificado com o Subject da Microsoft e raiz própria → a raiz informada é a dele (" + (parsed.Root.Length > 0 ? parsed.Root[..8] : "vazia") + "...), não a da Microsoft");
+        var unsigned = WindowsRuntimeSystem.ParseSignature((await Run(Path.Combine(Path.GetTempPath(), "unsigned.exe"))).Out);
+        check(unsigned == new RuntimeSignature("NotSigned", "", ""), "#150 assinatura (pwsh): sem SignerCertificate a raiz fica vazia, sem erro no script");
+    }
+
+    // Só no Windows: a DACL real da pasta, sem admin. O dono não cria arquivo nem pasta, não grava no instalador nem troca a DACL, e apaga tudo no fim.
+    private static void WindowsFolder(Action<bool, string> check)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var system = new WindowsRuntimeSystem();
+        var dir = Path.Combine(Path.GetTempPath(), "NexoRuntimeAcl-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var file = Path.Combine(dir, "vc_redist.x64.exe");
+        File.WriteAllBytes(file, [1, 2, 3]);
+        bool Denied(Action action) { try { action(); return false; } catch (UnauthorizedAccessException) { return true; } catch (IOException) { return true; } }
+        using (var held = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            system.ProtectDirectory(dir);
+            var security = new DirectoryInfo(dir).GetAccessControl();
+            var sids = security.GetAccessRules(true, true, typeof(System.Security.Principal.SecurityIdentifier)).Cast<System.Security.AccessControl.FileSystemAccessRule>().Select(r => r.IdentityReference.Value).Distinct().OrderBy(s => s, StringComparer.Ordinal).ToArray();
+            var fileRules = new FileInfo(file).GetAccessControl().GetAccessRules(true, true, typeof(System.Security.Principal.SecurityIdentifier)).Cast<System.Security.AccessControl.FileSystemAccessRule>().Select(r => r.IdentityReference.Value).Distinct().OrderBy(s => s, StringComparer.Ordinal).ToArray();
+            check(security.AreAccessRulesProtected && sids.SequenceEqual(["S-1-3-4", "S-1-5-18", "S-1-5-32-544"]) && fileRules.SequenceEqual(["S-1-3-4", "S-1-5-18", "S-1-5-32-544"]),
+                "#150 pasta (Windows): DACL protegida só com OWNER RIGHTS, SYSTEM e Administradores, propagada ao instalador");
+            check(Denied(() => File.WriteAllText(Path.Combine(dir, "version.dll"), "x")) && Denied(() => Directory.CreateDirectory(Path.Combine(dir, "sub")))
+                && Denied(() => File.WriteAllText(file + ":payload", "x")) && Denied(() => new DirectoryInfo(dir).SetAccessControl(OpenToEveryone()))
+                && system.DirectoryEntries(dir).SequenceEqual(["vc_redist.x64.exe"]),
+                "#150 pasta (Windows): o usuário atual não cria arquivo, pasta nem fluxo e não troca a DACL; a pasta lista só o instalador aberto");
+        }
+        var deleted = !Denied(() => { File.Delete(file); Directory.Delete(dir, false); });
+        check(deleted && !Directory.Exists(dir), "#150 pasta (Windows): o Nexo apaga o instalador e a pasta com a ACE de Delete do OWNER RIGHTS");
+    }
+
+    // Uma DACL que abriria a pasta: trocá-la exige WRITE_DAC, que o OWNER RIGHTS tirou do dono.
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static System.Security.AccessControl.DirectorySecurity OpenToEveryone()
+    {
+        var security = new System.Security.AccessControl.DirectorySecurity();
+        security.SetAccessRuleProtection(true, false);
+        security.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.WorldSid, null),
+            System.Security.AccessControl.FileSystemRights.FullControl, System.Security.AccessControl.AccessControlType.Allow));
+        return security;
     }
 
     private sealed class SyncProgress(Action<string> report) : IProgress<string> { public void Report(string value) => report(value); }
