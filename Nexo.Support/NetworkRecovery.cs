@@ -470,7 +470,8 @@ public static class NetworkRecovery
     {
         try
         {
-        if (item.Resolution != null) return item.Resolution;
+        // Estado que não pede decisão: o aviso sai uma vez por transação; nas aberturas seguintes ele volta como já registrado.
+        if (item.Resolution != null) return await RecordNotice(item).ConfigureAwait(false);
         if (item.Before == null) throw new InvalidOperationException("Transação sem backup validado.");
         var resultPath = Path.Combine(item.Directory, ResultFile);
         var backup = Path.Combine(item.ProtectedDirectory ?? item.Directory, "before.json");
@@ -686,8 +687,70 @@ public static class NetworkRecovery
     private static InterruptedNetworkTransaction Resolved(string directory, NetworkTransactionRecord record, string phase, object resolution)
     {
         var text = Serialize(resolution);
-        WriteTextAtomic(Path.Combine(directory, ResultFile), text).GetAwaiter().GetResult();
+        var path = Path.Combine(directory, ResultFile);
+        // Aviso desta mesma transação já mostrado numa abertura anterior: o resultado volta marcado como já registrado e a marca
+        // local fica como está. A marca só é lida aqui, num estado que não pede decisão; uma transação pendente nunca passa por ela.
+        if (PreviouslyNotified(path, directory, record))
+        {
+            var recorded = JsonNode.Parse(text)!.AsObject();
+            recorded["alreadyRecorded"] = true;
+            return new InterruptedNetworkTransaction(directory, record, phase, null, recorded.ToJsonString());
+        }
+        WriteTextAtomic(path, text).GetAwaiter().GetResult();
         return new InterruptedNetworkTransaction(directory, record, phase, null, text);
+    }
+
+    /// <summary>
+    /// Identidade da transação na marca de aviso já mostrado: id da operação (nome da pasta) e Created do registro. O registro
+    /// ilegível não tem Created (o Inspect usa a hora da leitura), e a marca fica só com o id.
+    /// </summary>
+    private static (string Id, string? Created) NoticeKey(string directory, NetworkTransactionRecord record)
+        => (Path.GetFileName(Path.TrimEndingDirectorySeparator(directory)),
+            record.Action.Length == 0 ? null : record.Created.ToUniversalTime().ToString("O", System.Globalization.CultureInfo.InvariantCulture));
+
+    /// <summary>
+    /// A marca local de que o aviso informativo desta transação (id e Created) já foi mostrado. Como a marca do #128, ela fica na
+    /// pasta do usuário e pode ser apagada ou forjada: apagar só faz o aviso voltar, e forjar só tira do chat um aviso que não pede
+    /// decisão e continua no log. Ela não encerra a transação nem é consultada para uma transação que ainda oferece restaurar.
+    /// </summary>
+    private static bool PreviouslyNotified(string resultPath, string directory, NetworkTransactionRecord record)
+    {
+        try
+        {
+            if (!File.Exists(resultPath)) return false;
+            using var json = JsonDocument.Parse(File.ReadAllText(resultPath));
+            var root = json.RootElement;
+            var (id, created) = NoticeKey(directory, record);
+            return root.ValueKind == JsonValueKind.Object
+                && root.TryGetProperty("notified", out var notified) && notified.ValueKind == JsonValueKind.True
+                && root.TryGetProperty("operationId", out var operation) && operation.ValueKind == JsonValueKind.String && operation.GetString() == id
+                && root.TryGetProperty("created", out var stamp) && (created == null ? stamp.ValueKind == JsonValueKind.Null : stamp.ValueKind == JsonValueKind.String && stamp.GetString() == created);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { return false; }
+    }
+
+    /// <summary>
+    /// Depois de entregar o aviso de um estado que não pede decisão, grava a marca local (resultado + notified, id e Created) para
+    /// que a abertura seguinte só registre no log. Sem a gravação, o aviso volta na próxima abertura, como antes.
+    /// </summary>
+    private static async Task<string> RecordNotice(InterruptedNetworkTransaction item)
+    {
+        var resolution = item.Resolution!;
+        if (AlreadyRecorded(resolution)) return resolution;
+        try
+        {
+            if (JsonNode.Parse(resolution) is JsonObject marked)
+            {
+                var (id, created) = NoticeKey(item.Directory, item.Record);
+                marked["notified"] = true;
+                marked["operationId"] = id;
+                marked["created"] = created;
+                marked["recordedAt"] = DateTimeOffset.UtcNow;
+                await WriteTextAtomic(Path.Combine(item.Directory, ResultFile), marked.ToJsonString()).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException) { }
+        return resolution;
     }
 
     private static string ReadDecision(string directory)

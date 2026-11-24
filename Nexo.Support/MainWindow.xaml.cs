@@ -880,7 +880,8 @@ public partial class MainWindow : Window
                 catch (Exception ex) { outcome = System.Text.Json.JsonSerializer.Serialize(new { success = false, error = ex.Message }); }
                 var message = NetworkRecovery.Explain(outcome);
                 store.Log(user, "Transação de rede interrompida (" + Path.GetFileName(item.Directory) + "): " + message);
-                // A conferência sem elevação já foi avisada numa abertura anterior: só o registro (#128).
+                // A conferência sem elevação (#128) ou um estado que não pede decisão (keeping sem resultado, mais de 7 dias) já foi avisado
+                // numa abertura anterior: só o registro, sem aviso no chat e sem trocar a tela de abertura.
                 if (NetworkRecovery.AlreadyRecorded(outcome)) continue;
                 // #128: o resultado também vai para a conversa em que a alteração começou, com a linha de fatos.
                 Conversation? origin = null;
