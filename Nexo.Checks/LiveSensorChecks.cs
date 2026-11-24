@@ -20,6 +20,7 @@ internal static class LiveSensorChecks
         Live(check);
         Screens(check);
         Report(check);
+        Hermetic(check);
         Refusal(check);
         Release(check);
         await Scripts(check);
@@ -253,7 +254,7 @@ internal static class LiveSensorChecks
         var panel = File.ReadAllText(Path.Combine(code, "LiveMetricsPanel.cs"));
         var card = home[home.IndexOf("private Border HomeHealthCard", StringComparison.Ordinal)..];
         int Index(string text, string value) => text.IndexOf(value, StringComparison.Ordinal);
-        check(Index(card, "SystemSensorReader.Current()") > 0 && Index(card, "SystemSensorReader.TemperatureText(health.Latest, live,") > Index(card, "SystemSensorReader.Current()")
+        check(Index(card, "var live = sensors.Live();") > 0 && Index(card, "SystemSensorReader.TemperatureText(health.Latest, live,") > Index(card, "var live = sensors.Live();")
             && Index(card, "SystemSensorReader.TemperatureText(health.Latest") < Index(card, "if (health.Latest is { } latest)")
             && Index(panel, "RenderTemperature(SystemSensorReader.Evaluate(sensors, DateTimeOffset.UtcNow));") is var sync && sync > 0 && sync < Index(panel, "timer.Tick +=")
             && Index(panel, "SystemSensorReader.Evaluate(sensors, DateTimeOffset.UtcNow)))") > 0,
@@ -309,6 +310,85 @@ internal static class LiveSensorChecks
         var completed = evidence.WithSensorFigures("A CPU está funcionando.");
         check(completed.Contains("79 °C") && completed.Contains("leitor de sensores do sistema") && !completed.Contains("zero"),
             "#142 chat: a resposta sem o valor ganha a linha com a origem do leitor do sistema: " + completed);
+    }
+
+    /// <summary>
+    /// Defeito do PC do Victor (#142): com o leitor de sensores ativo e o live.json fresco, a prévia e esta suíte liam a temperatura
+    /// ao vivo da máquina, que tem prioridade, em vez dos 52 °C gravados no histórico. Aqui o "PC com o leitor ativo" é simulado: um
+    /// live.json fresco e válido de verdade, num arquivo temporário, lido pela fonte injetada no lugar do caminho real.
+    /// </summary>
+    private static void Hermetic(Action<bool, string> check)
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "nexo-live-pc-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var file = Path.Combine(folder, "live.json");
+            void Write(double celsius) => File.WriteAllText(file, SystemSensorReader.LiveDocument(new TemperatureReading("read", celsius, "Core (Tctl/Tdie) (/amdcpu/0/temperature/2)",
+                HardwareSensors.TemperatureSource, DateTimeOffset.UtcNow), DateTimeOffset.UtcNow, AppVersion.Current, 4242));
+            Write(78.6);
+            var present = new FileLive(file);
+            var victorPc = new MachineSensors(present, _ => null, () => true, () => AppVersion.Current, () => null);
+            var sample = new HealthSnapshot { Time = DateTimeOffset.UtcNow, CpuPercent = 37, MemoryUsedPercent = 54, Connectivity = "local", CpuTemperatureC = 52,
+                CpuTemperature = new TemperatureReading("read", 52, "CPU Package (/intelcpu/0/temperature/0)", HardwareSensors.TemperatureSource, DateTimeOffset.UtcNow), CollectionStatus = "complete" };
+            var root = Path.Combine(folder, "store");
+            string withLive, first, second;
+            using (var db = new OperationalStore(root))
+            {
+                db.SaveSnapshot(sample);
+                withLive = HealthReportPresentation.FromStore(db, victorPc).ReplaceLineEndings("\n");
+                first = HealthReportPresentation.FromStore(db, MachineSensors.Off).ReplaceLineEndings("\n");
+                Write(91.2);
+                second = HealthReportPresentation.FromStore(db, MachineSensors.Off).ReplaceLineEndings("\n");
+            }
+            string Line(string report) => report.Split('\n').First(line => line.StartsWith("Temperatura da CPU: ", StringComparison.Ordinal));
+            check(present.Reads > 0 && present.Paths.All(path => path == SystemSensorReader.LiveFile) && Line(withLive).StartsWith("Temperatura da CPU: 79 °C")
+                && Line(withLive).Contains(SystemSensorReader.ReportSource),
+                "#142 controle: a fonte simulada do PC com o leitor ativo (live.json fresco e válido) está presente e, injetada, tem prioridade: " + Line(withLive));
+            check(Line(first).StartsWith("Temperatura da CPU: 52 °C") && first == second && !first.Contains(SystemSensorReader.SourceLabel) && !first.Contains("78") && !second.Contains("91"),
+                "#142 hermético: com o leitor \"ao vivo\" presente na máquina, o relatório com a fonte desligada traz só os 52 °C do histórico, igual nas duas leituras: " + Line(first));
+        }
+        finally { try { Directory.Delete(folder, true); } catch (IOException) { } catch (UnauthorizedAccessException) { } }
+
+        // A fonte real passa pela trava antes de tocar a máquina: aqui a trava recusa, então nada do Windows é lido.
+        var guard = MachineSensors.RealReadGuard;
+        var probed = new List<string>();
+        MachineSensors.RealReadGuard = what => { probed.Add(what); throw new OperationCanceledException(what); };
+        try
+        {
+            foreach (var read in new Action[] { () => MachineSensors.System.Live(), () => MachineSensors.System.Elevated(), () => MachineSensors.System.PawnIoInstalled(),
+                () => MachineSensors.System.ReaderVersion(), () => MachineSensors.System.ReaderBuild() })
+                try { read(); } catch (OperationCanceledException) { }
+        }
+        finally { MachineSensors.RealReadGuard = guard; }
+        check(guard != null && probed.SequenceEqual(["leitor de sensores do sistema", "leitura elevada", "PawnIO", "versão do leitor", "compilação do leitor"]),
+            "#142 trava do Nexo.Checks ligada: as cinco leituras da fonte real (leitor, leitura elevada, PawnIO, versão e compilação do leitor) passam por ela antes de ler a máquina");
+
+        var code = Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Code");
+        string[] real = ["SystemSensorReader.Current(", "new WindowsLiveSensorSystem()", "PawnIoDriver.Installed()", "WindowsLiveSensorSystem.InstalledVersion()", "WindowsLiveSensorSystem.InstalledBuild()", "ElevatedSensorReader.Fresh("];
+        // Só a fonte real (MachineSensors), a coleta do monitor (EmbeddedCpuTemperature), a instalação do PawnIO (PawnIoSetup) e o
+        // próprio leitor como SYSTEM (o --sensor-loop, em SystemSensorReader) leem a máquina.
+        string[] allowed = ["MachineSensors.cs", "EmbeddedCpuTemperature.cs", "PawnIoSetup.cs", "SystemSensorReader.cs"];
+        var leaks = Directory.EnumerateFiles(code, "*.cs").Where(path => !allowed.Contains(Path.GetFileName(path)))
+            .SelectMany(path => real.Where(File.ReadAllText(path).Contains).Select(call => Path.GetFileName(path) + ": " + call)).ToList();
+        var app = File.ReadAllText(Path.Combine(code, "App.xaml.cs"));
+        var window = File.ReadAllText(Path.Combine(code, "MainWindow.xaml.cs"));
+        var reader = File.ReadAllText(Path.Combine(code, "SystemSensorReader.cs"));
+        check(leaks.Count == 0 && !reader.Contains("SystemSensorReader.Current(") && !reader.Contains("LiveTemperature Current(") && app.Contains("new MainWindow(store, preview ? MachineSensors.Off : MachineSensors.System)") && window.Contains("new LiveMetricsPanel(sensors)")
+            && window.Contains("HealthReportPresentation.FromStore(local, sensors,") && window.Contains("Sensors = sensors }"),
+            "#142 Início, Saúde do PC, cartão \"Agora\", Ativar/Atualizar, relatório e assistente recebem as leituras da máquina injetadas; a prévia (--screenshot, --tray-smoke) usa a fonte desligada"
+            + (leaks.Count > 0 ? " · leituras diretas: " + string.Join(", ", leaks) : ""));
+    }
+
+    private sealed class FileLive(string file) : ILiveSensorSystem
+    {
+        public int Reads { get; private set; }
+        public List<string> Paths { get; } = [];
+        public bool Installed() => true;
+        public string? Untrusted(string path) => null;
+        public string? ReadText(string path, int maxBytes) { Reads++; Paths.Add(path); return File.Exists(file) ? File.ReadAllText(file) : null; }
+        public DateTimeOffset BootTime() => DateTimeOffset.UtcNow.AddHours(-1);
+        public DateTimeOffset? InstalledTime() => null;
     }
 
     private static void Refusal(Action<bool, string> check)
@@ -683,7 +763,8 @@ internal static class LiveSensorChecks
             "#142 P9: \"Atualizar leitor\" aparece com outra versão ou, na mesma versão, com outra compilação (ProductVersion com +commit diferente); sem a compilação de um dos lados, vale só a versão");
         var window = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "MainWindow.xaml.cs")).ReplaceLineEndings("\n");
         var reader = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "ThemeSources", "Code", "SystemSensorReader.cs")).ReplaceLineEndings("\n");
-        check(window.Contains("var outdated = SystemSensorReader.Outdated(installedVersion, WindowsLiveSensorSystem.InstalledBuild(), AppVersion.Current, WindowsLiveSensorSystem.CurrentBuild());")
+        check(window.Contains("var outdated = SystemSensorReader.Outdated(installedVersion, sensors.ReaderBuild(), AppVersion.Current, WindowsLiveSensorSystem.CurrentBuild());")
+            && window.Contains("var installedVersion = sensors.ReaderVersion() ?? (live.Version.Length > 0 ? live.Version : \"desconhecida\");")
             && window.Contains("if (outdated)"),
             "#142 P9: a Saúde do PC decide o \"Atualizar leitor\" pela versão e pela compilação do Nexo.exe instalado");
         // B1, item 2: com extração no Nexo aberto (single-file e outra pasta na lista de busca nativa), Ativar e Atualizar recusam

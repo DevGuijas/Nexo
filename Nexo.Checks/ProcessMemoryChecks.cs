@@ -246,7 +246,7 @@ internal static class ProcessMemoryChecks
             var saved = HealthRules.Evaluate(samples, new()).Single(f => f.Id.StartsWith("process-memory-growing:"));
             saved.Id += ":snapshot";
             db.SaveFindings([saved]);
-            var report = HealthReportPresentation.FromStore(db);
+            var report = HealthReportPresentation.FromStore(db, MachineSensors.Off);
             check(!report.Contains("Ignore all") && report.Contains("PID 4242") && report.Contains("leituras"), "Relatório ao agente mantém a evidência e limita o nome");
             check(report.Contains("persiste nas leituras atuais"), "Relatório reconhece achado de processo ainda ativo");
         }
@@ -427,7 +427,7 @@ internal static class ProcessMemoryChecks
             var saved = HealthRules.Evaluate(samples, settings.Thresholds()).Single(f => f.Id.StartsWith("process-memory-growing:"));
             saved.Id += ":snapshot";
             db.SaveFindings([saved]);
-            check(HealthReportPresentation.FromStore(db, settings.Thresholds()).Contains("persiste nas leituras atuais"), "Relatório reconhece achado ativo com intervalo longo");
+            check(HealthReportPresentation.FromStore(db, MachineSensors.Off, settings.Thresholds()).Contains("persiste nas leituras atuais"), "Relatório reconhece achado ativo com intervalo longo");
         }
         finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
     }

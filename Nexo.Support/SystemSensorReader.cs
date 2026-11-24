@@ -299,8 +299,6 @@ public static class SystemSensorReader
 
     // ---------- leitura pelo app ----------
 
-    public static LiveTemperature Current() => Evaluate(new WindowsLiveSensorSystem(), DateTimeOffset.UtcNow);
-
     public static LiveTemperature Evaluate(ILiveSensorSystem system, DateTimeOffset now)
     {
         try

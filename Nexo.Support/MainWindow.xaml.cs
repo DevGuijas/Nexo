@@ -14,6 +14,8 @@ namespace Nexo.Support;
 public partial class MainWindow : Window
 {
     private readonly Store store;
+    // #142: leitor de sensores, PawnIO e leitura elevada; o App passa o real e, na prévia, a fonte desligada.
+    private readonly MachineSensors sensors;
     private readonly SupportService support;
     private Account user = null!;
     private Conversation? conversation;
@@ -88,9 +90,9 @@ public partial class MainWindow : Window
     private Button? runtimeInstallView;
     private Button? runtimeCancelView;
     private readonly object runtimeAuditSync = new();
-    public MainWindow(Store store)
+    public MainWindow(Store store, MachineSensors sensors)
     {
-        InitializeComponent(); Title = "Nexo " + AppVersion.Current + " • Suporte inteligente"; this.store = store; support = new SupportService(store);
+        InitializeComponent(); Title = "Nexo " + AppVersion.Current + " • Suporte inteligente"; this.store = store; this.sensors = sensors; support = new SupportService(store);
         ApplyNavigationIcons();
         InitializeShell();
         user = store.GetLocalSession();
@@ -243,7 +245,7 @@ public partial class MainWindow : Window
     }
     private string OfflineHealthReport()
     {
-        try { using var local = new OperationalStore(store.Root); return HealthReportPresentation.FromStore(local, healthSettings.Thresholds()); }
+        try { using var local = new OperationalStore(store.Root); return HealthReportPresentation.FromStore(local, sensors, healthSettings.Thresholds()); }
         catch (Exception ex) { return "O relatório de saúde local também está indisponível: " + ex.Message + ". O histórico de conversas permanece separado."; }
     }
     private string? interruptedFacts;
@@ -446,7 +448,7 @@ public partial class MainWindow : Window
     }
     private void LiveMetricsSection()
     {
-        if (liveMetrics == null) { liveMetrics = new LiveMetricsPanel(); liveMetrics.TemperatureUpdated += OnLiveTemperature; }
+        if (liveMetrics == null) { liveMetrics = new LiveMetricsPanel(sensors); liveMetrics.TemperatureUpdated += OnLiveTemperature; }
         if (liveMetrics.Parent is Panel previous) previous.Children.Remove(liveMetrics);
         PageContent.Children.Add(liveMetrics);
     }
@@ -490,8 +492,8 @@ public partial class MainWindow : Window
                 // erro ou valor descartado aparece como atenção. Com o PawnIO instalado e o sensor em zero, falta permissão: texto neutro.
                 // Com o leitor de sensores do sistema, vale o live.json lido agora, na montagem da tela.
                 overview.Children.Add(PageKit.Group("Sensores"));
-                var pawnIoInstalled = PawnIoDriver.Installed();
-                var live = SystemSensorReader.Current();
+                var pawnIoInstalled = sensors.PawnIoInstalled();
+                var live = sensors.Live();
                 liveTemperatureState = live.State;
                 var temperatureText = "Temperatura da CPU: " + HealthReportPresentation.DescribeTemperature(latest);
                 if (SystemSensorReader.Line(live) is { } liveLine)
@@ -849,7 +851,7 @@ public partial class MainWindow : Window
                     }
                 }
                 var events = new Progress<string>(UpdateProgress);
-                var executor = conversationTools ??= new WindowsTools(store, user, ConfirmChange, events, text => AddEntry("assistant", text)) { ConversationId = conversation!.Id };
+                var executor = conversationTools ??= new WindowsTools(store, user, ConfirmChange, events, text => AddEntry("assistant", text)) { ConversationId = conversation!.Id, Sensors = sensors };
                 var agent = new AgentService(store, executor);
                 string answer;
                 try { answer = await agent.Run(user, conversation!, events, (label, result) => AddEntry("tool", label + "\n" + result), token); }
@@ -1265,7 +1267,7 @@ public partial class MainWindow : Window
         panel.Children.Add(SectionHeading("health", "Driver PawnIO para a temperatura da CPU"));
         panel.Children.Add(Text("A temperatura da CPU passa por um driver de kernel. O Nexo não embute o PawnIO: baixa o instalador oficial " + PawnIoSetup.Version + " do GitHub, confere o hash e a assinatura e abre o assistente dele com a autorização de administrador.", 13, "Secondary"));
         panel.Children.Add(Text("Para desinstalar depois: " + PawnIoSetup.Uninstall + ".", 12, "Secondary"));
-        var installed = PawnIoDriver.Installed();
+        var installed = sensors.PawnIoInstalled();
         panel.Children.Add(ToolStatus(Text(pawnIoStatus ?? (installed ? "O PawnIO está instalado neste computador." : "O PawnIO não está instalado neste computador."), 13, "Ink")));
         var install = Action("Instalar PawnIO (driver oficial)", async (_, _) => await GuardAsync(InstallPawnIo), true);
         install.Tag = "pawnio-install-tools"; install.IsEnabled = !pawnIoRunning && !installed;
@@ -1277,7 +1279,7 @@ public partial class MainWindow : Window
     private StackPanel TemperatureActions()
     {
         var panel = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
-        var installed = PawnIoDriver.Installed();
+        var installed = sensors.PawnIoInstalled();
         if (elevatedRead is { } result) panel.Children.Add(StatusLine("Temperatura da CPU: " + result.Message, result.State switch { "read" => "Success", "running" => "Neutral", _ => "Warning" }));
         if (pawnIoStatus != null && !installed) panel.Children.Add(StatusLine(pawnIoStatus, "Neutral"));
         var actions = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };
@@ -1304,8 +1306,8 @@ public partial class MainWindow : Window
     private StackPanel LiveReaderPanel(LiveTemperature live)
     {
         var panel = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
-        var installedVersion = WindowsLiveSensorSystem.InstalledVersion() ?? (live.Version.Length > 0 ? live.Version : "desconhecida");
-        var outdated = SystemSensorReader.Outdated(installedVersion, WindowsLiveSensorSystem.InstalledBuild(), AppVersion.Current, WindowsLiveSensorSystem.CurrentBuild());
+        var installedVersion = sensors.ReaderVersion() ?? (live.Version.Length > 0 ? live.Version : "desconhecida");
+        var outdated = SystemSensorReader.Outdated(installedVersion, sensors.ReaderBuild(), AppVersion.Current, WindowsLiveSensorSystem.CurrentBuild());
         panel.Children.Add(Text("Leitor de sensores do sistema (tarefa \"" + SystemSensorReader.TaskName + "\", SYSTEM) · versão " + installedVersion
             + (outdated ? (installedVersion == AppVersion.Current ? " · este Nexo é outra compilação da " : " · este Nexo é a ") + AppVersion.Current : ""), 12, "Secondary"));
         if (liveReaderStatus != null) panel.Children.Add(StatusLine(liveReaderStatus, "Neutral"));
@@ -1384,7 +1386,7 @@ public partial class MainWindow : Window
 
     private async Task InstallPawnIo()
     {
-        if (pawnIoRunning || PawnIoDriver.Installed()) return;
+        if (pawnIoRunning || sensors.PawnIoInstalled()) return;
         if (!await ConfirmChange(new ChangeRequest(PawnIoSetup.ConfirmationTitle, PawnIoSetup.ConfirmationDetails))) return;
         pawnIoRunning = true; pawnIoStatus = "Iniciando o download do instalador oficial..."; RefreshPawnIoViews();
         PawnIoInstallResult result;

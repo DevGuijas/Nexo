@@ -372,10 +372,14 @@ public static class HealthReportPresentation
         return $"Serviços automáticos parados com saída normal (sem falha): {shown}. Não foram vistos em execução estável antes de parar; isso não conta como alerta.";
     }
 
-    public static string FromStore(OperationalStore store, HealthThresholds? thresholds = null) =>
-        FromStore(store, thresholds, ElevatedSensorReader.Fresh(DateTimeOffset.UtcNow), SystemSensorReader.Current(), PawnIoDriver.Installed());
+    /// <summary>
+    /// As leituras da máquina vêm de <paramref name="sensors"/> (#142): o app real passa <see cref="MachineSensors.System"/>; a
+    /// prévia e as verificações passam <see cref="MachineSensors.Off"/> ou uma fonte simulada, nunca o leitor real da máquina.
+    /// </summary>
+    public static string FromStore(OperationalStore store, MachineSensors sensors, HealthThresholds? thresholds = null) =>
+        FromStore(store, thresholds, sensors.Elevated(), sensors.Live(), sensors.PawnIoInstalled());
 
-    /// <summary>As leituras elevada e do leitor do sistema e o PawnIO entram como parâmetro só para as verificações.</summary>
+    /// <summary>As leituras elevada e do leitor do sistema e o PawnIO já lidos, para as verificações de cada combinação.</summary>
     internal static string FromStore(OperationalStore store, HealthThresholds? thresholds, ElevatedTemperature? elevated, LiveTemperature? live, bool pawnIoInstalled)
     {
         var since = DateTimeOffset.UtcNow.AddDays(-1);

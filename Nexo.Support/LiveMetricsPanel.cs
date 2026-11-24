@@ -33,7 +33,7 @@ public sealed class LiveMetricsPanel : Border
     private bool loaded, sampling;
     private double sampleMilliseconds;
 
-    public LiveMetricsPanel() : this(new WindowsLiveMetricsSource(), new WindowsLiveSensorSystem()) { }
+    public LiveMetricsPanel(MachineSensors machine) : this(new WindowsLiveMetricsSource(), machine.LiveSystem) { }
 
     public LiveMetricsPanel(ILiveMetricsSource source, ILiveSensorSystem sensors)
     {

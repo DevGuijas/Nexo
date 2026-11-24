@@ -223,7 +223,7 @@ internal static class PcValidationChecks
                 : new[] { Sample(now.AddSeconds(-30), new DiskHealth("C:\\", 435_000, 500_000)), Sample(now, new DiskHealth("C:\\", 435_000, 500_000)) };
             foreach (var sample in low.Concat(later)) db.SaveSnapshot(sample);
             db.SaveFindings(found);
-            var report = HealthReportPresentation.FromStore(db);
+            var report = HealthReportPresentation.FromStore(db, MachineSensors.Off);
             if (!report.Contains("resolvida")) throw new Exception("FAIL: o relatório do disco não trouxe a ocorrência encerrada: " + report);
             return report;
         }

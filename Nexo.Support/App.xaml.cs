@@ -27,7 +27,8 @@ public partial class App : Application
             // #143: a prévia aceita "--theme glacial" para capturar o tema claro sem gravar a preferência.
             var themeArgument = Array.IndexOf(e.Args, "--theme");
             ThemeManager.Apply(preview && themeArgument >= 0 && themeArgument + 1 < e.Args.Length ? e.Args[themeArgument + 1] : store.Data.Theme);
-            var window = new MainWindow(store);
+            // #142: a prévia não lê o leitor de sensores, o PawnIO nem a leitura elevada da máquina; mostra só os dados de exemplo dela.
+            var window = new MainWindow(store, preview ? MachineSensors.Off : MachineSensors.System);
             var workArea = SystemParameters.WorkArea;
             window.Width = Math.Min(window.Width, Math.Max(window.MinWidth, workArea.Width));
             window.Height = Math.Min(window.Height, Math.Max(window.MinHeight, workArea.Height));

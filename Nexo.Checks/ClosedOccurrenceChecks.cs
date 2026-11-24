@@ -241,7 +241,7 @@ internal static class ClosedOccurrenceChecks
             var later = new[] { Sample(now.AddSeconds(-30), new DiskHealth("C:\\", 389_000, 500_000)), Sample(now, new DiskHealth("C:\\", 389_000, 500_000)) };
             foreach (var sample in low.Concat(later)) db.SaveSnapshot(sample);
             db.SaveFindings(found);
-            var report = HealthReportPresentation.FromStore(db).ReplaceLineEndings("\n");
+            var report = HealthReportPresentation.FromStore(db, MachineSensors.Off).ReplaceLineEndings("\n");
             if (!report.Contains("resolvida") || report.Contains("Achado memory")) throw new Exception("FAIL: o relatório do PC não trouxe só o T: encerrado: " + report);
             return report.TrimEnd('\n') + "\n" + memoryLines;
         }

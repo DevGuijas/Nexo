@@ -507,7 +507,7 @@ internal static class RaidTemperatureChecks
             var later = new[] { Sample(now.AddSeconds(-30), new DiskHealth("C:\\", 389_000, 500_000)), Sample(now, new DiskHealth("C:\\", 389_000, 500_000)) };
             foreach (var sample in low.Concat(later)) db.SaveSnapshot(sample);
             db.SaveFindings(found);
-            var report = HealthReportPresentation.FromStore(db);
+            var report = HealthReportPresentation.FromStore(db, MachineSensors.Off);
             if (!report.Contains("resolvida")) throw new Exception("FAIL: o relatório do PC não trouxe o T: encerrado: " + report);
             return report;
         }

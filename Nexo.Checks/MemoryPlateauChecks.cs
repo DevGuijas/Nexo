@@ -290,7 +290,7 @@ internal static class MemoryPlateauChecks
             var plateau = Stored(db).MemoryPlateau;
             check(plateau?.ProvenAt == series[61].Time && plateau.ExceededAt != null && plateau.ExceededBytes >= plateau.ReferenceBytes * 1.1,
                 "#71: vazamento de 1,9% em 30 min grava a referência e depois a passagem de 10%");
-            var line = HealthReportPresentation.FromStore(db, Limits).ReplaceLineEndings("\n").Split('\n').SingleOrDefault(l => l.Contains("Processo com memória em crescimento persistente"));
+            var line = HealthReportPresentation.FromStore(db, MachineSensors.Off, Limits).ReplaceLineEndings("\n").Split('\n').SingleOrDefault(l => l.Contains("Processo com memória em crescimento persistente"));
             check(line != null && line.StartsWith("Achado memory (warning)") && line.Contains("persiste: Navegador PID 20248"),
                 "#71: relatório do assistente mostra o vazamento de 1,9% em 30 min por 3,5 h persistindo");
         });
@@ -407,7 +407,7 @@ internal static class MemoryPlateauChecks
             var series = Series(242, _ => 14000, DateTimeOffset.UtcNow.AddSeconds(-5));
             db.SaveFindings([SystemAlert(series), ProcessAlert(series)]);
             Monitor(db, series);
-            var lines = HealthReportPresentation.FromStore(db, Limits).ReplaceLineEndings("\n").Split('\n');
+            var lines = HealthReportPresentation.FromStore(db, MachineSensors.Off, Limits).ReplaceLineEndings("\n").Split('\n');
             var process = lines.SingleOrDefault(line => line.Contains("Processo mantém a memória num patamar estável"));
             check(process != null && process.StartsWith("Achado memory (info)") && process.Contains("estável em patamar alto (informativo, não é falha ativa): Navegador PID 20248 segue com 14000 MB")
                 && process.Contains("Recomendação: Nenhuma ação recomendada") && !lines.Any(line => line.Contains("Verifique se o aplicativo")),

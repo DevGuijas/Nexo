@@ -75,9 +75,9 @@ public partial class MainWindow
         panel.Children.Add(Text(health.Detail, 13, "Secondary"));
         // #142: a temperatura do leitor de sensores do sistema entra já na primeira renderização da Início (a tela de abertura),
         // pelo live.json lido agora, sem esperar o monitor de saúde nem o 1º tique; sem arquivo fresco, "aguardando o leitor…".
-        var live = SystemSensorReader.Current();
+        var live = sensors.Live();
         liveTemperatureState = live.State;
-        if (SystemSensorReader.TemperatureText(health.Latest, live, PawnIoDriver.Installed()) is { } heat)
+        if (SystemSensorReader.TemperatureText(health.Latest, live, sensors.PawnIoInstalled()) is { } heat)
         {
             var temperature = Text(heat.Text, 12, heat.Tone is "Warning" or "Success" ? heat.Tone : "Secondary");
             temperature.Margin = new Thickness(0, 8, 0, 0); panel.Children.Add(temperature);
