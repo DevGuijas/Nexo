@@ -168,12 +168,15 @@ public sealed record RuntimeInstallResult(RuntimeItem Item, RuntimeOutcome Outco
     public string Label => RuntimeInstaller.Label(Outcome);
 }
 
-/// <summary>Linha de auditoria por item (runtimes-audit.ndjson). <see cref="Leftover"/> é a pasta temporária que não pôde ser apagada.</summary>
-public sealed record RuntimeAudit(DateTimeOffset At, string Id, string Title, string Outcome, int? ExitCode, string Url, string FinalUrl, long Bytes, string Sha256, bool Pinned, string Signer, string Message, string Leftover = "");
+/// <summary>Linha de auditoria por item (runtimes-audit.ndjson). <see cref="Leftover"/> é a pasta temporária que não pôde ser apagada.
+/// <see cref="Root"/> é a impressão digital da raiz da cadeia e <see cref="ChainStatus"/> traz os estados tolerados ("tolerado: ...")
+/// ou o motivo da recusa ("recusado: ..."), ambos como a assinatura os devolveu; vazios quando a assinatura não chegou a ser lida.</summary>
+public sealed record RuntimeAudit(DateTimeOffset At, string Id, string Title, string Outcome, int? ExitCode, string Url, string FinalUrl, long Bytes, string Sha256, bool Pinned, string Signer, string Message, string Leftover = "", string Root = "", string ChainStatus = "");
 
 /// <summary>Get-AuthenticodeSignature e a raiz da cadeia do SignerCertificate (impressão digital SHA-1), da mesma chamada.</summary>
-/// <summary>Chain vazio quando a cadeia foi montada (Build verdadeiro) só com prazo vencido ou revogação desconhecida; senão, o motivo.</summary>
-public sealed record RuntimeSignature(string Status, string Subject, string Root, string Chain = "");
+/// <summary>Chain vazio quando a cadeia foi montada (Build verdadeiro) só com prazo vencido ou revogação desconhecida; senão, o motivo.
+/// Tolerated lista esses estados tolerados que apareceram, para a auditoria.</summary>
+public sealed record RuntimeSignature(string Status, string Subject, string Root, string Chain = "", string Tolerated = "");
 
 /// <summary>O que a instalação precisa do Windows e da rede; as verificações trocam tudo por simulações.</summary>
 public interface IRuntimeInstallSystem : IRuntimeProbe
@@ -228,13 +231,13 @@ public static class RuntimeInstaller
                 if (result.Outcome == RuntimeOutcome.UacCanceled) stop = "a autorização de administrador de um item anterior foi cancelada";
             }
             results.Add(result);
-            try { audit?.Invoke(new(DateTimeOffset.UtcNow, item.Id, item.Title, result.Outcome.ToString(), result.ExitCode, item.Url.ToString(), trace.FinalUrl, trace.Bytes, result.Sha256, item.Pinned, result.Signer, result.Message, trace.Leftover)); }
+            try { audit?.Invoke(new(DateTimeOffset.UtcNow, item.Id, item.Title, result.Outcome.ToString(), result.ExitCode, item.Url.ToString(), trace.FinalUrl, trace.Bytes, result.Sha256, item.Pinned, result.Signer, result.Message, trace.Leftover, trace.Root, trace.ChainStatus)); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
         return results;
     }
 
-    private sealed class Trace { public string FinalUrl = ""; public long Bytes; public string Leftover = ""; }
+    private sealed class Trace { public string FinalUrl = ""; public long Bytes; public string Leftover = ""; public string Root = ""; public string ChainStatus = ""; }
 
     private static async Task<RuntimeInstallResult> InstallOne(IRuntimeInstallSystem system, RuntimeItem item, IProgress<string>? progress, Trace trace, CancellationToken token, string? expectedSha256)
     {
@@ -275,12 +278,15 @@ public static class RuntimeInstaller
             if (system.Linked(file) is { } link)
                 return new(item, RuntimeOutcome.Link, $"O caminho do instalador passa por um link ou junção ({link}). O arquivo foi apagado e nada foi executado.", Sha256: hash);
             progress?.Report(item.Title + ": conferindo a assinatura digital...");
-            string status, signer, root, chain;
-            try { (status, signer, root, chain) = await system.Signature(file, token); }
+            RuntimeSignature signature;
+            try { signature = await system.Signature(file, token); }
             catch (Exception ex) when (ex is InvalidOperationException or TimeoutException or Win32Exception)
             {
                 return new(item, RuntimeOutcome.Signature, "Não foi possível conferir a assinatura digital (" + Short(ex.Message) + "). O arquivo foi apagado e nada foi executado.", Sha256: hash);
             }
+            var (status, signer, root, chain, tolerated) = signature;
+            trace.Root = root;
+            trace.ChainStatus = chain.Length > 0 ? "recusado: " + chain : tolerated.Length > 0 ? "tolerado: " + tolerated : "";
             if (!string.Equals(status, "Valid", StringComparison.Ordinal))
                 return new(item, RuntimeOutcome.Signature, $"A assinatura digital não é válida (estado: {(status.Length == 0 ? "desconhecido" : status)}). O arquivo foi apagado e nada foi executado.", Signer: signer, Sha256: hash);
             if (!string.Equals(signer, item.Signer, StringComparison.Ordinal))
@@ -397,7 +403,11 @@ public static class RuntimeInstaller
     public static bool Succeeded(RuntimeInstallResult result) => result.Outcome is RuntimeOutcome.Ok or RuntimeOutcome.AlreadyInstalled or RuntimeOutcome.RebootPending;
 
     public static string Summary(IReadOnlyList<RuntimeInstallResult> results) =>
-        string.Join(", ", results.GroupBy(r => r.Outcome).OrderBy(g => g.Key).Select(g => g.Count() + " " + Label(g.Key).ToLowerInvariant()));
+        string.Join(", ", results.GroupBy(r => r.Outcome).OrderBy(g => g.Key).Select(g => g.Count() + " " + Lower(Label(g.Key))));
+
+    // Baixa só a primeira letra e preserva siglas: "Já instalado" vira "já instalado", e "UAC cancelado" fica como está.
+    private static string Lower(string label) =>
+        label.Length == 0 || (label.Length > 1 && char.IsUpper(label[1])) ? label : char.ToLowerInvariant(label[0]) + label[1..];
 }
 
 /// <summary>Textos do cartão, sem depender do WPF.</summary>
@@ -518,7 +528,8 @@ public sealed class WindowsRuntimeSystem : IRuntimeInstallSystem
             var chain = statuses == null ? "estado da cadeia não informado"
                 : !built ? "a cadeia não foi montada" + (statuses.Length > 0 ? ": " + string.Join(", ", statuses) : "")
                 : string.Join(", ", statuses.Where(s => !ChainTolerated.Contains(s, StringComparer.Ordinal)));
-            return new(Text("Status"), Text("Subject"), chain.Length == 0 ? Text("Root").Trim() : "", chain);
+            var tolerated = built && statuses != null ? string.Join(", ", statuses.Where(s => ChainTolerated.Contains(s, StringComparer.Ordinal))) : "";
+            return new(Text("Status"), Text("Subject"), chain.Length == 0 ? Text("Root").Trim() : "", chain, chain.Length == 0 ? tolerated : "");
         }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException) { return new("", "", "", "saída do PowerShell ilegível"); }
     }

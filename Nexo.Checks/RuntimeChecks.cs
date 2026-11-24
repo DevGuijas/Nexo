@@ -59,6 +59,7 @@ internal static class RuntimeChecks
         public (string, string) Sign { get; set; } = ("Valid", RuntimeCatalog.MicrosoftSigner);
         public string SignRoot { get; set; } = RuntimeCatalog.MicrosoftRoot2011;
         public string SignChain { get; set; } = "";
+        public string SignTolerated { get; set; } = "";
         // Ordem das etapas que importam para a pasta: "DACL", "download", "assinatura", "listar", "runas".
         public List<string> Events { get; } = [];
         // Simulam o que outro processo da mesma conta gravou na pasta antes da DACL: arquivos, subpastas e fluxos alternativos.
@@ -85,7 +86,7 @@ internal static class RuntimeChecks
             if (Events.LastOrDefault() != "download") Events.Add("download");
             return Task.FromResult(Respond(url));
         }
-        public Task<RuntimeSignature> Signature(string file, CancellationToken token) { Signed.Add(file); Events.Add("assinatura"); return Task.FromResult(new RuntimeSignature(Sign.Item1, Sign.Item2, SignRoot, SignChain)); }
+        public Task<RuntimeSignature> Signature(string file, CancellationToken token) { Signed.Add(file); Events.Add("assinatura"); return Task.FromResult(new RuntimeSignature(Sign.Item1, Sign.Item2, SignRoot, SignChain, SignTolerated)); }
         public void ProtectDirectory(string directory)
         {
             AtDacl.AddRange(Directory.EnumerateFileSystemEntries(directory).Select(e => (Path.GetFileName(e), File.Exists(e) ? new FileInfo(e).Length : -1L)));
@@ -270,7 +271,7 @@ internal static class RuntimeChecks
         var wrongHash = new FakeSystem { Root = temp, Respond = _ => Ok(dxBody) };
         var results = await RuntimeInstaller.InstallAsync(wrongHash, [dx], null, audits.Add, CancellationToken.None);
         check(dxHash != dx.Sha256 && results[0].Outcome == RuntimeOutcome.Integrity && results[0].Message.Contains("SHA-256") && wrongHash.Signed.Count == 0 && wrongHash.Ran.Count == 0 && Clean()
-            && audits.Count == 1 && audits[0].Outcome == "Integrity" && audits[0].Sha256 == dxHash,
+            && audits.Count == 1 && audits[0].Outcome == "Integrity" && audits[0].Sha256 == dxHash && audits[0].Root == "" && audits[0].ChainStatus == "",
             "#150 instalação: SHA-256 diferente do fixado para antes da assinatura e do UAC, apaga o arquivo e registra na auditoria");
         var shorter = new FakeSystem { Root = temp, Respond = _ => Ok(dxBody[..^1]) };
         results = await RuntimeInstaller.InstallAsync(shorter, [dx], null, null, CancellationToken.None);
@@ -387,8 +388,13 @@ internal static class RuntimeChecks
         results = await RuntimeInstaller.InstallAsync(cancel, [v14, v14x86, dx], null, audits.Add, CancellationToken.None);
         check(results.Select(r => r.Outcome).SequenceEqual([RuntimeOutcome.UacCanceled, RuntimeOutcome.NotStarted, RuntimeOutcome.NotStarted]) && results[0].ExitCode == null
             && results[0].Message.Contains("autorização de administrador foi cancelada") && results[1].Message.Contains("cancelada") && cancel.Requests.Count == 2 && cancel.Ran.Count == 1
-            && RuntimeInstaller.State(results) == "cancelada" && audits.Select(a => a.Outcome).SequenceEqual(["UacCanceled", "NotStarted", "NotStarted"]) && Clean(),
+            && RuntimeInstaller.State(results) == "cancelada" && audits.Select(a => a.Outcome).SequenceEqual(["UacCanceled", "NotStarted", "NotStarted"]) && Clean()
+            && RuntimeInstaller.Summary(results) == "1 UAC cancelado, 2 não iniciado",
             "#150 instalação: UAC cancelado vira estado claro, os itens seguintes ficam não iniciados e tudo vai à auditoria");
+        RuntimeInstallResult Done(RuntimeOutcome outcome) => new(v14, outcome, "");
+        check(RuntimeInstaller.Summary([Done(RuntimeOutcome.UacCanceled), Done(RuntimeOutcome.Ok), Done(RuntimeOutcome.AlreadyInstalled), Done(RuntimeOutcome.Ok)]) == "2 ok, 1 já instalado, 1 UAC cancelado"
+            && RuntimeInstaller.Summary([Done(RuntimeOutcome.Untrusted), Done(RuntimeOutcome.NotStarted)]) == "1 assinatura não confiável, 1 não iniciado",
+            "#150 resumo: só a primeira letra de cada rótulo é baixada, e a sigla UAC fica em maiúsculas");
 
         // Um item por vez, só os marcados; o que já está instalado não baixa nada; resultado parcial.
         var mixed = new FakeSystem { Root = temp, Respond = url => url.Host == "aka.ms" ? Redirect("https://download.visualstudio.microsoft.com/x/" + url.Segments[^1]) : Ok(v14Body), Exit = name => name == "vc_redist.x86.exe" ? 1603 : 0 };
@@ -398,7 +404,8 @@ internal static class RuntimeChecks
         results = await RuntimeInstaller.InstallAsync(mixed, [v14, Item("vc2010-x86"), v14x86], null, audits.Add, CancellationToken.None);
         check(results.Select(r => r.Outcome).SequenceEqual([RuntimeOutcome.Ok, RuntimeOutcome.AlreadyInstalled, RuntimeOutcome.Failed]) && mixed.Ran.SequenceEqual(["vc_redist.x64.exe", "vc_redist.x86.exe"])
             && mixed.Requests.All(u => !u.ToString().Contains("165255E7")) && RuntimeInstaller.State(results) == "parcial" && audits.Count == 3 && audits[0].FinalUrl.StartsWith("https://download.visualstudio.microsoft.com/")
-            && audits[0].Signer == RuntimeCatalog.MicrosoftSigner && !audits[0].Pinned && audits[1].Bytes == 0 && RuntimeInstaller.Summary(results) == "1 ok, 1 já instalado, 1 falha",
+            && audits[0].Signer == RuntimeCatalog.MicrosoftSigner && !audits[0].Pinned && audits[1].Bytes == 0 && RuntimeInstaller.Summary(results) == "1 ok, 1 já instalado, 1 falha"
+            && audits[0].Root == RuntimeCatalog.MicrosoftRoot2011 && audits[0].ChainStatus == "" && audits[1].Root == "" && audits[1].ChainStatus == "" && audits[2].Root == RuntimeCatalog.MicrosoftRoot2011,
             "#150 instalação: um item de cada vez, só os escolhidos; já instalado não baixa; resultado parcial com auditoria por item");
         var offline = new FakeSystem { Root = temp, Respond = _ => throw new HttpRequestException("Nenhuma conexão") };
         results = await RuntimeInstaller.InstallAsync(offline, [v14], null, null, CancellationToken.None);
@@ -469,16 +476,23 @@ internal static class RuntimeChecks
         }
         foreach (var (label, status) in new[] { ("PartialChain", "PartialChain"), ("NotSignatureValid", "NotSignatureValid"), ("Build falso", "a cadeia não foi montada") })
         {
-            var broken = new FakeSystem { Root = temp, Respond = chain, SignChain = status };
-            var result = (await RuntimeInstaller.InstallAsync(broken, [v14], null, null, CancellationToken.None))[0];
+            var broken = new FakeSystem { Root = temp, Respond = chain, SignChain = status, SignRoot = "" };
+            var audits = new List<RuntimeAudit>();
+            var result = (await RuntimeInstaller.InstallAsync(broken, [v14], null, audits.Add, CancellationToken.None))[0];
             check(result.Outcome == RuntimeOutcome.Untrusted && result.Message.Contains("cadeia do certificado não foi validada (" + status + ")")
-                && broken.Ran.Count == 0 && !broken.Events.Contains("listar") && clean(),
+                && broken.Ran.Count == 0 && !broken.Events.Contains("listar") && clean() && audits.Single().ChainStatus == "recusado: " + status && audits.Single().Root == "",
                 "#150 raiz: cadeia com " + label + " → assinatura não confiável, mesmo com a raiz da Microsoft, antes do UAC");
         }
         var lower = new FakeSystem { Root = temp, Respond = chain, SignRoot = RuntimeCatalog.MicrosoftRoot2011.ToLowerInvariant() };
         lower.AfterRun = _ => lower.SetV14("x64");
         var ok = (await RuntimeInstaller.InstallAsync(lower, [v14], null, null, CancellationToken.None))[0];
         check(ok.Outcome == RuntimeOutcome.Ok, "#150 raiz: comparação exata sem diferenciar maiúsculas de minúsculas");
+        var expired = new FakeSystem { Root = temp, Respond = chain, SignTolerated = "NotTimeValid, RevocationStatusUnknown" };
+        expired.AfterRun = _ => expired.SetV14("x64");
+        var expiredAudits = new List<RuntimeAudit>();
+        ok = (await RuntimeInstaller.InstallAsync(expired, [v14], null, expiredAudits.Add, CancellationToken.None))[0];
+        check(ok.Outcome == RuntimeOutcome.Ok && expiredAudits.Single().Root == RuntimeCatalog.MicrosoftRoot2011 && expiredAudits.Single().ChainStatus == "tolerado: NotTimeValid, RevocationStatusUnknown",
+            "#150 auditoria: a instalação Ok registra a raiz da cadeia e os estados tolerados");
     }
 
     // A saída simulada do PowerShell e o próprio script, com Get-AuthenticodeSignature falso, no pwsh (Windows ou NEXO_CHECKS_PWSH).
@@ -497,7 +511,7 @@ internal static class RuntimeChecks
             ("prazo e revogação", "[\"NotTimeValid\",\"RevocationStatusUnknown\"]") })
         {
             var accepted = Out("true", chain);
-            check(accepted.Root == RuntimeCatalog.MicrosoftRoot2011 && accepted.Chain == "", "#150 cadeia: Build verdadeiro com " + label + " é aceito, e a raiz segue para a comparação");
+            check(accepted.Root == RuntimeCatalog.MicrosoftRoot2011 && accepted.Chain == "" && accepted.Tolerated == string.Join(", ", JsonSerializer.Deserialize<string[]>(chain)!), "#150 cadeia: Build verdadeiro com " + label + " é aceito, e a raiz segue para a comparação");
         }
         foreach (var (label, built, chain, reason) in new[]
         {
@@ -510,7 +524,7 @@ internal static class RuntimeChecks
         })
         {
             var refusedChain = Out(built, chain);
-            check(refusedChain.Root == "" && refusedChain.Chain == reason, "#150 cadeia: " + label + " é recusado, com a raiz vazia (" + reason + ")");
+            check(refusedChain.Root == "" && refusedChain.Chain == reason && refusedChain.Tolerated == "", "#150 cadeia: " + label + " é recusado, com a raiz vazia (" + reason + ")");
         }
         var script = WindowsRuntimeSystem.SignatureScript(@"C:\Temp\x'y.exe");
         var wrapped = SupportService.PowershellCommand(script);
