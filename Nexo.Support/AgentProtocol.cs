@@ -177,14 +177,27 @@ public static class AgentProtocol
     // desses componentes, com ele a até quatro palavras do verbo. Passam a negação antes da oferta ("não posso instalar o
     // DirectX pelo chat"), a orientação ("posso explicar como…", "posso indicar onde…") e a frase sem oferta ("você pode
     // instalar o DirectX pelo cartão…"). Driver, impressora e Office não são componentes do cartão.
+    // @qa (f7bcb21): cada "posso/vou…" é testado sozinho (a busca é sobreposta), para que um "não consigo…" ou um "posso explicar…"
+    // no começo não esconda o "mas posso instalar o Visual C++" seguinte. O verbo é só a forma verbal (infinitivo, subjuntivo,
+    // futuro, gerúndio, ênclise, "eu instalo"), e não o substantivo nem o adjetivo: "versão instalada do .NET", "erro de
+    // instalação do DirectX", "FPS baixo com o DirectX", "atualização do .NET" e "repare que o DirectX…" passam. "Fazer o
+    // download" e "executar o instalador" também são oferta. A orientação só vale quando nada coordenado ("e", "mas", "ou",
+    // "depois", "também", "já") separa o verbo de orientar da instalação: "posso explicar o erro e já instalar o VC++" é oferta.
     internal const string RuntimeInstallReason = "A resposta oferece instalar, baixar ou atualizar o Visual C++ Redistributable, o DirectX ou o .NET, e o Nexo não faz isso pelo chat. Tire essa oferta e mantenha o resto da resposta. Se o usuário quiser instalar esses componentes, indique o cartão “" + RuntimeCard + "”, no menu Ferramentas, onde “Verificar este PC” mostra o que falta neste PC e só os instaladores oficiais da Microsoft são usados.";
     internal const string RuntimeCard = "Componentes do Windows para jogos e programas";
     private const string RuntimeObject = @"(?:(?:visual )?c\+\+|vc\+\+|vc_?redist\w*|redistribu\w*|directx|dxsetup|dxwebsetup|d3dx\w*|xinput\w*|xaudio\w*|\.net\b|dotnet\b|net framework\b|bibliotecas? (?:do|de) (?:visual|runtime|jogos?)\b)";
-    private static readonly Regex RuntimeOffer = new(@"(?<head>\b(?:posso|podemos|poderia|poderiamos|consigo|vou|vamos|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo)\b)(?<lead>[^;:!?\n]*?)"
-        + @"\b(?:instal|reinstal|baix|atualiz|repar)\w*(?:-(?:lo|la|los|las))?\s+(?:[^\s.;:!?]+\s+){0,4}?" + RuntimeObject);
+    private const string RuntimeStem = @"(?:reinstal|instal|baix|atualiz|repar)";
+    private const string RuntimeVerb = @"(?:(?!repar(?:e|em)\s+que\b)" + RuntimeStem + @"(?:ar(?:ei|emos|ia|iamos|mos)?|e|em|emos|ando|asse|assem|assemos|a-(?:lo|la|los|las))"
+        + @"|(?<=\beu\s+(?:mesmo\s+)?)" + RuntimeStem + @"o|(?:fazer|faco|faca|facamos|farei)\s+o\s+download"
+        + @"|(?:rodar|executar|abrir|iniciar|rodo|executo|abro|inicio|rode|execute|abra|inicie)(?=\s+(?:o\s+)?(?:instalador|vc_?redist|dxwebsetup|dxsetup)))";
+    private static readonly Regex RuntimeOffer = new(@"(?=(?<head>\b(?:posso|podemos|poderia|poderiamos|consigo|vou|vamos|irei|quer que eu|deseja que eu|gostaria que eu|prefere que eu|eu (?:te |lhe )?ajudo"
+        + @"|eu(?=\s+(?:mesmo\s+)?" + RuntimeStem + @"o\b))\b)(?<lead>[^;:!?\n]*?)\b" + RuntimeVerb + @"\b\s+(?:[^\s.;:!?]+\s+){0,4}?" + RuntimeObject + ")");
     private static readonly Regex RuntimeOrientation = new(@"\b(?:explic|orient|ensin|indic|mostr)\w*|\b(?:dizer|falar) (?:como|onde)\b");
+    private static bool RuntimeOriented(string lead) => RuntimeOrientation.IsMatch(lead)
+        && Regex.Matches(lead, @"\b(?:explic|orient|ensin|indic|mostr)\w*|\b(?:como|onde)\b").Last() is var anchor
+        && !Regex.IsMatch(lead[(anchor.Index + anchor.Length)..], @"\b(?:e|mas|ou|depois|tambem|ja)\b");
     public static bool OffersRuntimeInstall(string normalized) => RuntimeOffer.Matches(normalized).Any(offer =>
-        !Regex.IsMatch(normalized[..offer.Index], @"\b(?:nao|nem|nunca)\s+(?:\w+\s+){0,2}$") && !RuntimeOrientation.IsMatch(offer.Groups["lead"].Value)
+        !Regex.IsMatch(normalized[..offer.Index], @"\b(?:nao|nem|nunca)\s+(?:\w+\s+){0,2}$") && !RuntimeOriented(offer.Groups["lead"].Value)
         && !Regex.IsMatch(offer.Groups["lead"].Value, @"(?:^|\s)(?:nao|nem|nunca)\s*$") && !Regex.IsMatch(offer.Groups["lead"].Value, @"[.]\s"));
 
     // Instrução que acompanha a recusa: o motivo fixo e, para a ação anunciada, o trecho e a saída quando não há ferramenta.
