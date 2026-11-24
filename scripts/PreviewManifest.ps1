@@ -1,4 +1,4 @@
-function Get-NexoContentLength {
+﻿function Get-NexoContentLength {
     param([Parameter(Mandatory)][string[]]$HeaderValues)
     if ($HeaderValues.Count -ne 1 -or $HeaderValues[0] -notmatch '^\d+$') { throw 'Content-Length remoto inválido.' }
     return [long]::Parse($HeaderValues[0], [Globalization.CultureInfo]::InvariantCulture)

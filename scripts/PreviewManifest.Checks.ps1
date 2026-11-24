@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'PreviewManifest.ps1')
 if ((Get-NexoContentLength -HeaderValues @('1657983656')) -ne 1657983656L) {
     throw 'Content-Length da Oracle não foi convertido.'

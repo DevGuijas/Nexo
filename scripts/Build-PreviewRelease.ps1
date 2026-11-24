@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$OutputDirectory = 'artifacts/preview-release',
     [string]$SigningKeyPath = (Join-Path $env:USERPROFILE '.nexo-preview-signing.pem')
 )
