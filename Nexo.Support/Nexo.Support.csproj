@@ -7,7 +7,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>Nexo</AssemblyName>
-    <Version>1.7.0</Version>
+    <Version>1.7.1</Version>
     <Product>Nexo</Product>
     <Description>Agente local de suporte para Windows com monitoramento de saúde e recuperação supervisionada.</Description>
     <ApplicationManifest>app.manifest</ApplicationManifest>

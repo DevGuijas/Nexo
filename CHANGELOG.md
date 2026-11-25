@@ -4,6 +4,10 @@ Cada versão publicada é imutável: os arquivos de `releases/<versão>/` no arm
 
 A data no título de uma versão é o dia em que o `latest.json` dela foi publicado. Enquanto o título disser "não publicada", `scripts/Build-CloudRelease.ps1` se recusa a gerar os pacotes.
 
+## [1.7.1] — não publicada
+
+Prévia atualizada com os PRs integrados em `development` até 25/11/2026. O pacote do aplicativo agora segue o build sem extração necessário ao leitor de sensores do sistema (#142); o instalador de prévia 1.2.1 não apresenta um número de versão fixo antes de consultar o manifesto. O canal estável continua em 1.6.3. Os critérios de publicação estável, incluindo os ensaios da #8 e a assinatura da #22, permanecem abertos.
+
 ## [1.7.0] — não publicada
 
 Aplicativo 1.7.0. O instalador continua na 1.0.0, porque o código dele não mudou desde a 1.6.3.

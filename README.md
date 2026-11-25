@@ -224,7 +224,7 @@ dotnet run --project Nexo.Checks -- --interface-probe-live
 dotnet run --project Nexo.Checks -- --hardware-live
 dotnet run --project Nexo.Checks -- --debloat
 dotnet run --project Nexo.Checks -- --runtimes
-dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.7.0
+dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.7.1
 dotnet run --project Nexo.Setup.Checks -c Release
 ```
 
