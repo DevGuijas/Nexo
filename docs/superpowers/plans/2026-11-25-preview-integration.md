@@ -57,6 +57,6 @@
 
 **Files:** GitHub PR and issues.
 
-- [ ] Rerun final checks and review diff.
+- [x] Rerun final checks and review diff.
 - [ ] Commit and push the preview branch; prepare a draft PR toward `main` with blockers.
 - [ ] Close only issues with completed criteria and summarize the remaining work for stable release.
