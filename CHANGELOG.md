@@ -6,7 +6,14 @@ A data no título de uma versão é o dia em que o `latest.json` dela foi public
 
 ## [1.7.1] — não publicada
 
-Prévia atualizada com os PRs integrados em `development` até 25/11/2026. O pacote do aplicativo agora segue o build sem extração necessário ao leitor de sensores do sistema (#142); o instalador de prévia 1.2.1 não apresenta um número de versão fixo antes de consultar o manifesto. O canal estável continua em 1.6.3. Os critérios de publicação estável, incluindo os ensaios da #8 e a assinatura da #22, permanecem abertos.
+Prévia publicada em 25/11/2026 com os PRs integrados em `development` até essa data. O pacote do aplicativo agora segue o build sem extração necessário ao leitor de sensores do sistema (#142); o instalador de prévia 1.2.1 não apresenta um número de versão fixo antes de consultar o manifesto. O título permanece “não publicada” porque a regra do `CHANGELOG` reserva uma data no título para a distribuição estável. O canal estável continua em 1.6.3. Os critérios de publicação estável, incluindo os ensaios da #8 e a assinatura da #22, permanecem abertos.
+
+| Artefato público | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `releases/1.7.1/nexo-app.zip` | 72.403.922 | `B2C77527DA24BD329456768DE4A5F811E7FD6B4DE0A1B2BDF386D2A82F4C2984` |
+| `NexoSetup-Preview-1.2.1.exe` | 161.807.827 | `E28C13E7E2AA20B01FB1C1C0F07AE5367886C90D459476399085DCA7E69B09E2` |
+
+O manifesto `preview/latest.json` foi ativado por último e validado com `preview/latest.sig`. A instalação real neste PC confirmou o Nexo 1.7.1, o modelo `qwen3:8b`, o atalho da área de trabalho, o desinstalador na pasta do aplicativo e o log JSONL. Nenhuma das pendências da seção 1.7.0 foi considerada concluída apenas pela publicação da prévia.
 
 ## [1.7.0] — não publicada
 

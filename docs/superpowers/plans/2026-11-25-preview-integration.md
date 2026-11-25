@@ -32,26 +32,26 @@
 **Files:** `CHANGELOG.md`, GitHub PRs/issues, `docs/superpowers/specs/2026-11-25-preview-integration-design.md`
 
 - [x] Fetch GitHub state and identify merged/open PRs, open issues and release blockers.
-- [ ] Run baseline Nexo, setup and Office suites in an isolated worktree.
-- [ ] Reconcile which issues can be closed from evidence and which remain blocked.
+- [x] Run baseline Nexo, setup and Office suites in an isolated worktree.
+- [x] Reconcile which issues can be closed from evidence and which remain blocked.
 
 ### Task 2: Preview packaging and version
 
 **Files:** `scripts/Build-PreviewRelease.ps1`, `Nexo.Setup/SetupWindow.cs`, `Nexo.Support/Nexo.Support.csproj`, `Nexo.Setup/Nexo.Setup.csproj`, `Nexo.Setup.Checks/Program.cs`, `CHANGELOG.md`
 
-- [ ] Write a failing check for no extraction in preview app packaging and for the setup window not hardcoding `1.7.0`; observe failure.
-- [ ] Publish preview app without native self-extraction; make setup version text read the manifest or generic preview wording; bump immutable preview app/setup versions.
-- [ ] Run setup checks, Nexo checks, Office checks and preview manifest checks.
+- [x] Write a failing check for no extraction in preview app packaging and for the setup window not hardcoding `1.7.0`; observe failure.
+- [x] Publish preview app without native self-extraction; make setup version text read the manifest or generic preview wording; bump immutable preview app/setup versions.
+- [x] Run setup checks, Nexo checks, Office checks and preview manifest checks.
 
 ### Task 3: Build and publish
 
 **Files:** `README.md`, `docs/INSTALADOR-NUVEM.md`, `docs/RECUPERACAO-2026-11-22.md`, Oracle objects.
 
-- [ ] Build app ZIP, setup EXE and signed preview manifest with `Build-PreviewRelease.ps1`.
-- [ ] Verify ZIP contents, signatures, hashes and `--check` locally.
-- [ ] Publish app ZIP and setup EXE, then `preview/latest.sig`, then `preview/latest.json`.
-- [ ] Download the public installer and confirm SHA-256; install on this PC and inspect shortcut, log, app and uninstaller.
-- [ ] Update documentation with exact version, URL, hash and known limits.
+- [x] Build app ZIP, setup EXE and signed preview manifest with `Build-PreviewRelease.ps1`.
+- [x] Verify ZIP contents, signatures, hashes and `--check` locally.
+- [x] Publish app ZIP and setup EXE, then `preview/latest.sig`, then `preview/latest.json`.
+- [x] Download the public installer and confirm SHA-256; install on this PC and inspect shortcut, log, app and uninstaller.
+- [x] Update documentation with exact version, URL, hash and known limits.
 
 ### Task 4: Integration handoff
 
