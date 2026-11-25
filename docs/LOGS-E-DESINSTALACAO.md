@@ -1,4 +1,4 @@
-# Logs de instalação e desinstalação da prévia 1.2.0
+# Logs de instalação e desinstalação da prévia 1.2.0 e posteriores
 
 ## Localização
 

@@ -43,6 +43,15 @@ internal static class ReleaseChecks
             && script.Contains("dotnet publish $project " + flags + " -o $appStage") && script.Contains("$nativeBesideExe = @('wpfgfx_cor3.dll', 'PresentationNative_cor3.dll')")
             && script.Contains("if (-not $archiveToCheck.GetEntry($native)) { throw"),
             "O pacote do aplicativo é publicado sem extração, com as opções do README, e só segue com as DLLs nativas do WPF ao lado do Nexo.exe");
+        var previewScript = Read("scripts", "Build-PreviewRelease.ps1");
+        var previewAppPublish = previewScript.Split('\n').Select(line => line.Trim()).Single(line => line.StartsWith("& $dotnet.Source publish") && line.Contains("$appStage"));
+        check(previewAppPublish.Contains("'-p:PublishSingleFile=true'")
+            && !previewAppPublish.Contains("SelfExtract", StringComparison.OrdinalIgnoreCase)
+            && previewScript.Contains("wpfgfx_cor3.dll") && previewScript.Contains("PresentationNative_cor3.dll"),
+            "A prévia publica o Nexo sem extração e confere as DLLs nativas ao lado do executável");
+        var setupWindow = Read("Nexo.Setup", "SetupWindow.cs");
+        check(!Regex.IsMatch(setupWindow, @"\b\d+\.\d+\.\d+\b"),
+            "O assistente da prévia não mostra uma versão fixa diferente do manifesto");
         check(publish > 0 && script.IndexOf("marcada como não publicada", StringComparison.Ordinal) is var date && date >= 0 && date < publish
             && script.IndexOf("Assert-NexoNewRelease -Version", StringComparison.Ordinal) is var assert && assert >= 0 && assert < publish,
             "As recusas acontecem antes de compilar ou empacotar");

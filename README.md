@@ -18,13 +18,13 @@ Em **Ferramentas**, o cartão **Componentes do Windows para programas** (#150, 1
 
 ## Abrir
 
-Para executar a compilação local, rode `dotnet run --project Nexo.Support -c Release`. Para instalar o aplicativo com o modelo local, baixe [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe). Ele consulta a versão publicada na Oracle ao ser executado; veja [o procedimento de instalação e publicação](docs/INSTALADOR-NUVEM.md). A versão estável publicada atual é a 1.6.3; a 1.7.0 desta branch ainda não é uma entrega estável. Histórico, pré-requisitos de publicação e hashes dos arquivos publicados estão em [CHANGELOG.md](CHANGELOG.md).
+Para executar a compilação local, rode `dotnet run --project Nexo.Support -c Release`. Para instalar o aplicativo com o modelo local, baixe [NexoSetup.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup.exe). Ele consulta a versão publicada na Oracle ao ser executado; veja [o procedimento de instalação e publicação](docs/INSTALADOR-NUVEM.md). A versão estável publicada atual é a 1.6.3; a prévia 1.7.1 desta branch ainda não é uma entrega estável. Histórico, pré-requisitos de publicação e hashes dos arquivos publicados estão em [CHANGELOG.md](CHANGELOG.md).
 
-### Prévia 1.7.0
+### Prévia 1.7.1
 
-O [NexoSetup-Preview-1.2.0.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup-Preview-1.2.0.exe) instala a prévia 1.7.0 no perfil atual do Windows. O assistente pede confirmação e baixa o Nexo, o Ollama oficial e o modelo local `qwen3:8b` da Oracle. O manifesto separado da prévia é assinado; cada pacote é conferido por tamanho e SHA-256 antes do uso. O instalador cria atalhos na área de trabalho e no menu Iniciar, inclui `NexoUninstall.exe` na pasta do aplicativo e registra as etapas em logs locais. Veja [logs e desinstalação](docs/LOGS-E-DESINSTALACAO.md). O canal estável acima continua na 1.6.3.
+O [NexoSetup-Preview-1.2.1.exe](https://objectstorage.sa-saopaulo-1.oraclecloud.com/n/grlqtjwmlv51/b/nexo-releases/o/NexoSetup-Preview-1.2.1.exe) instala a prévia 1.7.1 no perfil atual do Windows. O assistente pede confirmação e baixa o Nexo, o Ollama oficial e o modelo local `qwen3:8b` da Oracle. O manifesto separado da prévia é assinado; cada pacote é conferido por tamanho e SHA-256 antes do uso. O instalador cria atalhos na área de trabalho e no menu Iniciar, inclui `NexoUninstall.exe` na pasta do aplicativo e registra as etapas em logs locais. Veja [logs e desinstalação](docs/LOGS-E-DESINSTALACAO.md). O canal estável acima continua na 1.6.3.
 
-SHA-256 do instalador da prévia: `7CD852AF8E16934AF38DDEA7BAA5A9FB70599C4F7456C44C6AB59C663FF90191`. A 1.7.0 ainda tem [validações pendentes](CHANGELOG.md). Os executáveis do Nexo estão sem assinatura de código da equipe; o Windows pode mostrar um aviso do SmartScreen ou bloquear a execução conforme a política do PC. Veja o [registro da recuperação](docs/RECUPERACAO-2026-11-22.md).
+SHA-256 do instalador da prévia: `E28C13E7E2AA20B01FB1C1C0F07AE5367886C90D459476399085DCA7E69B09E2`. A prévia ainda tem [validações pendentes](CHANGELOG.md). Os executáveis do Nexo estão sem assinatura de código da equipe; o Windows pode mostrar um aviso do SmartScreen ou bloquear a execução conforme a política do PC. Veja o [registro da recuperação](docs/RECUPERACAO-2026-11-22.md).
 
 ### Novidade 1.6.3 — driver NVIDIA e instalador gráfico
 
@@ -224,7 +224,7 @@ dotnet run --project Nexo.Checks -- --interface-probe-live
 dotnet run --project Nexo.Checks -- --hardware-live
 dotnet run --project Nexo.Checks -- --debloat
 dotnet run --project Nexo.Checks -- --runtimes
-dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.7.0
+dotnet publish Nexo.Support/Nexo.Support.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o artifacts/Nexo-1.7.1
 dotnet run --project Nexo.Setup.Checks -c Release
 ```
 

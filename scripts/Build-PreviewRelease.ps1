@@ -51,9 +51,12 @@ $appStage = Join-Path $stage 'app'
 $setupStage = Join-Path $stage 'setup'
 $dotnet = Get-Command dotnet -ErrorAction Stop
 
-& $dotnet.Source publish (Join-Path $projectRoot 'Nexo.Support/Nexo.Support.csproj') -c Release -r win-x64 --self-contained true '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=true' -o $appStage
+& $dotnet.Source publish (Join-Path $projectRoot 'Nexo.Support/Nexo.Support.csproj') -c Release -r win-x64 --self-contained true '-p:PublishSingleFile=true' -o $appStage
 if ($LASTEXITCODE -ne 0) { throw 'Falha ao compilar o aplicativo.' }
 if (!(Test-Path -LiteralPath (Join-Path $appStage 'Nexo.exe'))) { throw 'Nexo.exe ausente do build.' }
+foreach ($native in @('wpfgfx_cor3.dll', 'PresentationNative_cor3.dll')) {
+    if (!(Test-Path -LiteralPath (Join-Path $appStage $native) -PathType Leaf)) { throw "DLL nativa ausente ao lado do Nexo.exe: $native" }
+}
 [IO.Compression.ZipFile]::CreateFromDirectory($appStage, $appArchive, [IO.Compression.CompressionLevel]::Optimal, $false)
 
 & $dotnet.Source publish (Join-Path $projectRoot 'Nexo.Setup/Nexo.Setup.csproj') -c Release -r win-x64 --self-contained true '-p:PublishSingleFile=true' '-p:IncludeNativeLibrariesForSelfExtract=true' '-p:NexoPreview=true' -o $setupStage

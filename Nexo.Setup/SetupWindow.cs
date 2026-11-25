@@ -21,7 +21,7 @@ public sealed class SetupWindow : Window
     public SetupWindow(string[] args)
     {
         this.args = args;
-        Title = Installer.IsPreview ? "Instalação do Nexo 1.7.0 (prévia)" : "Instalação do Nexo";
+        Title = Installer.IsPreview ? "Instalação do Nexo (prévia)" : "Instalação do Nexo";
         Width = 590;
         Height = 490;
         MinWidth = MaxWidth = Width;
@@ -77,7 +77,7 @@ public sealed class SetupWindow : Window
         else if (page == 1)
         {
             heading.Text = "Pronto para instalar";
-            subheading.Text = Installer.IsPreview ? "O instalador vai baixar a prévia 1.7.0 e o modelo de IA." : "O instalador vai baixar a versão publicada e o modelo de IA.";
+            subheading.Text = Installer.IsPreview ? "O instalador vai baixar a prévia publicada e o modelo de IA." : "O instalador vai baixar a versão publicada e o modelo de IA.";
             content.Children.Add(heading); content.Children.Add(subheading);
             content.Children.Add(new TextBlock { Text = "Destino: " + System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Nexo")
                 + "\nAtalhos: menu Iniciar e Área de Trabalho."
